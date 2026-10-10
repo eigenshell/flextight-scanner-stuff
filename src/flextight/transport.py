@@ -77,6 +77,7 @@ class SGIOTransport:
     def __init__(self, fd: int):
         self.fd = fd
         self._bufs: tuple = ()
+        self._closed = False
 
     @classmethod
     def open(cls, path: str) -> "SGIOTransport":
@@ -85,6 +86,17 @@ class SGIOTransport:
         except OSError as e:
             raise TransportError(f"cannot open {path}: {e}") from e
         return cls(fd)
+
+    def close(self):
+        """Close the device fd; a second call is a no-op."""
+        if self._closed:
+            return
+        self._closed = True
+        os.close(self.fd)
+
+    def _check_open(self):
+        if self._closed:
+            raise TransportError("transport closed")
 
     def _build_header(self, cdb: bytes, dxfer_len: int, dxfer: str) -> _SgIoHdr:
         cdb_buf = ctypes.create_string_buffer(cdb.ljust(16, b"\0"), 16)
@@ -106,6 +118,7 @@ class SGIOTransport:
         return hdr
 
     def _exec(self, cdb: bytes, data: bytes | None, dxfer: str, expected_len: int):
+        self._check_open()
         hdr = self._build_header(cdb, len(data) if data is not None else expected_len, dxfer)
         if data is not None and dxfer == "to":
             self._bufs[1].raw = data

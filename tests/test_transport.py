@@ -200,3 +200,27 @@ class TestExecWithFakeIoctl:
         t = SGIOTransport(fd=-1)
         with pytest.raises(TransportError, match="empty payload"):
             t.cmd_out(b"\x2a", b"")
+
+
+class TestClose:
+    def test_close_closes_fd(self, monkeypatch):
+        closed = []
+        monkeypatch.setattr("flextight.transport.os.close", closed.append)
+        t = SGIOTransport(fd=7)
+        t.close()
+        assert closed == [7]
+
+    def test_double_close_is_noop(self, monkeypatch):
+        closed = []
+        monkeypatch.setattr("flextight.transport.os.close", closed.append)
+        t = SGIOTransport(fd=7)
+        t.close()
+        t.close()
+        assert closed == [7]
+
+    def test_cmd_after_close_raises(self, monkeypatch):
+        monkeypatch.setattr("flextight.transport.os.close", lambda fd: None)
+        t = SGIOTransport(fd=-1)
+        t.close()
+        with pytest.raises(TransportError, match="transport closed"):
+            t.cmd_none(bytes.fromhex("000000000000"))
