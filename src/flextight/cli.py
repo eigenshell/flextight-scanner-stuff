@@ -32,27 +32,33 @@ _STUB_MSG = "not implemented: requires protocol spec (Task 10, hardware-gated)"
 class _UsageError(Exception):
     """Bad invocation (unresolvable/malformed source): exit 2."""
 
-# Subcommands that need no transport.
-_TRANSPORTLESS = {"ls", "upload-firmware", "preview", "scan"}
-
 
 def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="flextight")
-    p.add_argument("--device", help="real scanner device node (e.g. /dev/sg0)")
-    p.add_argument("--script", help="JSON Step script to replay")
+    # Shared parent so --device/--script parse both before AND after the
+    # subcommand name.  SUPPRESS defaults are load-bearing: _SubParsersAction
+    # re-parses into a fresh namespace and copies every var back, so a plain
+    # None default here would clobber a flag given before the subcommand.
+    # With SUPPRESS the attribute is only set when the flag is present, and
+    # both positions share dests -> one env-default resolution path.
+    source = argparse.ArgumentParser(add_help=False)
+    source.add_argument("--device", default=argparse.SUPPRESS,
+                        help="real scanner device node (e.g. /dev/sg0)")
+    source.add_argument("--script", default=argparse.SUPPRESS,
+                        help="JSON Step script to replay")
+    p = argparse.ArgumentParser(prog="flextight", parents=[source])
     sub = p.add_subparsers(dest="subcommand", required=True)
-    sub.add_parser("ls", help="list /dev/sg* device nodes")
-    sub.add_parser("info", help="enumerate the scanner (INQUIRY)")
-    sub.add_parser("upload-firmware", help="upload scanner firmware (stub)")
-    sub.add_parser("preview", help="acquire a preview scan (stub)")
-    sub.add_parser("scan", help="acquire a scan (stub)")
+    sub.add_parser("ls", parents=[source], help="list /dev/sg* device nodes")
+    sub.add_parser("info", parents=[source], help="enumerate the scanner (INQUIRY)")
+    sub.add_parser("upload-firmware", parents=[source], help="upload scanner firmware (stub)")
+    sub.add_parser("preview", parents=[source], help="acquire a preview scan (stub)")
+    sub.add_parser("scan", parents=[source], help="acquire a scan (stub)")
     return p
 
 
 def _resolve_source(args) -> tuple[str, str]:
     """Return (kind, path) for the single configured transport source."""
-    device = args.device or os.environ.get("FLEXTIGHT_DEVICE")
-    script = args.script or os.environ.get("FLEXTIGHT_SCRIPT")
+    device = getattr(args, "device", None) or os.environ.get("FLEXTIGHT_DEVICE")
+    script = getattr(args, "script", None) or os.environ.get("FLEXTIGHT_SCRIPT")
     if device and script:
         raise _UsageError(
             "both --device/--script configured: exactly one transport "

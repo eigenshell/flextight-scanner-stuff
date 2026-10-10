@@ -38,6 +38,22 @@ def test_info_script_flag_overrides_env(monkeypatch, capsys, tmp_path):
     assert "IMACON" in capsys.readouterr().out
 
 
+def test_info_script_flag_after_subcommand(capsys):
+    assert main(["info", "--script", str(FIXTURE)]) == 0
+    assert "IMACON" in capsys.readouterr().out
+
+
+def test_flag_in_both_positions_later_wins(monkeypatch, capsys, tmp_path):
+    # Same flag in both positions with different values: the one AFTER the
+    # subcommand wins, because the subparser parses last into the same
+    # namespace. Pinned deliberately -- argparse behavior, not policy.
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"steps": [{"cdb": "120000002400", "direction": "in"}]}))
+    assert main(["--script", str(bad), "info", "--script", str(FIXTURE)]) == 0
+    assert "IMACON" in capsys.readouterr().out
+    assert main(["--script", str(FIXTURE), "info", "--script", str(bad)]) == 1
+
+
 def test_no_source_configured(capsys):
     assert main(["info"]) == 2
     err = capsys.readouterr().err
