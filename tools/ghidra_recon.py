@@ -1,4 +1,10 @@
-# Ghidra headless post-script: run with analyzeHeadless -postScript
+# Ghidra post-script: executed via PyGhidra run_script against the saved project
+# (analyzeHeadless -postScript does not work on this Ghidra 12.x install — see below
+# and the Reproduction section of docs/recon/static-recon.md):
+#   from pyghidra.core import run_script
+#   run_script(None, "tools/ghidra_recon.py", project_location="tools/ghidra_proj",
+#              project_name="fc403", analyze=False, program_name="FlexColor.dll",
+#              nested_project_location=False, install_dir="/opt/ghidra")
 # Enumerates functions whose (demangled) name matches SCSI/ASPI target
 # class names and dumps addresses as JSON on stdout.
 #
@@ -32,6 +38,7 @@ print(payload)
 
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _out_path = os.path.join(_repo_root, "tools", "ghidra_out", "recon_json.txt")
+os.makedirs(os.path.dirname(_out_path), exist_ok=True)
 with open(_out_path, "w") as fh:
     fh.write(payload + "\n")
 print("RECON_WRITTEN " + _out_path)
