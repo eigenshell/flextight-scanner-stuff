@@ -138,13 +138,21 @@ def main(argv=None) -> int:
     transport = None
     try:
         if args.subcommand == "ls":
-            return _cmd_ls()
-        if args.subcommand in ("upload-firmware", "preview", "scan"):
-            return _err(2, _STUB_MSG)
-        transport = _make_transport(args)
-        if args.subcommand == "info":
-            return _cmd_info(transport)
-        raise AssertionError(f"unhandled subcommand {args.subcommand}")
+            code = _cmd_ls()
+        elif args.subcommand in ("upload-firmware", "preview", "scan"):
+            code = _err(2, _STUB_MSG)
+        else:
+            transport = _make_transport(args)
+            if args.subcommand == "info":
+                code = _cmd_info(transport)
+            else:
+                raise AssertionError(f"unhandled subcommand {args.subcommand}")
+        # Flush while the handler below can still see it: block-buffered
+        # stdout (any pipe) defers raw writes to interpreter shutdown,
+        # where EPIPE would surface as "Exception ignored" noise and a
+        # 120 exit instead of our clean 130.
+        sys.stdout.flush()
+        return code
     except _UsageError as e:
         return _err(2, str(e))
     except TransportError as e:

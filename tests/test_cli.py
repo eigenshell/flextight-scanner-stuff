@@ -167,6 +167,33 @@ def test_broken_pipe_maps_to_130(monkeypatch, capsys):
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_real_pipe_epipe_subprocess(tmp_path):
+    # Buffered stdout defers raw writes to interpreter shutdown, where
+    # EPIPE escapes main's handler (exit 120 + "Exception ignored" noise).
+    # The driver parks 4 KB in the pipe buffer (no raw write yet), then
+    # main's own flush forces the write into a readerless pipe: EPIPE
+    # must surface inside main's try and map to a clean 130.
+    driver = tmp_path / "driver.py"
+    driver.write_text(
+        "import sys\n"
+        "from flextight.cli import main\n"
+        "sys.stdout.write('x' * 4096)  # fits the block buffer; no raw write yet\n"
+        "raise SystemExit(main(['ls']))\n"
+    )
+    src = str(Path(__file__).parents[1] / "src")
+    env = dict(os.environ, PYTHONPATH=src)
+    proc = subprocess.Popen(
+        [sys.executable, str(driver)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    proc.stdout.close()  # no reader on the pipe
+    _, err = proc.communicate()
+    assert proc.returncode == 130
+    assert b"Exception ignored" not in err
+
+
 def test_main_module_subprocess_smoke():
     src = str(Path(__file__).parents[1] / "src")
     env = dict(os.environ, PYTHONPATH=src)
