@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 SG_IO = 0x2285
 
-SG_DXFER_NONE = 0
+SG_DXFER_NONE = -1
 SG_DXFER_TO_DEV = -2
 SG_DXFER_FROM_DEV = -3
 
@@ -110,10 +110,14 @@ class SGIOTransport:
         if data is not None and dxfer == "to":
             self._bufs[1].raw = data
         buf = bytearray(ctypes.string_at(ctypes.byref(hdr), ctypes.sizeof(hdr)))
-        fcntl.ioctl(self.fd, SG_IO, buf, True)  # mutate=True: kernel writes status back
+        try:
+            fcntl.ioctl(self.fd, SG_IO, buf, True)  # mutate=True: kernel writes status back
+        except OSError as e:
+            raise TransportError(f"SG_IO ioctl failed: errno {e.errno} ({e.strerror})") from e
         ctypes.memmove(ctypes.byref(hdr), bytes(buf), ctypes.sizeof(hdr))
 
-        sense = self._bufs[2].raw
+        # sb_len_wr is kernel-written; fall back to the full sense buffer
+        sense = self._bufs[2].raw[: hdr.sb_len_wr or _SENSE_LEN]
         if hdr.host_status or hdr.driver_status:
             raise TransportError(
                 f"SG_IO host_status={hdr.host_status} driver_status={hdr.driver_status} "
@@ -121,8 +125,13 @@ class SGIOTransport:
             )
         if hdr.status != 0:
             raise TransportError(f"SCSI status {hdr.status} sense={sense.hex()}")
-
         if dxfer == "from":
+            if hdr.resid != 0:
+                # A short read must never silently zero-fill scan data; relax
+                # per-command only if hardware captures show a legit short read.
+                raise TransportError(
+                    f"short read: resid={hdr.resid} of requested {expected_len}"
+                )
             return self._bufs[1].raw[:expected_len]
         return None
 
@@ -130,6 +139,8 @@ class SGIOTransport:
         return self._exec(_norm_cdb(cdb), None, "from", length)
 
     def cmd_out(self, cdb: bytes | str, data: bytes):
+        if not data:
+            raise TransportError("empty payload for cmd_out")
         return self._exec(_norm_cdb(cdb), data, "to", len(data))
 
     def cmd_none(self, cdb: bytes | str):
@@ -138,12 +149,23 @@ class SGIOTransport:
 
 @dataclass
 class Step:
-    """One expected command in a FakeTransport script."""
+    """One expected command in a FakeTransport script.
+
+    ``cdb`` accepts bytes or a hex string (normalized in ``__post_init__``).
+    ``response`` is the data an "in" command returns; ``status`` is the SCSI
+    status byte (0 = good).  ``data`` is the expected payload of an "out"
+    command; empty means "don't check the payload".
+    """
 
     cdb: bytes
     direction: str  # "in" | "out" | "none"
     response: bytes = b""
-    status: int = 0  # SCSI status byte; 0 = good
+    status: int = 0
+    data: bytes = b""
+
+    def __post_init__(self):
+        if isinstance(self.cdb, str):
+            self.cdb = bytes.fromhex(self.cdb)
 
 
 class FakeTransport:
@@ -155,46 +177,56 @@ class FakeTransport:
 
     @classmethod
     def from_script(cls, steps: list[Step]) -> "FakeTransport":
+        # Thin on purpose: future trace-derived loaders will be separate
+        # classmethods building Step lists from pinned capture formats.
         return cls(steps)
 
-    def _next(self, cdb_bytes: bytes) -> Step:
+    def _next(self, cdb_bytes: bytes, direction: str) -> Step:
+        """Consume and return the next step, checking cdb, status, direction.
+
+        Contract: ANY failure (exhaustion, cdb mismatch, non-zero status,
+        direction mismatch) consumes the step -- there is no retry.  A
+        caught TransportError therefore leaves the script positioned after
+        the failed step, consistent with how real hardware would have
+        executed it.
+        """
         if self._pos >= len(self._steps):
             raise TransportError(
-                f"script exhausted at command {cdb_bytes.hex()}"
+                f"script exhausted at command {cdb_bytes.hex()} "
+                f"(script length {len(self._steps)})"
             )
-        step = self._steps[self._pos]
+        idx = self._pos
+        step = self._steps[idx]
         self._pos += 1
         if step.cdb != cdb_bytes:
             raise TransportError(
-                f"script mismatch: expected {step.cdb.hex()}, got {cdb_bytes.hex()}"
+                f"script mismatch at step {idx}: expected {step.cdb.hex()}, "
+                f"got {cdb_bytes.hex()}"
             )
         if step.status != 0:
-            raise TransportError(f"step failed with SCSI status {step.status}")
+            raise TransportError(f"step {idx} failed with SCSI status {step.status}")
+        if step.direction != direction:
+            raise TransportError(
+                f"script mismatch at step {idx}: expected direction "
+                f"{step.direction!r}, got {direction!r}"
+            )
         return step
 
     def cmd_in(self, cdb: bytes | str, length: int) -> bytes:
-        step = self._next(_norm_cdb(cdb))
-        if step.direction != "in":
-            raise TransportError(
-                f"script mismatch: expected direction {step.direction}, got in"
-            )
+        step = self._next(_norm_cdb(cdb), "in")
         resp = step.response
         if len(resp) < length:
             resp = resp + b"\0" * (length - len(resp))
         return resp[:length]
 
     def cmd_out(self, cdb: bytes | str, data: bytes):
-        step = self._next(_norm_cdb(cdb))
-        if step.direction != "out":
+        step = self._next(_norm_cdb(cdb), "out")
+        if step.data and step.data != data:
             raise TransportError(
-                f"script mismatch: expected direction {step.direction}, got out"
+                f"script data mismatch: expected {step.data.hex()}, got {data.hex()}"
             )
         return None
 
     def cmd_none(self, cdb: bytes | str):
-        step = self._next(_norm_cdb(cdb))
-        if step.direction != "none":
-            raise TransportError(
-                f"script mismatch: expected direction {step.direction}, got none"
-            )
+        self._next(_norm_cdb(cdb), "none")
         return None

@@ -64,7 +64,8 @@ class TestBuildHeader:
     def test_build_header_directions(self):
         t = SGIOTransport(fd=-1)
         assert t._build_header(b"\0" * 6, 0, "to").dxfer_direction == -2
-        assert t._build_header(b"\0" * 6, 0, "none").dxfer_direction == 0
+        # sg.h:73 -- SG_DXFER_NONE is -1, not 0.
+        assert t._build_header(b"\0" * 6, 0, "none").dxfer_direction == -1
 
 
 class TestFakeTransport:
@@ -109,3 +110,93 @@ class TestFakeTransport:
         assert padded == b"abc\0\0\0"
         truncated = t.cmd_in(b"\x02", 3)
         assert truncated == b"abc"
+
+    def test_fake_out_payload_assert(self):
+        t = FakeTransport([Step(b"\x2a", "out", data=bytes.fromhex("deadbeef"))])
+        assert t.cmd_out(b"\x2a", bytes.fromhex("deadbeef")) is None
+        t = FakeTransport([Step(b"\x2a", "out", data=bytes.fromhex("deadbeef"))])
+        with pytest.raises(TransportError) as excinfo:
+            t.cmd_out(b"\x2a", bytes.fromhex("cafe"))
+        msg = str(excinfo.value)
+        assert "deadbeef" in msg
+        assert "cafe" in msg
+
+    def test_fake_out_payload_not_checked_when_empty(self):
+        t = FakeTransport([Step(b"\x2a", "out")])
+        assert t.cmd_out(b"\x2a", b"anything") is None
+
+    def test_step_cdb_accepts_hex_string(self):
+        step = Step("120000002400", "in", response=b"x")
+        assert step.cdb == bytes.fromhex("120000002400")
+        t = FakeTransport([step])
+        assert t.cmd_in("120000002400", 1) == b"x"
+
+
+class TestExecWithFakeIoctl:
+    """Exercise _exec end-to-end with fcntl.ioctl monkeypatched.
+
+    The fake writes kernel-style output fields into the serialized header
+    bytearray: status at offset 64, sb_len_wr at 67, host_status at 68,
+    resid at 72 (all little-endian, per the _SgIoHdr layout pins above).
+    """
+
+    @staticmethod
+    def _patch_ioctl(monkeypatch, writer):
+        def fake_ioctl(fd, request, buf, mutate=False):
+            assert mutate is True, "ioctl must be called with mutate=True"
+            writer(buf)
+            return 0
+
+        monkeypatch.setattr("flextight.transport.fcntl.ioctl", fake_ioctl)
+
+    def test_exec_good_status_returns_data(self, monkeypatch):
+        self._patch_ioctl(monkeypatch, lambda buf: buf.__setitem__(64, 0))
+        t = SGIOTransport(fd=-1)
+        result = t.cmd_in(bytes.fromhex("120000002400"), 36)
+        assert result == b"\0" * 36
+
+    def test_exec_scsi_status_error(self, monkeypatch):
+        self._patch_ioctl(monkeypatch, lambda buf: buf.__setitem__(64, 2))
+        t = SGIOTransport(fd=-1)
+        with pytest.raises(TransportError) as excinfo:
+            t.cmd_in(bytes.fromhex("120000002400"), 36)
+        msg = str(excinfo.value)
+        assert "status 2" in msg
+        assert "sense" in msg
+
+    def test_exec_host_status_error(self, monkeypatch):
+        def writer(buf):
+            buf[64] = 0  # status GOOD
+            buf[68] = 1  # host_status (ushort LE)
+
+        self._patch_ioctl(monkeypatch, writer)
+        t = SGIOTransport(fd=-1)
+        with pytest.raises(TransportError, match="host_status=1"):
+            t.cmd_in(bytes.fromhex("120000002400"), 36)
+
+    def test_exec_resid_raises(self, monkeypatch):
+        def writer(buf):
+            buf[64] = 0  # status GOOD
+            buf[72:76] = (4).to_bytes(4, "little")  # resid
+
+        self._patch_ioctl(monkeypatch, writer)
+        t = SGIOTransport(fd=-1)
+        with pytest.raises(TransportError, match="resid=4"):
+            t.cmd_in(bytes.fromhex("120000002400"), 36)
+
+    def test_exec_ioctl_oserror_wrapped(self, monkeypatch):
+        def fake_ioctl(fd, request, buf, mutate=False):
+            raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr("flextight.transport.fcntl.ioctl", fake_ioctl)
+        t = SGIOTransport(fd=-1)
+        with pytest.raises(TransportError) as excinfo:
+            t.cmd_none(bytes.fromhex("000000000000"))
+        msg = str(excinfo.value)
+        assert "errno" in msg
+        assert "9" in msg
+
+    def test_cmd_out_rejects_empty_payload(self):
+        t = SGIOTransport(fd=-1)
+        with pytest.raises(TransportError, match="empty payload"):
+            t.cmd_out(b"\x2a", b"")
