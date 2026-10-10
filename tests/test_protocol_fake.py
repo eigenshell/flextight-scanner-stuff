@@ -37,14 +37,38 @@ def test_enumerate_against_fake():
     assert info["vendor"] == "IMACON"
     assert "FlexTight" in info["model"]
     assert info["rev"] == "1.00"
+    assert info["pdt"] == 0x06
     assert s.state == "enumerated"
 
 
-def test_enumerate_consumes_script():
+def test_enumerate_twice_raises():
+    """Second enumerate() is rejected by the state guard before any command.
+
+    Previously this raised "script exhausted" from the fake; the strict
+    state guard now fires first ("scanner already enumerated") -- on real
+    hardware the unit would silently stay ready, which is exactly the
+    divergence the guard exists to prevent.  Script exhaustion itself is
+    covered in tests/test_transport.py.
+    """
     s = Scanner(FakeTransport.from_script(_enum_script()))
     s.enumerate()
-    with pytest.raises(TransportError, match="exhausted"):
+    with pytest.raises(TransportError, match="already enumerated"):
         s.enumerate()
+
+
+def test_scanner_close_delegates():
+    closed = []
+    fake = FakeTransport.from_script([])
+    fake.close = lambda: closed.append(True)
+    Scanner(fake).close()
+    assert closed == [True]
+
+
+def test_scanner_close_tolerates_transport_without_close():
+    class Bare:  # duck-typed transport with no close()
+        pass
+
+    Scanner(Bare()).close()  # must not raise
 
 
 def test_enumerate_model_acceptance():
@@ -58,6 +82,13 @@ def test_enumerate_model_acceptance():
 
 
 class TestProtocolConstants:
+    def test_cdb_test_unit_ready_pinned(self):
+        # Pinned literal: other tests match Step expectations against this
+        # same constant, which would hide a length bug on both sides.
+        assert protocol.CDB_TEST_UNIT_READY == bytes.fromhex("000000000000")
+        # Legal SCSI CDB lengths are 6/10/12/16; TUR is a 6-byte command.
+        assert len(protocol.CDB_TEST_UNIT_READY) == 6
+
     def test_cdb_inquiry_default(self):
         assert protocol.CDB_INQUIRY() == bytes.fromhex("120000002400")
 

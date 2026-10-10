@@ -5,7 +5,7 @@ tables arrive with the spec.
 """
 
 # TEST UNIT READY: 6-byte CDB, all zero.
-CDB_TEST_UNIT_READY = bytes.fromhex("00000000000000")
+CDB_TEST_UNIT_READY = bytes.fromhex("000000000000")
 
 # Standard INQUIRY allocation length (enough for vendor/product/rev fields).
 INQUIRY_ALLOC_LEN = 36

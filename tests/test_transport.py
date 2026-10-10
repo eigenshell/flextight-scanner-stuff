@@ -224,3 +224,13 @@ class TestClose:
         t.close()
         with pytest.raises(TransportError, match="transport closed"):
             t.cmd_none(bytes.fromhex("000000000000"))
+
+    def test_close_oserror_wrapped_and_retryable(self, monkeypatch):
+        def boom(fd):
+            raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr("flextight.transport.os.close", boom)
+        t = SGIOTransport(fd=7)
+        with pytest.raises(TransportError, match="cannot close"):
+            t.close()
+        assert t._closed is False  # failed close leaves the fd retryable

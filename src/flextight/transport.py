@@ -88,11 +88,18 @@ class SGIOTransport:
         return cls(fd)
 
     def close(self):
-        """Close the device fd; a second call is a no-op."""
+        """Close the device fd; a second call is a no-op.
+
+        A failed close leaves the transport open so the caller can retry;
+        only a successful os.close sets _closed.
+        """
         if self._closed:
             return
+        try:
+            os.close(self.fd)
+        except OSError as e:
+            raise TransportError(f"cannot close fd {self.fd}: {e}") from e
         self._closed = True
-        os.close(self.fd)
 
     def _check_open(self):
         if self._closed:
@@ -243,4 +250,8 @@ class FakeTransport:
 
     def cmd_none(self, cdb: bytes | str):
         self._next(_norm_cdb(cdb), "none")
+        return None
+
+    def close(self):
+        """No-op: the fake owns no resources, but Scanner.close() delegates."""
         return None

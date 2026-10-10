@@ -34,3 +34,4 @@ def test_hardware_enumerate():
         t.close()
     assert info["vendor"].strip() in ("IMACON", "HASSELBLAD"), info
     assert "Precision" in info["model"] or "FlexTight" in info["model"], info
+    assert info["pdt"] == 0x06, info  # 0x06 = scanner peripheral device type
