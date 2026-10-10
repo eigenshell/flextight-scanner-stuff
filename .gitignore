@@ -1,0 +1,18 @@
+# vendor binaries / installers (GB-scale, re-obtainable)
+fc403_eng/
+fc4891win/
+FlexColor-4.0.4-Installer/
+flexcolor-4.8.13-installer/
+extracted/
+*.cab
+*.pkg
+
+# tool build trees
+tools/*-src/
+tools/unshield-build/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
