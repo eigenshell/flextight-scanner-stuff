@@ -204,3 +204,36 @@ def test_opcode_names_expected_entries():
     assert OPCODE_NAMES[0x00] == "TEST_UNIT_READY"
     assert OPCODE_NAMES[0x12] == "INQUIRY"
     assert OPCODE_NAMES[0xD0] == "Boot"
+
+
+def test_crlf_line_endings_parse_identically(tmp_path):
+    lf_path = write_trace(
+        tmp_path,
+        [
+            '{"tag":"hook_loaded"}',
+            '{"h":"0x1c","code":"0x2a002c","in_len":14,'
+            '"in_head":"12000000600000","ok":1,"out_len":96,'
+            '"out_head":"494d41434f4e"}',
+        ],
+    )
+    crlf_path = tmp_path / "trace_crlf.jsonl"
+    crlf_path.write_bytes(open(lf_path, "rb").read().replace(b"\n", b"\r\n"))
+    assert load(str(crlf_path)) == load(lf_path)
+
+
+def test_in_len_exceeds_in_head_length_preserved(tmp_path):
+    # in_len reports the FULL transfer; in_head is capped at 64 bytes.
+    # Both values must survive loading intact — no "helpful" validation.
+    path = write_trace(
+        tmp_path,
+        [
+            '{"h":"0x1c","code":"0x2a002c","in_len":300,'
+            '"in_head":"12000000600000","ok":1,"out_len":4096,'
+            '"out_head":"494d41434f4e"}'
+        ],
+    )
+    r = load(path)[0]
+    assert r.in_len == 300
+    assert len(r.in_head) == 7
+    assert r.out_len == 4096
+    assert len(r.out_head) == 6
