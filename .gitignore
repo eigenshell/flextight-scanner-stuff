@@ -16,3 +16,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+
+# Ghidra recon artifacts
+tools/ghidra_proj/
+tools/ghidra_out/
