@@ -20,3 +20,4 @@ __pycache__/
 # Ghidra recon artifacts
 tools/ghidra_proj/
 tools/ghidra_out/
+.venv/
