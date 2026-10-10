@@ -30,7 +30,6 @@ import pytest
 
 from flextight.fff import write_fff
 from tools.xml2dtstyle import (
-    BLENDOP_VERSION,
     ProfileError,
     build_plugins,
     convert_directory,
@@ -224,8 +223,13 @@ def test_colorbalancergb_params():
     p = parse_profile(PORTRA)
     plugins = _plugins_by_op(build_plugins(p))
     blob = plugins["colorbalancergb"].op_params
-    assert len(blob) == 128  # 32 floats
-    fields = struct.unpack("<32f", blob)
+    # 32 floats + trailing v5 saturation_formula enum = 132 bytes. A
+    # 128-byte blob is silently rejected by darktable (params_size
+    # mismatch) and the module runs defaults — saturation lost.
+    assert len(blob) == 132
+    fields = struct.unpack("<32f", blob[:128])
+    saturation_formula = struct.unpack("<i", blob[128:132])[0]
+    assert saturation_formula == 1  # DT_COLORBALANCE_SATURATION_DTUCS
     # saturation_global is field index 19 (0-based) in the pinned v5 order
     assert fields[19] == 0.15000000596046448  # 0.15 as C float
     # non-zero defaults: shadows_weight=1.0 (12), highlights_weight=1.0 (14),
@@ -270,11 +274,15 @@ def test_dtstyle_xml_structure():
     info = root.find("info")
     assert info.find("name").text == "Ilford_HP5_Plus_400"
     ops = [el.find("operation").text for el in root.find("style")]
+    # Emission mirrors the default iop order (src/common/iop_order.c @
+    # darktable-5.6.x: profile_gamma 25.0, colorbalancergb 33.5,
+    # rgblevels 50.2, rgbcurve 50.5, sharpen 53.0); darktable re-resolves
+    # iop_order at apply time, so this order is cosmetic.
     assert ops == [
         "profile_gamma",
+        "colorbalancergb",
         "rgblevels",
         "rgbcurve",
-        "colorbalancergb",
         "sharpen",
     ]
     # base64 in the XML decodes to the same bytes the encoder produced —
@@ -283,7 +291,7 @@ def test_dtstyle_xml_structure():
         if el.find("operation").text == "sharpen":
             blob = base64.b64decode(el.find("op_params").text)
             assert struct.unpack("<3f", blob)[1] == 0.47999998927116394
-            assert int(el.find("blendop_version").text) == BLENDOP_VERSION == 14
+            assert int(el.find("blendop_version").text) == 14  # DEVELOP_BLEND_VERSION @5.6.2
             blend = base64.b64decode(el.find("blendop_params").text)
             assert len(blend) == 420
 
@@ -436,6 +444,38 @@ def darktable_config(tmp_path_factory):
     return cfg, input_tif
 
 
+def _decode_tiff_pixels(path):
+    """Decode the pixel strips of a darktable-exported TIFF.
+
+    darktable embeds a fresh ICC profile whose bytes are not reproducible
+    across runs, so whole-file comparison is unsound; pixels are compared
+    instead. The acceptance tests export uncompressed-input 8-bit RGB via
+    Zip-compressed strips, which this decodes with the stdlib only.
+    """
+    import struct
+    import zlib
+
+    data = path.read_bytes()
+    ifd = struct.unpack("<I", data[4:8])[0]
+    n = struct.unpack("<H", data[ifd:ifd + 2])[0]
+    tags = {}
+    for i in range(n):
+        tag, typ, cnt, val = struct.unpack(
+            "<HHII", data[ifd + 2 + 12 * i:ifd + 14 + 12 * i])
+        tags[tag] = (typ, cnt, val)
+    assert tags[259][2] == 8, "test expects Zip-compressed strips"  # Compression
+    nstrips = tags[279][1]  # StripByteCounts count == strip count
+    if tags[273][1] == 1:  # StripOffsets
+        offs, counts = (tags[273][2],), (tags[279][2],)
+    else:
+        offs = struct.unpack(f"<{nstrips}I",
+                             data[tags[273][2]:tags[273][2] + 4 * nstrips])
+        counts = struct.unpack(f"<{nstrips}I",
+                               data[tags[279][2]:tags[279][2] + 4 * nstrips])
+    return b"".join(zlib.decompress(data[o:o + c])
+                    for o, c in zip(offs, counts))
+
+
 def _style_cases():
     cases = [
         ("portra", PORTRA),
@@ -467,5 +507,32 @@ def test_darktable_cli_applies_style(darktable_config, label, profile_path):
     stderr = proc.stderr.decode(errors="replace")
     assert "cannot find the style" not in stderr
     # The style must actually alter the pixels — not merely apply cleanly.
-    unstyled = (cfg / "init_out.tif").read_bytes()
-    assert out.read_bytes() != unstyled
+    # (Whole-file comparison is unsound: darktable's embedded ICC profile
+    # differs byte-wise between any two exports.)
+    assert _decode_tiff_pixels(out) != _decode_tiff_pixels(cfg / "init_out.tif")
+
+
+@pytest.mark.skipif(not DT_CLI, reason="darktable-cli not installed")
+def test_darktable_cli_saturation_differs(darktable_config):
+    """Two styles differing ONLY in Saturation must produce different
+    exports. This pins the colorbalancergb blob end-to-end: a params blob
+    darktable silently rejects (e.g. the old 128-byte blob without the v5
+    saturation_formula tail) makes saturation a no-op and this test fails.
+    """
+    cfg, input_tif = darktable_config
+    outputs = []
+    for saturation, tag in ((0, "sat0"), (100, "sat100")):
+        profile = parse_profile(PORTRA)
+        profile.saturation = saturation
+        xml_bytes, _ = profile_to_dtstyle(profile, name=f"sat_{tag}")
+        style_name = _seed_style(cfg / "data.db", xml_bytes)
+        out = cfg / f"out_{tag}.tif"
+        proc = subprocess.run(
+            [DT_CLI, str(input_tif), str(out), "--style", style_name,
+             "--core", "--configdir", str(cfg)],
+            capture_output=True,
+            timeout=180,
+        )
+        assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+        outputs.append(_decode_tiff_pixels(out))
+    assert outputs[0] != outputs[1]

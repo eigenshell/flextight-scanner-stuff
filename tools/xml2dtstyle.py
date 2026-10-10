@@ -18,11 +18,14 @@ dt_iop_*_params_t definition; the struct field order is quoted in the
 encoder docstrings. Do not reorder fields without re-reading the source.
 
 Module set chosen for darktable 5.6.2 (all are in the default iop order, so
-a style without an iop_list slots correctly):
+a style without an iop_list slots correctly; emission order mirrors that
+order — profile_gamma 25.0, colorbalancergb 33.5, rgblevels 50.2,
+rgbcurve 50.5, sharpen 53.0 per src/common/iop_order.c — but the XML order
+is cosmetic since darktable re-resolves iop_order at apply time):
   profile_gamma  (v2)  FlexColor Gamma          → gamma encode, exponent 1/gamma
+  colorbalancergb(v5)  Saturation               → global saturation slider
   rgblevels      (v1)  Highlight/Shadow codes   → per-channel black/white points
   rgbcurve       (v1)  Gradations[0] master     → linked-channel tone curve
-  colorbalancergb(v5)  Saturation               → global saturation slider
   sharpen        (v1)  USM (negative amounts)   → unsharp mask
 
 Pinned ASSUMPTIONS (evidence in docs/recon/film-profiles.md; each is a
@@ -121,7 +124,11 @@ DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS = 1
 PROFILEGAMMA_GAMMA = 1
 
 # src/iop/colorbalancergb.c: field order of dt_iop_colorbalancergb_params_t
-# (32 floats, DT_MODULE_INTROSPECTION(5)).
+# (32 floats, DT_MODULE_INTROSPECTION(5)) PLUS the trailing v5 enum
+# dt_iop_colorbalancrgb_saturation_t saturation_formula (4 bytes,
+# $DEFAULT 1 = DT_COLORBALANCE_SATURATION_DTUCS). The blob is 132 bytes;
+# omitting the enum makes darktable reject the blob for params_size
+# mismatch and silently run module defaults (styles.c apply path).
 _COLORBALANCERGB_FIELDS = (
     "shadows_Y shadows_C shadows_H midtones_Y midtones_C midtones_H "
     "highlights_Y highlights_C highlights_H global_Y global_C global_H "
@@ -131,6 +138,7 @@ _COLORBALANCERGB_FIELDS = (
     "hue_angle brilliance_global brilliance_highlights brilliance_midtones "
     "brilliance_shadows mask_grey_fulcrum vibrance grey_fulcrum contrast"
 ).split()
+DT_COLORBALANCE_SATURATION_DTUCS = 1  # saturation_formula default (v5 tail)
 # $DEFAULT values for the non-zero fields; all others default to 0.0.
 _COLORBALANCERGB_DEFAULTS = {
     "shadows_weight": 1.0,
@@ -473,9 +481,10 @@ def encode_rgbcurve(points: list[CurvePoint]) -> bytes:
 
 
 def encode_colorbalancergb(saturation: int) -> bytes:
-    """dt_iop_colorbalancergb_params_t (src/iop/colorbalancergb.c, v5, 128 bytes).
+    """dt_iop_colorbalancergb_params_t (src/iop/colorbalancergb.c, v5, 132 bytes).
 
-    32 floats in the declaration order pinned in _COLORBALANCERGB_FIELDS;
+    32 floats in the declaration order pinned in _COLORBALANCERGB_FIELDS,
+    followed by the v5 saturation_formula enum (4 bytes, default DTUCS);
     only saturation_global is driven (FlexColor Saturation / 100).
     """
     values = {
@@ -483,7 +492,11 @@ def encode_colorbalancergb(saturation: int) -> bytes:
         for name in _COLORBALANCERGB_FIELDS
     }
     values["saturation_global"] = saturation / 100.0
-    return struct.pack("<32f", *(values[name] for name in _COLORBALANCERGB_FIELDS))
+    return struct.pack(
+        "<32f i",
+        *(values[name] for name in _COLORBALANCERGB_FIELDS),
+        DT_COLORBALANCE_SATURATION_DTUCS,
+    )
 
 
 def encode_sharpen(amount: int, radius: int, noise_limit: int) -> bytes:
@@ -506,10 +519,14 @@ def encode_sharpen(amount: int, radius: int, noise_limit: int) -> bytes:
 def build_plugins(profile: FilmProfile) -> list[StylePlugin]:
     """Translate a profile into the ordered list of style plugin entries.
 
-    Order follows darktable's default iop order (profile_gamma → rgblevels →
-    rgbcurve → colorbalancergb → sharpen; src/common/iop_order.c) so the
-    style applies without an iop_list. The FlexColor apply-flags gate the
-    corresponding modules; all shipped profiles set them true.
+    Emission order mirrors darktable's default iop order (src/common/
+    iop_order.c @ darktable-5.6.x): profile_gamma 25.0, colorbalancergb
+    33.5, rgblevels 50.2, rgbcurve 50.5, sharpen 53.0. This is cosmetic —
+    darktable re-resolves each item's iop_order from the pipeline when a
+    style is applied (dt_ioppr_update_for_style_items); the load-bearing
+    ordering fact is only that profile_gamma precedes the curves. The
+    FlexColor apply-flags gate the corresponding modules; all shipped
+    profiles set them true.
     """
     plugins: list[StylePlugin] = []
     blend = default_blendop_params()
@@ -527,6 +544,7 @@ def build_plugins(profile: FilmProfile) -> list[StylePlugin]:
         )
 
     add("profile_gamma", encode_profilegamma(profile.gamma))
+    add("colorbalancergb", encode_colorbalancergb(profile.saturation))
     add(
         "rgblevels",
         encode_rgblevels(profile.highlight, profile.shadow),
@@ -537,7 +555,6 @@ def build_plugins(profile: FilmProfile) -> list[StylePlugin]:
         encode_rgbcurve(profile.gradations[GRADATION_MASTER]),
         enabled=profile.apply_curves,
     )
-    add("colorbalancergb", encode_colorbalancergb(profile.saturation))
     add(
         "sharpen",
         encode_sharpen(profile.usm_amount, profile.usm_radius, profile.usm_noise_limit),
