@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 flextight = "flextight.cli:main"
 
 [project.optional-dependencies]
-test = ["rawpy"]
+test = ["rawpy", "numpy"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

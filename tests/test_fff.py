@@ -7,6 +7,7 @@ for the generic TIFF structure, LibRaw source for the FFF-specific
 requirements (see docs/recon/fff-format.md).
 """
 
+import io
 import struct
 
 import numpy as np
@@ -30,8 +31,6 @@ def gradient_pixels(w=W, h=H):
 
 
 def write_to_bytes(pix, w, h, **kwargs):
-    import io
-
     buf = io.BytesIO()
     write_fff(buf, pix, w, h, **kwargs)
     return buf.getvalue()
@@ -131,13 +130,36 @@ def test_make_model_ascii_entries():
 
 
 def test_rotation_stored_in_meta_block():
-    blob = write_to_bytes(
-        gradient_pixels().tobytes(), W, H, metadata={"rotation": 90}
+    # LibRaw: flip = (get2() >> 7) * 90 -> rotation/90 stored at bit 7 and up.
+    for rotation, expected in ((0, 0), (90, 1 << 7), (180, 2 << 7), (270, 3 << 7)):
+        blob = write_to_bytes(
+            gradient_pixels().tobytes(), W, H, metadata={"rotation": rotation}
+        )
+        _, entries = parse_ifd(blob)
+        meta_off = {e[0]: e for e in entries}[46274][3]
+        assert struct.unpack_from("<H", blob, meta_off + 242) == (expected,)
+
+
+def test_make_only_and_model_only_metadata():
+    _, entries = parse_ifd(
+        write_to_bytes(
+            gradient_pixels().tobytes(), W, H, metadata={"make": "Imacon"}
+        )
     )
-    _, entries = parse_ifd(blob)
-    meta_off = {e[0]: e for e in entries}[46274][3]
-    # LibRaw: flip = (get2() >> 7) * 90 -> 90 degrees = 1 << 7.
-    assert struct.unpack_from("<H", blob, meta_off + 242) == (1 << 7,)
+    tags = [e[0] for e in entries]
+    assert 271 in tags
+    assert 272 not in tags
+    _, entries = parse_ifd(
+        write_to_bytes(
+            gradient_pixels().tobytes(),
+            W,
+            H,
+            metadata={"model": "Flextight Precision II"},
+        )
+    )
+    tags = [e[0] for e in entries]
+    assert 272 in tags
+    assert 271 not in tags
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +169,6 @@ def test_rotation_stored_in_meta_block():
 
 def test_rawpy_roundtrip_gradient():
     pix = gradient_pixels()
-    import io
-
     buf = io.BytesIO()
     write_fff(buf, pix.tobytes(), W, H)
     buf.seek(0)
@@ -171,10 +191,8 @@ def test_rawpy_roundtrip_random_odd_dimensions():
     w, h = 63, 47  # odd, non-multiple-of-4
     rng = np.random.default_rng(1234)
     pix = rng.integers(0, 65536, size=(h, w, 3), dtype=np.uint16)
-    import io
-
     buf = io.BytesIO()
-    write_fff(buf, pix, w, h)  # numpy array input
+    write_fff(buf, pix, w, h)  # numpy (h, w, 3) array input
     buf.seek(0)
     with rawpy.imread(buf) as raw:
         assert raw.sizes.raw_width == w
@@ -185,18 +203,17 @@ def test_rawpy_roundtrip_random_odd_dimensions():
 def test_rawpy_roundtrip_from_path(tmp_path):
     pix = gradient_pixels()
     path = tmp_path / "scan.fff"
-    write_fff(str(path), pix.tobytes(), W, H)
+    write_fff(path, pix.tobytes(), W, H)  # os.PathLike dispatch
     with rawpy.imread(str(path)) as raw:
         np.testing.assert_array_equal(raw.raw_image[:, :, :3], pix)
 
 
 def test_libraw_minimum_dimension_conformance():
-    # Documented LibRaw limit (open.cpp): raw_width/raw_height must be >= 22.
-    # The writer still produces a well-formed file; LibRaw refuses it.
+    # Documented LibRaw limit (identify.cpp): raw_width/raw_height must be
+    # >= 22 (and <= 64000). The writer still produces a well-formed file;
+    # LibRaw refuses it.
     w = h = 16
     pix = np.zeros((h, w, 3), dtype=np.uint16)
-    import io
-
     buf = io.BytesIO()
     write_fff(buf, pix, w, h)
     buf.seek(0)
@@ -241,6 +258,22 @@ def test_rejects_wrong_pixel_buffer_length():
         write_fff(_sink(), np.zeros(W * H * 3 - 1, dtype=np.uint16), W, H)
 
 
+def test_numpy_shape_validation():
+    flat = gradient_pixels().reshape(-1)  # accepted: (width*height*3,)
+    buf = io.BytesIO()
+    write_fff(buf, flat, W, H)
+    assert len(buf.getvalue()) > 0
+    with pytest.raises(ValueError):
+        # wrong 2-D shape (transposed dims)
+        write_fff(_sink(), np.zeros((W, H, 3), dtype=np.uint16), W, H)
+    with pytest.raises(ValueError):
+        # 2-D but wrong channel count
+        write_fff(_sink(), np.zeros((H, W, 4), dtype=np.uint16), W, H)
+    with pytest.raises(ValueError):
+        # unsupported rank
+        write_fff(_sink(), np.zeros((3, H, W, 1), dtype=np.uint16), W, H)
+
+
 def test_rejects_bad_dimensions_and_rotation():
     with pytest.raises(ValueError):
         write_fff(_sink(), b"", 0, H)
@@ -254,6 +287,4 @@ def test_rejects_bad_dimensions_and_rotation():
 
 
 def _sink():
-    import io
-
     return io.BytesIO()
