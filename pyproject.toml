@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Linux driver and tooling for Imacon/Hasselblad Flextight SCSI scanners"
 requires-python = ">=3.10"
 
+[project.scripts]
+flextight = "flextight.cli:main"
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import json
 import os
 import sys
@@ -79,28 +80,44 @@ def _err(code: int, msg: str) -> int:
     return code
 
 
+def _load_script(path: str):
+    """Load a JSON Step script, raising _UsageError on any schema problem."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw_steps = data["steps"]
+        if not isinstance(raw_steps, list):
+            raise _UsageError(f"{path}: 'steps' must be a list")
+        steps = []
+        for i, d in enumerate(raw_steps):
+            if not isinstance(d, dict):
+                raise _UsageError(f"{path}: step {i} is not an object")
+            try:
+                steps.append(step_from_dict(d))
+            except TransportError as e:
+                raise _UsageError(f"{path}: step {i}: {e}") from e
+        return steps
+    except _UsageError:
+        raise
+    except KeyError as e:
+        raise _UsageError(f"{path}: missing 'steps' key") from e
+    except (OSError, ValueError, TypeError) as e:
+        raise _UsageError(f"{path}: invalid script: {e}") from e
+
+
 def _make_transport(args):
     kind, path = _resolve_source(args)
     if kind == "script":
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            steps = [step_from_dict(d) for d in data["steps"]]
-        except TransportError as e:
-            raise _UsageError(f"{path}: {e}") from e
-        except (OSError, ValueError, TypeError, KeyError) as e:
-            raise _UsageError(f"{path}: invalid script: {e}") from e
-        return FakeTransport.from_script(steps)
+        return FakeTransport.from_script(_load_script(path))
     return SGIOTransport.open(path)
 
 
 def _cmd_ls() -> int:
     nodes = sorted(glob.glob("/dev/sg*"))
-    if nodes:
-        for n in nodes:
-            print(n)
-    else:
-        print("none found")
+    if not nodes:
+        print("no /dev/sg* devices found", file=sys.stderr)
+    for n in nodes:
+        print(n)
     return 0
 
 
@@ -118,13 +135,12 @@ def _cmd_info(transport) -> int:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
 
-    if args.subcommand == "ls":
-        return _cmd_ls()
-    if args.subcommand in ("upload-firmware", "preview", "scan"):
-        return _err(2, _STUB_MSG)
-
     transport = None
     try:
+        if args.subcommand == "ls":
+            return _cmd_ls()
+        if args.subcommand in ("upload-firmware", "preview", "scan"):
+            return _err(2, _STUB_MSG)
         transport = _make_transport(args)
         if args.subcommand == "info":
             return _cmd_info(transport)
@@ -134,6 +150,15 @@ def main(argv=None) -> int:
     except TransportError as e:
         return _err(1, str(e))
     except (BrokenPipeError, KeyboardInterrupt):
+        # A pipe reader (e.g. `flextight ls | head`) went away mid-flush;
+        # point stdout at devnull so the interpreter's shutdown flush does
+        # not print "Exception ignored" noise over our exit status.  Best
+        # effort: under capture sys.stdout may have no real fd.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError, io.UnsupportedOperation):
+            pass
         return 130
     finally:
         if transport is not None:
