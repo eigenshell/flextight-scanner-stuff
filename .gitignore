@@ -21,3 +21,6 @@ __pycache__/
 tools/ghidra_proj/
 tools/ghidra_out/
 .venv/
+
+# generated darktable styles (tools/xml2dtstyle.py)
+styles/

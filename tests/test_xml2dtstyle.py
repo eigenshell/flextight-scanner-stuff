@@ -1,0 +1,471 @@
+"""Tests for tools/xml2dtstyle — FlexColor film-profile → darktable style.
+
+Wire-format constants (op_params struct fields, blend blob layout, module
+versions) are pinned here as literals decoded with struct.unpack, per
+project rule: tests must not round-trip through the translator's own
+encoder. Format authority: darktable 5.6.2 source, branch darktable-5.6.x
+(commit 20891f6) — see docs/recon/film-profiles.md for the field mapping.
+
+Fixture facts (from tests/fixtures/*.xml, copied from the FlexColor 4.8.9.1
+CAB):
+  Kodak_Portra_400_NC: identity master curve, USM 100/10/10/0, Sat 15,
+      Gamma 2.0, Highlight [14912,11328,13952,14912], Shadow [320,320,4096,6976]
+  Ilford_HP5_Plus_400: master curve (0,0)(114,48)(183,173)(255,255),
+      USM -60/10/10/0, Sat 15, Highlight [14400,14400,14272,14208],
+      Shadow [448,448,448,448]
+"""
+
+import base64
+import io
+import plistlib
+import shutil
+import sqlite3
+import struct
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import pytest
+
+from flextight.fff import write_fff
+from tools.xml2dtstyle import (
+    BLENDOP_VERSION,
+    ProfileError,
+    build_plugins,
+    convert_directory,
+    default_blendop_params,
+    parse_profile,
+    profile_to_dtstyle,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures"
+CAB_DIR = (
+    Path(__file__).parent.parent / "extracted" / "fc4891win" / "cab"
+)
+DT_CLI = shutil.which("darktable-cli")
+
+PORTRA = FIXTURES / "Kodak_Portra_400_NC.xml"
+HP5 = FIXTURES / "Ilford_HP5_Plus_400.xml"
+
+
+def _plugins_by_op(plugins):
+    return {p.operation: p for p in plugins}
+
+
+# ---------------------------------------------------------------------------
+# Parser
+# ---------------------------------------------------------------------------
+
+
+def test_parse_portra_fixture():
+    p = parse_profile(PORTRA)
+    assert p.name == "Kodak_Portra_400_NC"
+    assert p.film_type == 1  # color negative
+    # 7 gradation channels, 2 identity points each in this profile
+    assert len(p.gradations) == 7
+    assert all(len(ch) == 2 for ch in p.gradations)
+    assert (p.gradations[0][0].x, p.gradations[0][0].y) == (0, 0)
+    # USM params present
+    assert (p.usm_amount, p.usm_radius, p.usm_dark_limit, p.usm_noise_limit) == (
+        100,
+        10,
+        10,
+        0,
+    )
+    assert p.usm_col_factor == [100, 100, 100]
+    # 14-bit endpoints (pinned literals)
+    assert p.highlight == [14912, 11328, 13952, 14912]
+    assert p.shadow == [320, 320, 4096, 6976]
+    assert p.gray[0] == 128
+    assert p.gamma == 2.0
+    assert p.saturation == 15
+
+
+def test_parse_hp5_non_identity_master_curve():
+    p = parse_profile(HP5)
+    assert p.film_type == 2  # B&W: master-curve-only is decisive evidence
+    master = p.gradations[0]
+    assert [(pt.x, pt.y, pt.dy) for pt in master] == [
+        (0, 0, 1),
+        (114, 48, 1),
+        (183, 173, 1),
+        (255, 255, 1),
+    ]
+    # channels 1..6 are identity in every shipped profile
+    for ch in p.gradations[1:]:
+        assert [(pt.x, pt.y) for pt in ch] == [(0, 0), (255, 255)]
+
+
+def test_scancode_normalization_pinned():
+    """14912/16383 and 320/16383 → pinned floats (max 14-bit code divisor)."""
+    p = parse_profile(PORTRA)
+    white = p.highlight[0] / 16383.0
+    black = p.shadow[0] / 16383.0
+    assert white == pytest.approx(0.9102118049197339, rel=0, abs=2e-9)  # 14912/16383
+    assert black == pytest.approx(0.019532442165659525, rel=0, abs=2e-9)  # 320/16383
+
+
+def test_malformed_plist_actionable_error(tmp_path):
+    bad = tmp_path / "broken.xml"
+    bad.write_bytes(b"this is not a plist at all")
+    with pytest.raises(ProfileError, match="broken.xml: not a readable Apple plist"):
+        parse_profile(bad)
+
+
+def test_non_imagesetting_plist_actionable(tmp_path):
+    other = tmp_path / "messages.xml"
+    other.write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<plist version="1.0"><dict><key>Messages</key><array/></dict></plist>'
+    )
+    with pytest.raises(ProfileError, match="missing ImageSetting"):
+        parse_profile(other)
+
+
+def test_wrong_type_actionable(tmp_path):
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["USMAmount"] = "lots"
+    bad = tmp_path / "badtypes.xml"
+    with open(bad, "wb") as fh:
+        plistlib.dump(plist, fh)
+    with pytest.raises(ProfileError, match="USMAmount must be an int, got str"):
+        parse_profile(bad)
+
+
+def test_non_identity_color_corr_rejected(tmp_path):
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["ColorCorr"] = [1] * 36
+    bad = tmp_path / "badcc.xml"
+    with open(bad, "wb") as fh:
+        plistlib.dump(plist, fh)
+    with pytest.raises(ProfileError, match="non-identity ColorCorr"):
+        parse_profile(bad)
+
+
+# ---------------------------------------------------------------------------
+# Translator: decoded op_params blobs (pinned literals, no round-trip)
+# ---------------------------------------------------------------------------
+
+
+def test_profilegamma_params():
+    p = parse_profile(PORTRA)
+    plugins = _plugins_by_op(build_plugins(p))
+    blob = plugins["profile_gamma"].op_params
+    assert len(blob) == 28
+    mode, linear, gamma, dyn, grey, shadows, security = struct.unpack("<i6f", blob)
+    assert mode == 1  # PROFILEGAMMA_GAMMA
+    assert linear == 0.0
+    assert gamma == 0.5  # exponent 1/2.0
+    assert (dyn, grey, shadows, security) == (10.0, 18.0, -5.0, 0.0)
+    assert plugins["profile_gamma"].module_version == 2
+
+
+def test_rgblevels_params():
+    p = parse_profile(PORTRA)
+    plugins = _plugins_by_op(build_plugins(p))
+    blob = plugins["rgblevels"].op_params
+    assert len(blob) == 44
+    autoscale, preserve, *levels = struct.unpack("<2i9f", blob)
+    assert autoscale == 1  # DT_IOP_RGBLEVELS_INDEPENDENT_CHANNELS
+    assert preserve == 1  # DT_RGB_NORM_LUMINANCE
+    # R: black 320/16383, white 11328/16383, midpoint between
+    assert levels[0] == 0.019532442092895508  # 320/16383 as C float
+    assert levels[2] == 0.691448450088501  # 11328/16383 as C float
+    assert levels[1] == (levels[0] + levels[2]) / 2.0
+    # B: shadow[3] == 6976, highlight[3] == 14912
+    assert levels[6] == 0.42580723762512207  # 6976/16383 as C float
+    assert levels[8] == 0.9102118015289307  # 14912/16383 as C float
+
+
+def test_rgbcurve_params_identity_profile():
+    """Portra's identity master curve still yields a valid linked curve."""
+    p = parse_profile(PORTRA)
+    plugins = _plugins_by_op(build_plugins(p))
+    blob = plugins["rgbcurve"].op_params
+    assert len(blob) == 516
+    floats = struct.unpack("<120f", blob[:480])
+    num_nodes = struct.unpack("<3i", blob[480:492])
+    curve_type = struct.unpack("<3i", blob[492:504])
+    autoscale, compensate, preserve = struct.unpack("<3i", blob[504:516])
+    assert num_nodes == (2, 2, 2)
+    assert curve_type == (2, 2, 2)  # MONOTONE_HERMITE
+    assert autoscale == 0  # DT_S_SCALE_AUTOMATIC_RGB (linked)
+    assert compensate == 0
+    assert preserve == 1  # DT_RGB_NORM_LUMINANCE
+    # channel R identity nodes at floats[0:4] == (0,0),(1,1); rest zero-padded
+    assert floats[0:4] == (0.0, 0.0, 1.0, 1.0)
+    assert all(f == 0.0 for f in floats[4:40])  # remaining R slots unused
+    # G/B identity fallback nodes at slots 40..44 and 80..84
+    assert floats[40:44] == (0.0, 0.0, 1.0, 1.0)
+    assert floats[80:84] == (0.0, 0.0, 1.0, 1.0)
+
+
+def test_rgbcurve_params_non_identity():
+    p = parse_profile(HP5)
+    plugins = _plugins_by_op(build_plugins(p))
+    floats = struct.unpack("<120f", plugins["rgbcurve"].op_params[:480])
+    # master curve (0,0)(114,48)(183,173)(255,255) normalized by 255
+    assert floats[0:8] == (
+        0.0,
+        0.0,
+        0.4470588266849518,
+        0.1882352977991104,
+        0.7176470756530762,
+        0.6784313917160034,
+        1.0,
+        1.0,
+    )
+    num_nodes = struct.unpack("<3i", plugins["rgbcurve"].op_params[480:492])
+    assert num_nodes == (4, 2, 2)
+
+
+def test_colorbalancergb_params():
+    p = parse_profile(PORTRA)
+    plugins = _plugins_by_op(build_plugins(p))
+    blob = plugins["colorbalancergb"].op_params
+    assert len(blob) == 128  # 32 floats
+    fields = struct.unpack("<32f", blob)
+    # saturation_global is field index 19 (0-based) in the pinned v5 order
+    assert fields[19] == 0.15000000596046448  # 0.15 as C float
+    # non-zero defaults: shadows_weight=1.0 (12), highlights_weight=1.0 (14),
+    # mask_grey_fulcrum=0.1845 (28), grey_fulcrum=0.1845 (30)
+    assert fields[12] == 1.0
+    assert fields[14] == 1.0
+    assert fields[28] == 0.18449999392032623  # 0.1845 as C float
+    assert fields[30] == 0.18449999392032623  # 0.1845 as C float
+    assert all(v == 0.0 for i, v in enumerate(fields) if i not in (12, 14, 19, 28, 30))
+
+
+def test_sharpen_params():
+    """USM amount mapping (pinned): 100 → 1.76, -60 → 0.48; radius 10 → 2.0."""
+    portra = _plugins_by_op(build_plugins(parse_profile(PORTRA)))
+    assert struct.unpack("<3f", portra["sharpen"].op_params) == (2.0, 1.7599999904632568, 0.0)
+    hp5 = _plugins_by_op(build_plugins(parse_profile(HP5)))
+    radius, amount, threshold = struct.unpack("<3f", hp5["sharpen"].op_params)
+    assert radius == 2.0
+    assert amount == 0.47999998927116394  # 0.48 as C float
+    assert threshold == 0.0
+
+
+def test_default_blendop_blob():
+    blob = default_blendop_params()
+    assert len(blob) == 420
+    # mask_mode, blend_cst, blend_mode, blend_parameter, opacity
+    mask_mode, blend_cst, blend_mode = struct.unpack_from("<3I", blob, 0)
+    opacity = struct.unpack_from("<f", blob, 16)[0]
+    assert (mask_mode, blend_cst, blend_mode) == (0, 0, 0x18)
+    assert opacity == 100.0
+    # raster_mask_id == INVALID_MASKID near the tail
+    raster_mask_id = struct.unpack_from("<i", blob, 412)[0]
+    assert raster_mask_id == -1
+
+
+def test_dtstyle_xml_structure():
+    p = parse_profile(HP5)
+    xml_bytes, plugins = profile_to_dtstyle(p)
+    root = ET.fromstring(xml_bytes)
+    assert root.tag == "darktable_style"
+    assert root.get("version") == "1.0"
+    info = root.find("info")
+    assert info.find("name").text == "Ilford_HP5_Plus_400"
+    ops = [el.find("operation").text for el in root.find("style")]
+    assert ops == [
+        "profile_gamma",
+        "rgblevels",
+        "rgbcurve",
+        "colorbalancergb",
+        "sharpen",
+    ]
+    # base64 in the XML decodes to the same bytes the encoder produced —
+    # checked against a pinned literal, not a re-encode: sharpen amount 0.48
+    for el in root.find("style"):
+        if el.find("operation").text == "sharpen":
+            blob = base64.b64decode(el.find("op_params").text)
+            assert struct.unpack("<3f", blob)[1] == 0.47999998927116394
+            assert int(el.find("blendop_version").text) == BLENDOP_VERSION == 14
+            blend = base64.b64decode(el.find("blendop_params").text)
+            assert len(blend) == 420
+
+
+# ---------------------------------------------------------------------------
+# Batch mode
+# ---------------------------------------------------------------------------
+
+
+def test_batch_skips_non_profiles(tmp_path):
+    src = tmp_path / "cab"
+    src.mkdir()
+    shutil.copy(PORTRA, src / "Kodak_Portra_400_NC.xml_2")
+    shutil.copy(HP5, src / "Ilford_HP5_Plus_400.xml_2")
+    (src / "messages.xml_2").write_bytes(
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<plist version="1.0"><dict><key>Messages</key><array/></dict></plist>'
+    )
+    out = tmp_path / "styles"
+    written, skipped = convert_directory(src, out)
+    assert (written, skipped) == (2, 1)
+    assert (out / "Kodak_Portra_400_NC.dtstyle").exists()
+    # generated file parses and names the style
+    root = ET.fromstring((out / "Ilford_HP5_Plus_400.dtstyle").read_bytes())
+    assert root.find("info/name").text == "Ilford_HP5_Plus_400"
+
+
+@pytest.mark.skipif(not CAB_DIR.exists(), reason="extracted installer CAB not present")
+def test_batch_full_cab_count():
+    with tempfile.TemporaryDirectory() as d:
+        written, skipped = convert_directory(CAB_DIR, d)
+    # 100 XMLs in the CAB: 98 film profiles + Default + messages
+    assert (written, skipped) == (98, 2)
+
+
+# ---------------------------------------------------------------------------
+# darktable-cli acceptance: --style must apply and export with exit 0
+# ---------------------------------------------------------------------------
+
+
+def _fff_to_tiff(blob: bytes) -> bytes:
+    """Make a write_fff blob palatable to generic TIFF readers (GraphicsMagick,
+    darktable's non-raw loader): sort IFD entries ascending (LibRaw requires
+    the Imacon tags descending, libtiff requires ascending) and add the
+    baseline RGB tags write_fff omits (BitsPerSample, Compression,
+    PhotometricInterpretation, SamplesPerPixel, PlanarConfiguration).
+    darktable's rawspeed rejects scanner .fff outright (no decoder; dt issue
+    #10266 — Flextight .fff opens only as TIFF)."""
+    assert blob[:4] == b"II*\x00"
+    ifd_off = struct.unpack_from("<I", blob, 4)[0]
+    n = struct.unpack_from("<H", blob, ifd_off)[0]
+    entries = [
+        list(struct.unpack_from("<HHII", blob, ifd_off + 2 + i * 12))
+        for i in range(n)
+    ]
+    delta = 5 * 12  # five new entries shift all out-of-line data
+    entries += [
+        [258, 3, 3, 0],  # BitsPerSample SHORT[3], backfilled below
+        [259, 3, 1, 1],  # Compression = none
+        [262, 3, 1, 2],  # PhotometricInterpretation = RGB
+        [277, 3, 1, 3],  # SamplesPerPixel = 3
+        [284, 3, 1, 1],  # PlanarConfiguration = chunky
+    ]
+    for e in entries:
+        if e[0] in (273, 46274, 46275) or (e[1] == 2 and e[2] > 4):
+            e[3] += delta
+    for e in entries:
+        if e[0] == 258:
+            e[3] = len(blob) + delta
+    entries.sort(key=lambda e: e[0])
+    out = bytearray(blob[:ifd_off])
+    out += struct.pack("<H", len(entries))
+    for tag, typ, cnt, val in entries:
+        out += struct.pack("<HHII", tag, typ, cnt, val)
+    out += struct.pack("<I", 0)
+    out += blob[ifd_off + 2 + 12 * n + 4:]
+    out += struct.pack("<3H", 16, 16, 16)
+    return bytes(out)
+
+
+def _gradient_fff_bytes(width: int = 64, height: int = 48) -> bytes:
+    """64x48 16-bit RGB gradient as a write_fff byte string (no numpy)."""
+    pixels = bytearray()
+    for y in range(height):
+        for x in range(width):
+            v = (x * 65535) // (width - 1)
+            pixels += struct.pack("<3H", v, v, v)
+    buf = io.BytesIO()
+    write_fff(buf, bytes(pixels), width, height, metadata={"make": "Imacon"})
+    return buf.getvalue()
+
+
+def _seed_style(db_path: Path, xml_bytes: bytes) -> str:
+    """Insert a .dtstyle into a darktable data.db the same way
+    dt_styles_import_from_file would (data.styles + data.style_items)."""
+    root = ET.fromstring(xml_bytes)
+    name = root.find("info/name").text
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute("DELETE FROM styles WHERE name = ?", (name,))
+        db.execute(
+            "INSERT INTO styles (name, description, iop_list) VALUES (?, ?, NULL)",
+            (name, root.find("info/description").text),
+        )
+        style_id = db.execute(
+            "SELECT id FROM styles WHERE name = ?", (name,)
+        ).fetchone()[0]
+        for plugin in root.find("style"):
+            db.execute(
+                "INSERT INTO style_items (styleid, num, module, operation,"
+                " op_params, enabled, blendop_params, blendop_version,"
+                " multi_priority, multi_name, multi_name_hand_edited)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    style_id,
+                    int(plugin.find("num").text),
+                    int(plugin.find("module").text),
+                    plugin.find("operation").text,
+                    base64.b64decode(plugin.find("op_params").text),
+                    int(plugin.find("enabled").text),
+                    base64.b64decode(plugin.find("blendop_params").text),
+                    int(plugin.find("blendop_version").text),
+                    int(plugin.find("multi_priority").text),
+                    plugin.find("multi_name").text or "",
+                    int(plugin.find("multi_name_hand_edited").text),
+                ),
+            )
+        db.commit()
+    finally:
+        db.close()
+    return name
+
+
+@pytest.fixture(scope="module")
+def darktable_config(tmp_path_factory):
+    """Isolated darktable configdir with an initialized data.db."""
+    if not DT_CLI:
+        pytest.skip("darktable-cli not installed")
+    cfg = tmp_path_factory.mktemp("dtcfg")
+    input_tif = cfg / "input.tif"
+    input_tif.write_bytes(_fff_to_tiff(_gradient_fff_bytes()))
+    init = subprocess.run(
+        [DT_CLI, str(input_tif), str(cfg / "init_out.tif"),
+         "--core", "--configdir", str(cfg)],
+        capture_output=True,
+        timeout=180,
+    )
+    assert init.returncode == 0, init.stderr.decode(errors="replace")
+    assert (cfg / "data.db").exists(), "darktable did not initialize data.db"
+    return cfg, input_tif
+
+
+def _style_cases():
+    cases = [
+        ("portra", PORTRA),
+        ("hp5", HP5),
+    ]
+    if CAB_DIR.exists():
+        for stem in ("Agfa_Ultra_50", "Kodak_Portra_160_NC", "Ilford_Delta_100"):
+            cases.append((stem.lower(), CAB_DIR / f"{stem}.xml_2"))
+    return cases
+
+
+@pytest.mark.skipif(not DT_CLI, reason="darktable-cli not installed")
+@pytest.mark.parametrize("label,profile_path", _style_cases())
+def test_darktable_cli_applies_style(darktable_config, label, profile_path):
+    """darktable-cli --style <name> must exit 0 and export the image."""
+    cfg, input_tif = darktable_config
+    profile = parse_profile(profile_path)
+    xml_bytes, _ = profile_to_dtstyle(profile)
+    style_name = _seed_style(cfg / "data.db", xml_bytes)
+    out = cfg / f"out_{label}.tif"
+    proc = subprocess.run(
+        [DT_CLI, str(input_tif), str(out), "--style", style_name,
+         "--core", "--configdir", str(cfg)],
+        capture_output=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, proc.stderr.decode(errors="replace")
+    assert out.exists() and out.stat().st_size > 0
+    stderr = proc.stderr.decode(errors="replace")
+    assert "cannot find the style" not in stderr
+    # The style must actually alter the pixels — not merely apply cleanly.
+    unstyled = (cfg / "init_out.tif").read_bytes()
+    assert out.read_bytes() != unstyled

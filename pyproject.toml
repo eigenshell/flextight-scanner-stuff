@@ -11,7 +11,7 @@ flextight = "flextight.cli:main"
 test = ["rawpy", "numpy"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = ["hardware: requires attached scanner"]
 addopts = "-m 'not hardware'"
