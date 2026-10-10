@@ -173,7 +173,6 @@ class FilmProfile:
 
     name: str
     film_type: int
-    mode: int
     apply_cc: bool
     apply_curves: bool
     apply_usm: bool
@@ -250,7 +249,15 @@ def parse_profile(path_or_buffer: Union[str, Path, BinaryIO]) -> FilmProfile:
             plist = plistlib.load(path_or_buffer)  # type: ignore[arg-type]
     except (OSError, plistlib.InvalidFileException) as e:
         raise ProfileError(f"{source}: not a readable Apple plist: {e}") from e
+    return _profile_from_plist(plist, source)
 
+
+def _profile_from_plist(plist: object, source: str) -> FilmProfile:
+    """Validate an already-loaded plist dict and build a FilmProfile.
+
+    Raises ProfileError with *source* (file name) and the offending key on
+    any deviation from the ImageSetting/ImageCorrection contract.
+    """
     if not isinstance(plist, dict):
         raise ProfileError(f"{source}: top-level plist value must be a dict")
     setting = plist.get("ImageSetting")
@@ -320,10 +327,32 @@ def parse_profile(path_or_buffer: Union[str, Path, BinaryIO]) -> FilmProfile:
     if gamma <= 0:
         raise ProfileError(f"{source}: ImageCorrection.Gamma must be > 0, got {gamma}")
 
+    # These sliders are zero/identity in every shipped profile and have no
+    # chosen-module mapping; like ColorCorr, a non-identity value is rejected
+    # rather than silently dropped.
+    contrast = _as_int(ic, "Contrast", source)
+    brightness = _as_int(ic, "Brightness", source)
+    lightness = _as_int(ic, "Lightness", source)
+    for key, value in (
+        ("Contrast", contrast),
+        ("Brightness", brightness),
+        ("Lightness", lightness),
+    ):
+        if value != 0:
+            raise ProfileError(
+                f"{source}: non-zero {key} is not translatable "
+                f"(expected 0 in all shipped profiles, got {value})"
+            )
+    usm_col_factor = _as_int_list(ic, "USMColFactor", source)
+    if usm_col_factor != [100, 100, 100]:
+        raise ProfileError(
+            f"{source}: USMColFactor other than [100, 100, 100] is not "
+            f"translatable (no per-channel USM weighting), got {usm_col_factor}"
+        )
+
     return FilmProfile(
         name=Path(source).stem,
         film_type=_as_int(ic, "FilmType", source),
-        mode=_as_int(ic, "Mode", source),
         apply_cc=_as_bool(ic, "ApplyCC", source),
         apply_curves=_as_bool(ic, "ApplyCurves", source),
         apply_usm=_as_bool(ic, "ApplyUSM", source),
@@ -333,15 +362,15 @@ def parse_profile(path_or_buffer: Union[str, Path, BinaryIO]) -> FilmProfile:
         usm_radius=_as_int(ic, "USMRadius", source),
         usm_dark_limit=_as_int(ic, "USMDarkLimit", source),
         usm_noise_limit=_as_int(ic, "USMNoiseLimit", source),
-        usm_col_factor=_as_int_list(ic, "USMColFactor", source),
+        usm_col_factor=usm_col_factor,
         gamma=float(gamma),
         saturation=_as_int(ic, "Saturation", source),
-        contrast=_as_int(ic, "Contrast", source),
-        brightness=_as_int(ic, "Brightness", source),
-        lightness=_as_int(ic, "Lightness", source),
-        gray=_as_int_list(ic, "Gray", source),
-        highlight=_as_int_list(ic, "Highlight", source),
-        shadow=_as_int_list(ic, "Shadow", source),
+        contrast=contrast,
+        brightness=brightness,
+        lightness=lightness,
+        gray=_as_int_list(ic, "Gray", source, length=4),
+        highlight=_as_int_list(ic, "Highlight", source, length=4),
+        shadow=_as_int_list(ic, "Shadow", source, length=4),
         color_corr=color_corr,
     )
 
@@ -624,11 +653,16 @@ def convert_directory(src_dir: Union[str, Path], out_dir: Union[str, Path]) -> t
     # Film profiles ship as "*.xml_2"; the CAB also holds "*.xml" device
     # settings and other suffix generations that are not film profiles.
     for path in sorted(src.glob("*.xml_2")):
-        plist = plistlib.load(open(path, "rb"))
-        if not (isinstance(plist, dict) and isinstance(plist.get("ImageSetting"), dict)):
-            skipped += 1
+        try:
+            with open(path, "rb") as fh:
+                plist = plistlib.load(fh)
+        except (OSError, plistlib.InvalidFileException):
+            skipped += 1  # not an Apple plist at all (e.g. device binaries)
             continue
-        profile = parse_profile(path)
+        if not (isinstance(plist, dict) and isinstance(plist.get("ImageSetting"), dict)):
+            skipped += 1  # an Apple plist, but not a film profile
+            continue
+        profile = _profile_from_plist(plist, str(path))
         dtstyle, _ = profile_to_dtstyle(profile)
         (out / f"{path.stem}.dtstyle").write_bytes(dtstyle)
         written += 1

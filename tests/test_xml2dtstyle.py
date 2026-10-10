@@ -319,6 +319,53 @@ def test_batch_skips_non_profiles(tmp_path):
     assert root.find("info/name").text == "Ilford_HP5_Plus_400"
 
 
+def test_batch_skips_non_plist_xml_2(tmp_path):
+    """A *.xml_2 that is not an Apple plist is skipped, not fatal.
+
+    Regression: plistlib.InvalidFileException used to escape convert_directory
+    raw, aborting the whole batch.
+    """
+    src = tmp_path / "cab"
+    src.mkdir()
+    shutil.copy(PORTRA, src / "Kodak_Portra_400_NC.xml_2")
+    (src / "garbage.xml_2").write_bytes(b"\x00\x01\x02not a plist at all")
+    out = tmp_path / "styles"
+    written, skipped = convert_directory(src, out)
+    assert (written, skipped) == (1, 1)
+    assert (out / "Kodak_Portra_400_NC.dtstyle").exists()
+
+
+def test_parse_rejects_short_shadow_list(tmp_path):
+    """A Shadow array with fewer than 4 entries names the file and field.
+
+    Regression: length went unchecked, so a short list died later with a
+    bare IndexError inside encode_rgblevels (no file name, batch aborted).
+    """
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["Shadow"] = [320, 320]
+    bad = tmp_path / "Short_Shadow.xml_2"
+    bad.write_bytes(plistlib.dumps(plist))
+    with pytest.raises(ProfileError, match="Shadow"):
+        parse_profile(bad)
+
+
+def test_parse_rejects_non_identity_sliders(tmp_path):
+    """Non-zero Contrast/Brightness/Lightness and a USMColFactor other than
+    [100, 100, 100] are rejected like non-identity ColorCorr, not dropped."""
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["Contrast"] = 7
+    bad = tmp_path / "Contrast.xml_2"
+    bad.write_bytes(plistlib.dumps(plist))
+    with pytest.raises(ProfileError, match="Contrast"):
+        parse_profile(bad)
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["USMColFactor"] = [100, 90, 100]
+    bad = tmp_path / "USMColFactor.xml_2"
+    bad.write_bytes(plistlib.dumps(plist))
+    with pytest.raises(ProfileError, match="USMColFactor"):
+        parse_profile(bad)
+
+
 @pytest.mark.skipif(not CAB_DIR.exists(), reason="extracted installer CAB not present")
 def test_batch_full_cab_count():
     with tempfile.TemporaryDirectory() as d:
@@ -445,14 +492,15 @@ def darktable_config(tmp_path_factory):
 
 
 def _decode_tiff_pixels(path):
-    """Decode the pixel strips of a darktable-exported TIFF.
+    """Decode the strip payloads of a darktable-exported TIFF.
 
     darktable embeds a fresh ICC profile whose bytes are not reproducible
-    across runs, so whole-file comparison is unsound; pixels are compared
-    instead. The acceptance tests export uncompressed-input 8-bit RGB via
-    Zip-compressed strips, which this decodes with the stdlib only.
+    across runs, so whole-file comparison is unsound; strip payloads are
+    compared instead. darktable writes Zip-compressed strips with
+    horizontal-differencing prediction, so the decoded bytes are predictor
+    residuals, not absolute pixel values — still a faithful difference
+    signal for the acceptance assertions below, but not pixels proper.
     """
-    import struct
     import zlib
 
     data = path.read_bytes()
@@ -464,6 +512,9 @@ def _decode_tiff_pixels(path):
             "<HHII", data[ifd + 2 + 12 * i:ifd + 14 + 12 * i])
         tags[tag] = (typ, cnt, val)
     assert tags[259][2] == 8, "test expects Zip-compressed strips"  # Compression
+    # 317 = Predictor; 2 = horizontal differencing, so the decoded strip
+    # bytes are predictor residuals (see docstring), not absolute pixels.
+    assert tags[317][2] == 2, "test expects horizontal-differencing prediction"
     nstrips = tags[279][1]  # StripByteCounts count == strip count
     if tags[273][1] == 1:  # StripOffsets
         offs, counts = (tags[273][2],), (tags[279][2],)
