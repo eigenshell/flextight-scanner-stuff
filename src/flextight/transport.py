@@ -210,20 +210,21 @@ class FakeTransport:
                 f"script mismatch at step {idx}: expected direction "
                 f"{step.direction!r}, got {direction!r}"
             )
-        return step
+        return step, idx
 
     def cmd_in(self, cdb: bytes | str, length: int) -> bytes:
-        step = self._next(_norm_cdb(cdb), "in")
+        step, _ = self._next(_norm_cdb(cdb), "in")
         resp = step.response
         if len(resp) < length:
             resp = resp + b"\0" * (length - len(resp))
         return resp[:length]
 
     def cmd_out(self, cdb: bytes | str, data: bytes):
-        step = self._next(_norm_cdb(cdb), "out")
+        step, idx = self._next(_norm_cdb(cdb), "out")
         if step.data and step.data != data:
             raise TransportError(
-                f"script data mismatch: expected {step.data.hex()}, got {data.hex()}"
+                f"script data mismatch at step {idx}: "
+                f"expected {step.data.hex()}, got {data.hex()}"
             )
         return None
 
