@@ -188,6 +188,41 @@ class Step:
             self.cdb = bytes.fromhex(self.cdb)
 
 
+def step_to_dict(s: Step) -> dict:
+    """Serialize a Step to a JSON-safe dict (byte fields as hex strings)."""
+    return {
+        "cdb": s.cdb.hex(),
+        "direction": s.direction,
+        "response": s.response.hex(),
+        "status": s.status,
+        "data": s.data.hex(),
+    }
+
+
+def step_from_dict(d: dict) -> Step:
+    """Build a Step from a ``step_to_dict`` dict, validating as we go.
+
+    Raises TransportError naming the offending field on a bad direction
+    or invalid hex.
+    """
+    direction = d.get("direction")
+    if direction not in ("in", "out", "none"):
+        raise TransportError(f"invalid direction field: {direction!r}")
+
+    def _hex(field: str) -> bytes:
+        try:
+            return bytes.fromhex(d.get(field) or "")
+        except ValueError as e:
+            raise TransportError(f"invalid hex in {field!r} field") from e
+
+    try:
+        status = int(d.get("status", 0))
+    except (TypeError, ValueError) as e:
+        raise TransportError("invalid 'status' field") from e
+    return Step(cdb=_hex("cdb"), direction=direction, response=_hex("response"),
+                status=status, data=_hex("data"))
+
+
 class FakeTransport:
     """Replays an explicit script of expected commands; no hardware needed."""
 
