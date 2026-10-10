@@ -36,6 +36,7 @@ typedef unsigned long *PULONG;
 
 #define MAX_PATH 260
 #define DLL_PROCESS_ATTACH 1
+#define DLL_PROCESS_DETACH 0
 #define INVALID_HANDLE_VALUE ((HANDLE)(long)-1)
 
 #define MEM_COMMIT 0x1000
@@ -70,6 +71,22 @@ typedef struct _PROCESS_INFORMATION {
 } PROCESS_INFORMATION;
 
 typedef DWORD (*LPTHREAD_START_ROUTINE)(LPVOID lpParameter);
+
+/* CRITICAL_SECTION (stub shape only — real one lives in winnt.h) */
+typedef struct _CRITICAL_SECTION {
+    void *DebugInfo;
+    long LockCount;
+    long RecursionCount;
+    HANDLE OwningThread;
+    HANDLE LockSemaphore;
+    ULONG_PTR SpinCount;
+} CRITICAL_SECTION;
+typedef CRITICAL_SECTION *LPCRITICAL_SECTION;
+
+void InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
+void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
+void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
+void DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection);
 
 HMODULE GetModuleHandleA(LPCSTR lpModuleName);
 FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName);

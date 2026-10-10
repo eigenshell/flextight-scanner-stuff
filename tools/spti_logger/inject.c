@@ -15,6 +15,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN64
+#error "inject must be built 32-bit (FlexColor is a 32-bit app)"
+#endif
+
 static void ft_strcpy(char *dst, const char *src)
 {
     while ((*dst++ = *src++) != '\0')
@@ -124,7 +128,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    wres = WaitForSingleObject(hthread, 15000);
+    /* The remote thread always terminates (LoadLibrary cannot block
+     * indefinitely), so wait forever: under on-access AV scanning the first
+     * LoadLibrary can exceed any fixed timeout, and timing out here would
+     * needlessly kill FlexColor. */
+    wres = WaitForSingleObject(hthread, INFINITE);
     hmod = 0;
     if (wres == WAIT_OBJECT_0)
         GetExitCodeThread(hthread, &hmod); /* = HINSTANCE of loaded DLL */

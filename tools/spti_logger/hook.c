@@ -52,6 +52,10 @@
 #include <stdio.h>
 #include "fmt.h"
 
+#ifdef _WIN64
+#error "ft_hook must be built 32-bit (FlexColor is a 32-bit app)"
+#endif
+
 #define FT_LOG_PATH  "C:\\flextrace_ioctl.jsonl"
 #define FT_MAX_HEAD  64
 #define FT_TRAMP_SZ  64
@@ -66,6 +70,7 @@ static DeviceIoControl_fn g_tramp;        /* RWX trampoline: saved 5 bytes + jmp
 static LPVOID g_tramp_mem;                /* VirtualAlloc'd, PAGE_EXECUTE_READWRITE */
 static int  g_installed;                  /* hook installed flag */
 static int  g_inside;                     /* recursion guard */
+static CRITICAL_SECTION g_log_cs;         /* serializes trace-file writes */
 
 static void ft_copy(void *dst, const void *src, size_t n)
 {
@@ -75,17 +80,30 @@ static void ft_copy(void *dst, const void *src, size_t n)
         *d++ = *s++;
 }
 
-/* Append one line (without newline) to the trace file, flushed immediately so
- * an app crash loses nothing. */
+/* Append one line (a full JSONL record) to the trace file as a SINGLE fwrite
+ * of line+'\n' in "a" mode: append mode makes each individual write atomic at
+ * the filesystem level, so records never interleave even from concurrent
+ * callers; the critical section additionally serializes the fopen/fwrite/
+ * fclose sequence. Flushed immediately so an app crash loses nothing. */
 static void ft_log_line(const char *line, size_t len)
 {
-    FILE *f = fopen(FT_LOG_PATH, "a");
-    if (!f)
+    char full[522];
+    FILE *f;
+
+    if (len + 2 > sizeof full)
         return;
-    fwrite(line, 1, len, f);
-    fputc('\n', f);
-    fflush(f);
-    fclose(f);
+    ft_copy(full, line, len);
+    full[len] = '\n';
+    full[len + 1] = '\0';
+
+    EnterCriticalSection(&g_log_cs);
+    f = fopen(FT_LOG_PATH, "a");
+    if (f) {
+        fwrite(full, 1, len + 1, f); /* line + newline, one write */
+        fflush(f);
+        fclose(f);
+    }
+    LeaveCriticalSection(&g_log_cs);
 }
 
 static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
@@ -158,16 +176,56 @@ static int ft_patch5(void *target, const void *dst)
     return 1;
 }
 
-static int ft_install_hook(void)
+/* Verify the 5 bytes we are about to steal form a known-good prologue of
+ * complete instructions. Blindly copying 5 arbitrary bytes could split an
+ * instruction mid-operand and crash the app. Known-good shapes:
+ *   - XP/2K-era:  8B FF 55 8B EC   (mov edi,edi; push ebp; mov ebp,esp)
+ *   - Win7+ kernel32 thunk: E9 rel32 (one complete jmp into kernelbase)
+ * Any 0xE8 (call rel32) is rejected outright (its rel32 operand would need
+ * relocation, which the trampoline does not do). On mismatch the caller must
+ * fail closed: no patch, DeviceIoControl left untouched. */
+static int ft_prologue_ok(const BYTE *p, const char **reason)
+{
+    static const BYTE xp_pro[5] = {0x8B, 0xFF, 0x55, 0x8B, 0xEC};
+    int i;
+
+    for (i = 0; i < 5; i++) {
+        if (p[i] == 0xE8) {
+            *reason = "call_rel32_in_prologue";
+            return 0;
+        }
+    }
+    if (p[0] == 0xE9) {
+        /* jmp-thunk: the five bytes are exactly one instruction, safe. The
+         * rel32 operand is position-independent (relative), so it survives
+         * the copy into the trampoline unchanged. */
+        return 1;
+    }
+    for (i = 0; i < 5; i++) {
+        if (p[i] != xp_pro[i]) {
+            *reason = "unknown_prologue";
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int ft_install_hook(const char **reason)
 {
     HMODULE k32 = GetModuleHandleA("kernel32.dll");
     void *target;
     DWORD jmp_back;
 
-    if (!k32)
+    if (!k32) {
+        *reason = "kernel32_not_found";
         return 0;
+    }
     target = (void *)GetProcAddress(k32, "DeviceIoControl");
-    if (!target)
+    if (!target) {
+        *reason = "DeviceIoControl_not_found";
+        return 0;
+    }
+    if (!ft_prologue_ok((const BYTE *)target, reason))
         return 0;
 
     /* 64 bytes of executable scratch: saved prologue + E9 back to target+5.
@@ -175,8 +233,10 @@ static int ft_install_hook(void)
     g_tramp_mem = VirtualAlloc(NULL, FT_TRAMP_SZ,
                                MEM_COMMIT | MEM_RESERVE,
                                PAGE_EXECUTE_READWRITE);
-    if (!g_tramp_mem)
+    if (!g_tramp_mem) {
+        *reason = "VirtualAlloc_failed";
         return 0;
+    }
 
     ft_copy(g_tramp_mem, target, 5);
     ((BYTE *)g_tramp_mem)[5] = 0xE9;
@@ -186,8 +246,10 @@ static int ft_install_hook(void)
 
     g_tramp = (DeviceIoControl_fn)(void *)g_tramp_mem;
 
-    if (!ft_patch5(target, (void *)hooked_DeviceIoControl))
+    if (!ft_patch5(target, (void *)hooked_DeviceIoControl)) {
+        *reason = "VirtualProtect_failed";
         return 0;
+    }
     return 1;
 }
 
@@ -200,7 +262,19 @@ static void ft_log_boot(const char *status)
                  "{\"tag\":\"hook_loaded\",\"target\":\"DeviceIoControl\","
                  "\"status\":\"%s\",\"pid\":%lu}",
                  status, (unsigned long)GetCurrentProcessId());
-    if (n > 0)
+    if (n > 0 && (size_t)n < sizeof line)
+        ft_log_line(line, (size_t)n);
+}
+
+static void ft_log_install_failed(const char *reason)
+{
+    char line[200];
+    int n;
+    n = snprintf(line, sizeof line,
+                 "{\"tag\":\"install_failed\",\"target\":\"DeviceIoControl\","
+                 "\"reason\":\"%s\",\"pid\":%lu}",
+                 reason, (unsigned long)GetCurrentProcessId());
+    if (n > 0 && (size_t)n < sizeof line)
         ft_log_line(line, (size_t)n);
 }
 
@@ -209,9 +283,16 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
     (void)hinst;
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
+        const char *fail_reason = "unknown";
+        InitializeCriticalSection(&g_log_cs);
         DisableThreadLibraryCalls(hinst);
-        g_installed = ft_install_hook();
-        ft_log_boot(g_installed ? "ok" : "install_failed");
+        g_installed = ft_install_hook(&fail_reason);
+        if (g_installed)
+            ft_log_boot("ok");
+        else
+            ft_log_install_failed(fail_reason);
+    } else if (reason == DLL_PROCESS_DETACH) {
+        DeleteCriticalSection(&g_log_cs);
     }
     return TRUE;
 }

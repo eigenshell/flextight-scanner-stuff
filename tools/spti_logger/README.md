@@ -29,8 +29,24 @@ Fields: `h` (handle, hex), `code` (IOCTL code, hex — **the unknown
 IOCTL_SCSISCAN_CMD value shows up here**), `in_len` (decimal), `in_head`
 (lowercase hex of up to the first 64 bytes of the input buffer, `""` if none),
 `ok` (1 on return != 0), `out_len` (bytes returned), `out_head` (up to 64 bytes
-of output buffer, `""` unless ok). A `{"tag":"hook_loaded",...}` line is
-written when the DLL loads.
+of output buffer, `""` unless ok). A `{"tag":"hook_loaded",...}` line marks a
+successfully installed hook; `{"tag":"install_failed",...}` one that refused to
+install.
+
+### Notes for the trace parser (Task 7 contract)
+
+- **Foreign-schema lines share the file.** Control records
+  (`{"tag":"hook_loaded",...}` / `{"tag":"install_failed","reason":...}`) are
+  written with the same one-object-per-line framing but a DIFFERENT schema —
+  parsers must skip any line that does not match the ioctl-record schema
+  rather than fail on it.
+- **Overlapped (async) calls are a known asymmetry.** A call issued with an
+  `LPOVERLAPPED` completes later via the overlapped structure; the hook logs
+  it at call time as `ok:0,out_len:0,out_head:""` (DeviceIoControl returns 0
+  for pending overlapped I/O) and there is NO completion record when the I/O
+  actually finishes. FlexColor's scanner traffic is synchronous, so this
+  should rarely matter, but parsers must not treat `ok:0` as proof of a failed
+  command without checking for an async pattern.
 
 ## Usage on the tracing rig
 
@@ -77,8 +93,26 @@ useless against a 32-bit target process.
 - **Install race.** No lock around installation; safe here because the DLL is
   injected into a suspended process and installs the hook in `DllMain` before
   app threads run.
+- **Prologue verification / instruction splitting.** The 5-byte hook only
+  steals bytes after verifying them against known-good prologues (XP/2K
+  `8B FF 55 8B EC`, or a Win7+ `E9 rel32` jmp-thunk; any `0xE8` call-rel32 is
+  rejected). If a future Windows changes the prologue, the hook fails CLOSED
+  (no patch, `{"tag":"install_failed","reason":...}` record, DeviceIoControl
+  untouched). Blind 5-byte stealing without this check would risk splitting an
+  instruction mid-operand and crashing the host.
+- **Thread-safe logging.** Each record is emitted as ONE fwrite of
+  line+'\n' in append mode (each individual write is atomic at the filesystem
+  level) and further serialized by a CRITICAL_SECTION, so concurrent
+  DeviceIoControl callers cannot interleave or corrupt JSONL lines.
 - **CRT inside the hook.** Logging uses fopen/fwrite/fflush per record; the CRT
   does not call DeviceIoControl, and a depth guard prevents recursion.
+- **32-bit guard.** Both hook.c and inject.c carry `#ifdef _WIN64 #error`, so
+  an x64 cl/gcc build fails at compile time instead of producing a silently
+  unusable 64-bit binary.
+- **Remote-thread wait.** inject.c waits INFINITE on the remote LoadLibrary
+  thread: the thread always terminates, and under on-access AV scanning the
+  first LoadLibrary can exceed any fixed timeout (a timeout used to kill
+  FlexColor needlessly).
 - **AV/EDR** on modern Windows may flag inline hooking of system DLLs; prefer
   the era-appropriate rig (WinXP/2K x86).
 - **Unbounded trace growth** during long sessions; rotate
