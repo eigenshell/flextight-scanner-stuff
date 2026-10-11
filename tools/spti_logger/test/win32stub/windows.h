@@ -96,8 +96,32 @@ LPVOID VirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType,
 BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
                     LPDWORD lpflOldProtect);
 BOOL FlushInstructionCache(HANDLE hProcess, LPCVOID lpBaseAddress, SIZE_T dwSize);
+
+/* MEMORY_BASIC_INFORMATION + VirtualQuery (used by the payload sidecar to
+ * guard dereferences of SRB data pointers) */
+typedef struct _MEMORY_BASIC_INFORMATION {
+    LPVOID BaseAddress;
+    LPVOID AllocationBase;
+    DWORD AllocationProtect;
+    SIZE_T RegionSize;
+    DWORD State;
+    DWORD Protect;
+    DWORD Type;
+} MEMORY_BASIC_INFORMATION;
+SIZE_T VirtualQuery(LPCVOID lpAddress, MEMORY_BASIC_INFORMATION *lpBuffer,
+                    SIZE_T dwLength);
+
+#define MEM_COMMIT 0x1000
+#define PAGE_READONLY 0x02
+#define PAGE_READWRITE 0x04
+#define PAGE_WRITECOPY 0x08
+#define PAGE_EXECUTE_READ 0x20
+#define PAGE_EXECUTE_READWRITE 0x40
+#define PAGE_EXECUTE_WRITECOPY 0x80
+
 HANDLE GetCurrentProcess(void);
 DWORD GetCurrentProcessId(void);
+DWORD GetTickCount(void);
 BOOL DisableThreadLibraryCalls(HMODULE hModule);
 BOOL CreateProcessA(LPCSTR lpApplicationName, LPSTR lpCommandLine,
                     LPSECURITY_ATTRIBUTES lpProcessAttributes,

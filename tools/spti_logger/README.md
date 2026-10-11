@@ -13,6 +13,9 @@ recovered CDB opcodes (0xD0..0xE3): `docs/recon/static-recon.md`.
 | `fmt.h` / `fmt.c` | platform-neutral JSONL record formatter (pure C90, no libc beyond `<stddef.h>`) — the testable seam |
 | `hook.c` | the logger DLL (`ft_hook.dll`), Windows-only |
 | `inject.c` | the launcher (`inject.exe`), Windows-only console exe |
+| `uiev.c` | UI event timeline logger (`uiev.exe`), Windows-only; system-wide LL input hooks, same `t` clock as the ioctl records |
+| `sidecar_corr.py` | correlate `flextrace_bufs.bin` payloads with JSONL records by (pid, seq) |
+| `merge_trace.py` | interleave ioctl + UI-event timelines on the shared GetTickCount clock |
 | `test_fmt.c` | native unit test for the formatter (runs on Linux) |
 | `build.bat` | Windows-side build fallback (cl, or mingw commands in the header) |
 | `test/win32stub/windows.h` | minimal Win32 stub used ONLY for offline `gcc -fsyntax-only` checks of hook.c/inject.c (no mingw toolchain on the dev box) |
@@ -22,10 +25,13 @@ recovered CDB opcodes (0xD0..0xE3): `docs/recon/static-recon.md`.
 One compact JSON object per line, lowercase hex, no spaces:
 
 ```
-{"h":"0x12","code":"0x2a002c","in_len":36,"in_head":"12000000240000","ok":1,"out_len":36,"out_head":"..."}
+{"h":"0x12","seq":0,"t":61234,"code":"0x2a002c","in_len":36,"in_head":"12000000240000","ok":1,"out_len":36,"out_head":"..."}
 ```
 
-Fields: `h` (handle, hex), `code` (IOCTL code, hex — **the unknown
+Fields: `h` (handle, hex), `seq` (per-process call counter, decimal — keys the
+payload sidecar), `t` (**GetTickCount() ms — the same system-wide clock
+uiev.exe stamps UI events with; merge the two files on this field**),
+`code` (IOCTL code, hex — **the unknown
 IOCTL_SCSISCAN_CMD value shows up here**), `in_len` (decimal), `in_head`
 (lowercase hex of up to the first 64 bytes of the input buffer, `""` if none),
 `ok` (1 on return != 0), `out_len` (bytes returned), `out_head` (up to 64 bytes
@@ -47,6 +53,9 @@ install.
   actually finishes. FlexColor's scanner traffic is synchronous, so this
   should rarely matter, but parsers must not treat `ok:0` as proof of a failed
   command without checking for an async pattern.
+- **Payloads live in the sidecar, not the record.** Command payloads (df/e0
+  writes, 24/3c/INQUIRY responses) are dumped into `flextrace_bufs.bin` keyed
+  by `(pid, seq)`; see "Payload sidecar" below.
 
 ## Usage on the tracing rig
 
@@ -62,7 +71,9 @@ install.
    inside FlexColor's process (its search path, not yours).
 2. Place `ft_hook.dll` **next to** `inject.exe` (inject derives the DLL path
    from its own location).
-3. Run: `inject.exe "C:\Program Files\Imacon\FlexColor\FlexColor.exe"`
+3. Run: `inject.exe "C:\Program Files (x86)\Hasselblad\FlexColor English v4.0.3\FlexColor.exe"`
+   (the actual install path on the 2940AU rig — quotes required, the path has
+   spaces; `C:\Program Files\Imacon\...` does NOT exist there).
    FlexColor starts suspended, the hook installs, the app resumes; inject's
    console stays attached until FlexColor exits and propagates its exit code.
 4. Traces land in `flextrace_ioctl.jsonl` **next to `ft_hook.dll`** (the path
@@ -105,6 +116,58 @@ First live session (2026-10-11, interactive: preview, TIFF scan, 3F scan,
 settings changes): distilled command vocabulary, SRB layout, and phase map in
 `docs/recon/live-session-trace.md`. The full 73 MB trace stays on the Windows
 box next to the tool; rotate it between sessions.
+
+## Payload sidecar (`flextrace_bufs.bin`)
+
+The JSONL record is header-only; payloads live in a second file written next to
+it. For every non-`28` scanner SRB, the hook dumps up to four payload candidates
+**pre-call** (what the app sent) and **post-call when the call returned success**
+(what the device answered; overlapped-pending calls are skipped to avoid racing
+in-flight I/O):
+
+| cand | source | finding |
+|---|---|---|
+| `0x36` | dword at SRB offset 36 | a descriptor `{u32 count=1, ptr}` for read-type CDBs; raw payload for `df` (`01 00` = the poll code) |
+| `0x51` | `*(u32*)(cand36 buf + 0)` | one indirection into the descriptor |
+| `0x52` | `*(u32*)(cand36 buf + 4)` | the other — one of 51/52 is the real data pointer |
+| `0x60` | DeviceIoControl `lpOutBuffer` | the METHOD_OUT_DIRECT carrier; driver copies responses here ("Imacon" confirmed pre-sidecar) |
+
+Record: 12-byte header `<IIBBH` = u32 pid, u32 seq, u8 when (0=pre/1=post),
+u8 cand, u16 len, then len payload bytes — little-endian. Correlate to the
+JSONL record by `(pid, seq)`; `when` picks sent vs answered. All pointers are
+VirtualQuery-guarded (`MEM_COMMIT` + readable protect); anything doubtful is
+skipped, never dereferenced blindly.
+
+## UI event timeline (`flextrace_uiev.jsonl`)
+
+`uiev.exe` answers "which UI action caused which SCSI traffic". It installs
+system-wide low-level input hooks (`WH_MOUSE_LL`/`WH_KEYBOARD_LL` — callbacks
+run in its own process, so NO injection into FlexColor and no 32-bit
+constraint) and logs to `flextrace_uiev.jsonl` next to itself:
+
+- mouse button down/up with the **target resolved at click time**:
+  window class, control ID (`GetDlgCtrlID` — stable across runs, mappable to
+  names via FlexColor.exe resources), window text (via
+  `SendMessageTimeout(WM_GETTEXT)`, 100 ms ABORTIFHUNG — can never hang),
+  screen rect, and up to two ancestor texts (the dialog/page chain)
+- drag moves while a button is held, throttled to 50 ms (slider trajectories)
+- wheel events, and keystrokes **only while FlexColor owns the foreground
+  window** (pid cache refreshed at 4 Hz)
+- foreground **title changes polled at 4 Hz** — catches progress text
+  ("Scanning ... 47%") that changes without any input
+
+Every record carries `t` = `GetTickCount()` — the SAME clock as the ioctl
+records' `t` field — so the two files interleave exactly:
+
+```
+python3 merge_trace.py <tracedir>               # unified timeline
+python3 merge_trace.py <tracedir> --from T --to T   # slice one action
+```
+
+Run it any time before or during the session (hooks are system-wide); close it
+with the console close button or `taskkill /im uiev.exe`.
+
+
 
 ## Offline build/test (Linux dev box)
 

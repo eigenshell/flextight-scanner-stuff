@@ -61,6 +61,7 @@
 #endif
 
 #define FT_LOG_NAME  "flextrace_ioctl.jsonl"
+#define FT_BUFS_NAME "flextrace_bufs.bin" /* binary payload sidecar (see below) */
 #define FT_TRAMP_SZ  64
 
 typedef BOOL (WINAPI *DeviceIoControl_fn)(HANDLE hDevice, DWORD dwIoControlCode,
@@ -78,6 +79,7 @@ static int  g_quiet;                      /* FT_QUIET=1: log only scanner SRB co
 static long g_quiet_logged;               /* quiet-mode record cap counter */
 static CRITICAL_SECTION g_log_cs;         /* serializes trace-file writes */
 static char g_log_path[MAX_PATH] = FT_LOG_NAME; /* resolved to the DLL's dir at load */
+static char g_bufs_path[MAX_PATH] = FT_BUFS_NAME; /* resolved next to g_log_path */
 static FILE *g_log_file;                /* opened ONCE at boot; kept open
                                            (per-record fopen/fclose was 2+
                                            syscalls per ioctl and stalled the
@@ -85,6 +87,12 @@ static FILE *g_log_file;                /* opened ONCE at boot; kept open
                                            driver answered the stalls with
                                            ERROR_IO_DEVICE (1117), which the
                                            app retried in a storm) */
+static FILE *g_bufs_file;               /* binary sidecar with the DATA BUFFERS
+                                           the SRBs point at (payloads), keyed
+                                           to jsonl records by (pid, seq) */
+static unsigned long g_seq;             /* per-intercepted-call counter, keyed
+                                           into both the jsonl "seq" field and
+                                           the sidecar records */
 
 /* FT_QUIET record cap: the SRB retry storm can hit thousands of identical
  * failures; beyond this many quiet-mode records the picture cannot get
@@ -104,12 +112,12 @@ static void ft_copy(void *dst, const void *src, size_t n)
         *d++ = *s++;
 }
 
-/* Resolve the trace path to the directory containing ft_hook.dll. The C:\ root
+/* Resolve the trace paths to the directory containing ft_hook.dll. The C:\ root
  * is not writable for non-elevated processes on Vista+, and the earlier
  * silent fopen failure there cost a debugging session; the DLL's own
  * directory is always writable (inject.exe already requires the pair to be
- * co-located). Falls back to the bare filename (process cwd) if the module
- * path cannot be determined. */
+ * co-located). Falls back to the bare filenames (process cwd) if the module
+ * path cannot be determined. Builds BOTH trace paths from one dir prefix. */
 static void ft_log_path_init(HINSTANCE hinst)
 {
     char p[MAX_PATH];
@@ -121,17 +129,19 @@ static void ft_log_path_init(HINSTANCE hinst)
             if (p[i] == '\\')
                 slash = p + i;
         if (slash) {
-            size_t namelen = sizeof FT_LOG_NAME - 1; /* compile-time constant */
-            size_t j, newlen;
-            slash++; /* keep the backslash, drop the DLL filename */
-            for (j = 0; j < namelen; j++)
-                slash[j] = FT_LOG_NAME[j];
-            slash[namelen] = '\0';
-            /* length AFTER the overwrite: dir + name (+ NUL). Copying the
-             * original module-path length here truncates the appended name
-             * (produced "flextrace_io" instead of flextrace_ioctl.jsonl). */
-            newlen = (size_t)(slash - p) + namelen;
-            ft_copy(g_log_path, p, newlen + 1);
+            /* keep the trailing backslash, drop the DLL filename */
+            size_t dirlen = (size_t)(slash - p) + 1;
+            size_t j;
+            for (j = 0; j < dirlen; j++) {
+                g_log_path[j] = p[j];
+                g_bufs_path[j] = p[j];
+            }
+            for (j = 0; FT_LOG_NAME[j]; j++)
+                g_log_path[dirlen + j] = FT_LOG_NAME[j];
+            g_log_path[dirlen + j] = '\0';
+            for (j = 0; FT_BUFS_NAME[j]; j++)
+                g_bufs_path[dirlen + j] = FT_BUFS_NAME[j];
+            g_bufs_path[dirlen + j] = '\0';
         }
     }
 }
@@ -165,15 +175,133 @@ static void ft_log_line(const char *line, size_t len)
  * see the DRIVER's real reason instead of whatever stale value the host app
  * prints in its error dialog. Parsers must skip lines that don't match the
  * ioctl-record schema, so this costs the main schema nothing. */
-static void ft_log_lasterr(unsigned long h, unsigned long code)
+static void ft_log_lasterr(unsigned long h, unsigned long code, unsigned long seq)
 {
-    char line[160];
+    char line[200];
     int n = snprintf(line, sizeof line,
-                     "{\"tag\":\"lasterr\",\"h\":\"0x%lx\","
+                     "{\"tag\":\"lasterr\",\"seq\":%lu,\"h\":\"0x%lx\","
                      "\"code\":\"0x%lx\",\"err\":%lu}",
-                     h, code, (unsigned long)GetLastError());
+                     seq, h, code, (unsigned long)GetLastError());
     if (n > 0 && (size_t)n < sizeof line)
         ft_log_line(line, (size_t)n);
+}
+
+/* ---- binary payload sidecar --------------------------------------------- *
+ * The 44-byte SRB header (in_head) names the CDB but not its payload.
+ * Empirical anatomy after the first sidecar smoke run (see README):
+ *   - SRB offset 36 is a readable pointer for every scanner SRB. For the
+ *     read-type commands (12/3c/24) it points to a small DESCRIPTOR
+ *     {u32 count=1, ptr} — the real data buffer is `ptr`, one indirection
+ *     in. For df (2-byte payload) it points straight at raw payload bytes
+ *     (0x01 0x00 = the poll code). So we dump the cand-36 target AND both
+ *     nested dwords (candidates 0x51/0x52), VirtualQuery-guarded.
+ *   - DeviceIoControl's lpOutBuffer (candidate 0x60) is the METHOD_OUT_DIRECT
+ *     data carrier: the driver copies read responses there (the INQUIRY
+ *     "Imacon" bytes showed up in out_head pre-sidecar) and write payloads
+ *     may sit there pre-call. Dumped pre- and post-call, no chasing needed.
+ * Every record is keyed (pid, seq, when, candidate) to its JSONL record.
+ * Silent on any doubt: a bad guess must never crash the host app.      */
+#define FT_BUF_SIDE_CAP 4096  /* per-dump cap: payloads are 2..1024 B today */
+#define FT_CAND_SRBPTR  0x36  /* dword at SRB offset 36 (descriptor/payload) */
+#define FT_CAND_IND0    0x51  /* *(u32*)(srbptr_target+0) */
+#define FT_CAND_IND1    0x52  /* *(u32*)(srbptr_target+4) */
+#define FT_CAND_OUTBUF  0x60  /* lpOutBuffer itself */
+
+/* Is [ptr, ptr+len) committed and readable? len is clamped by the caller. */
+static int ft_buf_readable(const void *ptr, size_t len)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    const BYTE *p = (const BYTE *)ptr;
+    size_t off = 0;
+    if (ptr == NULL || len == 0)
+        return 0;
+    while (off < len) {
+        if (VirtualQuery(p + off, &mbi, sizeof mbi) == 0)
+            return 0;
+        if (mbi.State != MEM_COMMIT)
+            return 0;
+        switch (mbi.Protect & 0xff) {
+        case PAGE_READONLY:
+        case PAGE_READWRITE:
+        case PAGE_WRITECOPY:
+        case PAGE_EXECUTE_READ:
+        case PAGE_EXECUTE_READWRITE:
+        case PAGE_EXECUTE_WRITECOPY:
+            break;
+        default:
+            return 0; /* PAGE_GUARD, PAGE_NOACCESS, zero */
+        }
+        off += mbi.RegionSize;
+    }
+    return 1;
+}
+
+/* Write one sidecar record: 4B pid, 4B seq, 1B when, 1B cand, 2B len, payload.
+ * Call under g_log_cs with g_bufs_file known-open. */
+static void ft_sidecar_write(DWORD pid, unsigned long seq, int when,
+                             unsigned char cand, const void *ptr, size_t len)
+{
+    unsigned char hdr[12];
+    unsigned short stored = (unsigned short)len;
+    ft_copy(hdr + 0, &pid, 4);
+    ft_copy(hdr + 4, &seq, 4);
+    hdr[8] = (unsigned char)when;
+    hdr[9] = cand;
+    ft_copy(hdr + 10, &stored, 2);
+    fwrite(hdr, 1, sizeof hdr, g_bufs_file);
+    fwrite(ptr, 1, len, g_bufs_file);
+}
+
+/* Dump every payload candidate for one intercepted call.
+ * `srb` = lpInBuffer (44-byte SRB), `outbuf` = lpOutBuffer. */
+static void ft_sidecar_dump(unsigned long seq, const void *srb,
+                            const void *outbuf, size_t outbuf_len, int when)
+{
+    const BYTE *b = (const BYTE *)srb;
+    DWORD dlen_le;
+    size_t dlen;
+    DWORD pid;
+    void *srbptr = NULL;
+    DWORD nested0, nested1;
+
+    if (!g_bufs_file)
+        return;
+    ft_copy(&dlen_le, b + 16, 4); /* SRB data length, little-endian */
+    dlen = dlen_le;
+    if (dlen == 0 || dlen > FT_BUF_SIDE_CAP)
+        return;
+    pid = GetCurrentProcessId();
+
+    EnterCriticalSection(&g_log_cs);
+    if (!g_bufs_file) {
+        LeaveCriticalSection(&g_log_cs);
+        return;
+    }
+
+    /* candidate 0x36: descriptor or raw payload buffer */
+    ft_copy(&srbptr, b + FT_CAND_SRBPTR, 4);
+    if (ft_buf_readable(srbptr, dlen))
+        ft_sidecar_write(pid, seq, when, FT_CAND_SRBPTR, srbptr, dlen);
+
+    /* candidates 0x51/0x52: one level of indirection into the descriptor */
+    if (ft_buf_readable(srbptr, 8)) {
+        ft_copy(&nested0, (BYTE *)srbptr + 0, 4);
+        ft_copy(&nested1, (BYTE *)srbptr + 4, 4);
+        if (ft_buf_readable((void *)nested0, dlen))
+            ft_sidecar_write(pid, seq, when, FT_CAND_IND0,
+                             (void *)nested0, dlen);
+        if (ft_buf_readable((void *)nested1, dlen))
+            ft_sidecar_write(pid, seq, when, FT_CAND_IND1,
+                             (void *)nested1, dlen);
+    }
+
+    /* candidate 0x60: the METHOD_OUT_DIRECT carrier buffer */
+    if (outbuf != NULL && outbuf_len > 0 &&
+        outbuf_len <= FT_BUF_SIDE_CAP && ft_buf_readable(outbuf, outbuf_len))
+        ft_sidecar_write(pid, seq, when, FT_CAND_OUTBUF, outbuf, outbuf_len);
+
+    fflush(g_bufs_file);
+    LeaveCriticalSection(&g_log_cs);
 }
 
 static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
@@ -195,18 +323,38 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
                        lpOverlapped);
 
     g_inside = 1;
+    {
+        unsigned long seq = g_seq++;
 
-    /* pre-call state (quiet mode: only bother for the scanner SRB codes) */
-    if (lpInBuffer != NULL && nInBufferSize > 0 &&
-        (!g_quiet || dwIoControlCode == FT_CODE_SRB ||
-         dwIoControlCode == FT_CODE_SRB2)) {
-        in_head_len = nInBufferSize < FT_MAX_HEAD ? nInBufferSize : FT_MAX_HEAD;
-        ft_copy(in_head, lpInBuffer, in_head_len);
-    }
+        /* pre-call state (quiet mode: only bother for the scanner SRB codes) */
+        if (lpInBuffer != NULL && nInBufferSize > 0 &&
+            (!g_quiet || dwIoControlCode == FT_CODE_SRB ||
+             dwIoControlCode == FT_CODE_SRB2)) {
+            in_head_len = nInBufferSize < FT_MAX_HEAD ? nInBufferSize : FT_MAX_HEAD;
+            ft_copy(in_head, lpInBuffer, in_head_len);
+        }
 
-    ret = g_tramp(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
-                  lpOutBuffer, nOutBufferSize, lpBytesReturned,
-                  lpOverlapped);
+        /* payload sidecar: dump the SRB data buffer and lpOutBuffer pre-call
+         * (what the app SENT: df/e0 write payloads, INQUIRY is a nothing) for
+         * scanner SRBs except the streaming READ(10) (0x28) — its buffer is
+         * multi-MB and fully described by the CDB anyway */
+        if (g_bufs_file && dwIoControlCode == FT_CODE_SRB &&
+            lpInBuffer != NULL && nInBufferSize >= 44 &&
+            ((const BYTE *)lpInBuffer)[20] != 0x28)
+            ft_sidecar_dump(seq, lpInBuffer, lpOutBuffer, nOutBufferSize, 0);
+
+        ret = g_tramp(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
+                      lpOutBuffer, nOutBufferSize, lpBytesReturned,
+                      lpOverlapped);
+
+        /* post-call: the buffers now hold what the DEVICE answered (df ack,
+         * 24 status bytes, 3c buffer contents, INQUIRY page). Only when the
+         * call RETURNED success: for overlapped I/O ret==0/err 997 means the
+         * driver is still writing lpOutBuffer, so a post-dump would race it */
+        if (g_bufs_file && ret != 0 && dwIoControlCode == FT_CODE_SRB &&
+            lpInBuffer != NULL && nInBufferSize >= 44 &&
+            ((const BYTE *)lpInBuffer)[20] != 0x28)
+            ft_sidecar_dump(seq, lpInBuffer, lpOutBuffer, nOutBufferSize, 1);
 
     /* The true failure reason must be captured NOW: our own CRT logging
      * calls below (fopen/fwrite/...) clobber GetLastError. Emitted as a
@@ -216,7 +364,7 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
         (!g_quiet || dwIoControlCode == FT_CODE_SRB ||
          dwIoControlCode == FT_CODE_SRB2))
         ft_log_lasterr((unsigned long)(ULONG_PTR)hDevice,
-                       (unsigned long)dwIoControlCode);
+                       (unsigned long)dwIoControlCode, seq);
 
     /* quiet mode: drop everything except the scanner SRB codes (and cap the
      * storm) — bisects "hook presence on the call stack" against "logging
@@ -242,6 +390,8 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
 
     rlen = ft_fmt_ioctl_record(rec, sizeof rec,
                                (unsigned long)(ULONG_PTR)hDevice,
+                               seq,
+                               (unsigned long)GetTickCount(), /* same clock as uiev.exe */
                                (unsigned long)dwIoControlCode,
                                (size_t)nInBufferSize, in_head, in_head_len,
                                ret != 0,
@@ -250,6 +400,7 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
                                out_head, out_head_len);
     if (rlen > 0)
         ft_log_line(rec, (size_t)rlen);
+    }
 
     g_inside = 0;
     return ret;
@@ -411,6 +562,9 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         /* open ONCE: per-record fopen/fclose dominated the per-call cost and
          * stalled the host's SCSI thread (see g_log_file comment) */
         g_log_file = fopen(g_log_path, "a");
+        /* binary payload sidecar; append so a crash in a previous session
+         * does not destroy payloads already correlated with its jsonl */
+        g_bufs_file = fopen(g_bufs_path, "ab");
         g_passthru = (envn > 0 && envn < sizeof envbuf);
         g_quiet = (qn > 0 && qn < sizeof envbuf);
         g_installed = ft_install_hook(&fail_reason);
@@ -423,6 +577,10 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
         if (g_log_file) {
             fclose(g_log_file);
             g_log_file = NULL;
+        }
+        if (g_bufs_file) {
+            fclose(g_bufs_file);
+            g_bufs_file = NULL;
         }
         LeaveCriticalSection(&g_log_cs);
         DeleteCriticalSection(&g_log_cs);
