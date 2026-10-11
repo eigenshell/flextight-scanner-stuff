@@ -43,9 +43,10 @@ unsupported outright; see the test suite's structure-loss test.) A pure
 ``median`` method (masked sliding-median fill, no OpenCV photo module) is
 provided as a dependency-free fallback.
 
-Defaults process a 4 MP 16-bit RGB scan in ~2 s on the reference machine
-(measured 1.4-2 s, first run with cold caches up to ~18 s; budget: 30 s);
-the sliding 1-D medians dominate runtime.
+Defaults process a 4 MP 16-bit RGB scan in ~5 s on a modern desktop
+(measured 5.16 s on the review machine; data-independent, first run with
+cold caches may be slower; budget: 30 s); the sliding 1-D medians dominate
+runtime.
 
 Known limitations (documented trade-offs, pinned by the test suite):
   - defects sitting ON a hard edge or corner are suppressed together with

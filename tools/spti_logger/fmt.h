@@ -19,6 +19,10 @@
 extern "C" {
 #endif
 
+/* Bytes of in/out buffer captured in the head fields. Single definition
+ * here so the formatter (fmt.c) and the hook (hook.c) cannot drift. */
+#define FT_MAX_HEAD 64
+
 /* Writes one JSONL record (no trailing newline) into buf.
  * Returns bytes written (excl. NUL) or -1 if cap is insufficient. */
 int ft_fmt_ioctl_record(char *buf, size_t cap,

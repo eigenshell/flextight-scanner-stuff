@@ -674,7 +674,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("src", help="directory with FlexColor *.xml_2 profiles")
     ap.add_argument("out", help="output directory for .dtstyle files")
     args = ap.parse_args(argv)
-    written, skipped = convert_directory(args.src, args.out)
+    try:
+        written, skipped = convert_directory(args.src, args.out)
+    except ProfileError as exc:
+        print(f"xml2dtstyle: error: {exc}", file=sys.stderr)
+        return 1
     print(f"converted {written} film profiles to {args.out} (skipped {skipped} non-profiles)")
     return 0
 

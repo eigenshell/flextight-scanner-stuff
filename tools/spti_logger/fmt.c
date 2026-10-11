@@ -3,8 +3,6 @@
  */
 #include "fmt.h"
 
-#define FT_MAX_HEAD 64 /* bytes of in/out buffer captured in the head fields */
-
 /* ---- tiny append helpers (no libc) ------------------------------------ */
 
 static char *ft_str(char *p, const char *s)

@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -372,6 +373,28 @@ def test_batch_full_cab_count():
         written, skipped = convert_directory(CAB_DIR, d)
     # 100 XMLs in the CAB: 98 film profiles + Default + messages
     assert (written, skipped) == (98, 2)
+
+
+def test_cli_malformed_profile_error_style(tmp_path):
+    """A malformed ImageCorrection plist must exit 1 with a one-line error,
+    not a raw traceback — same contract as despeckle.py's CLI."""
+    src = tmp_path / "cab"
+    src.mkdir()
+    plist = plistlib.load(open(PORTRA, "rb"))
+    plist["ImageSetting"]["ImageCorrection"]["USMAmount"] = "lots"
+    bad = src / "Bad_USM.xml_2"
+    bad.write_bytes(plistlib.dumps(plist))
+    out = tmp_path / "styles"
+    repo_root = Path(__file__).parent.parent
+    proc = subprocess.run(
+        [sys.executable, "-m", "tools.xml2dtstyle", str(src), str(out)],
+        capture_output=True,
+        cwd=repo_root,
+    )
+    assert proc.returncode == 1
+    assert b"Traceback" not in proc.stderr
+    assert b"xml2dtstyle: error:" in proc.stderr
+    assert not (out / "Bad_USM.dtstyle").exists()
 
 
 # ---------------------------------------------------------------------------

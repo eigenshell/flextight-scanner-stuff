@@ -57,7 +57,6 @@
 #endif
 
 #define FT_LOG_PATH  "C:\\flextrace_ioctl.jsonl"
-#define FT_MAX_HEAD  64
 #define FT_TRAMP_SZ  64
 
 typedef BOOL (WINAPI *DeviceIoControl_fn)(HANDLE hDevice, DWORD dwIoControlCode,
