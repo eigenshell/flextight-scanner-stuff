@@ -273,8 +273,12 @@ static void ft_sidecar_dump(unsigned long seq, const void *srb,
         return;
     ft_copy(&dlen_le, b + 16, 4); /* SRB data length, little-endian */
     dlen = dlen_le;
-    if (dlen == 0 || dlen > FT_BUF_SIDE_CAP)
+    if (dlen == 0)
         return;
+    if (dlen > FT_BUF_SIDE_CAP)
+        dlen = FT_BUF_SIDE_CAP; /* clamp: dump the head of oversized payloads
+                                 * (the 32 KB motor-table 3b write is 32852 B)
+                                 * rather than skipping them entirely */
     pid = GetCurrentProcessId();
 
     EnterCriticalSection(&g_log_cs);
@@ -342,7 +346,9 @@ static void ft_pend_add(unsigned long seq, const void *outbuf, size_t outbuf_len
 
     ft_copy(&dlen_le, b + 16, 4);
     r->dlen = dlen_le;
-    if (r->dlen == 0 || r->dlen > FT_BUF_SIDE_CAP) {
+    if (r->dlen > FT_BUF_SIDE_CAP)
+        r->dlen = FT_BUF_SIDE_CAP; /* same clamp as ft_sidecar_dump */
+    if (r->dlen == 0) {
         r->active = 0;
         return;
     }
