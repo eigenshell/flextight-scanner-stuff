@@ -243,7 +243,7 @@ static LRESULT CALLBACK uiev_key_ll(int code, WPARAM wp, LPARAM lp)
         if (pid == g_flexpid) {
             uiev_wtext(fg, ftxt, sizeof ftxt);
             fprintf(g_log, "{\"tag\":\"uiev\",\"t\":%lu,\"kind\":\"key\",\"vk\":%lu,\"fg\":",
-                    (unsigned long)GetTickCount(), (unsigned long)k->vk);
+                    (unsigned long)GetTickCount(), (unsigned long)k->vkCode);
             uiev_json_str(ftxt);
             fputs("}\n", g_log);
             fflush(g_log);
