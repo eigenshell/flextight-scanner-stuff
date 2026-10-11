@@ -134,9 +134,13 @@ in-flight I/O):
 
 Record: 12-byte header `<IIBBH` = u32 pid, u32 seq, u8 when (0=pre/1=post),
 u8 cand, u16 len, then len payload bytes — little-endian. Correlate to the
-JSONL record by `(pid, seq)`; `when` picks sent vs answered. All pointers are
-VirtualQuery-guarded (`MEM_COMMIT` + readable protect); anything doubtful is
-skipped, never dereferenced blindly.
+JSONL record by `(pid, seq)`; `when` picks sent (0), answered-sync (1), or
+**answered-async (2)** — FlexColor issues nearly everything overlapped
+(err 997), so the device data for those calls only exists in the `when=2`
+late-completion dump (fired at the next scanner-SRB hook, when the app has
+waited for the I/O). All pointers are VirtualQuery-guarded (`MEM_COMMIT` +
+readable protect); anything doubtful is skipped, never dereferenced blindly.
+Per-dump cap 8192 bytes (the startup `3b` microcode chunks are 4106).
 
 ## UI event timeline (`flextrace_uiev.jsonl`)
 

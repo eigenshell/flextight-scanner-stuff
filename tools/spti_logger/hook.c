@@ -200,8 +200,13 @@ static void ft_log_lasterr(unsigned long h, unsigned long code, unsigned long se
  *     "Imacon" bytes showed up in out_head pre-sidecar) and write payloads
  *     may sit there pre-call. Dumped pre- and post-call, no chasing needed.
  * Every record is keyed (pid, seq, when, candidate) to its JSONL record.
+ * `when`: 0 = pre-call (what the app sent), 1 = post-call on synchronous
+ * success (what the device answered), 2 = late completion dump of an
+ * overlapped (err 997) call — fired at the NEXT scanner-SRB hook, when the
+ * app has waited for the I/O and the buffer is final (session 2 proved that
+ * without this, async responses only appear as reused-buffer leftovers).
  * Silent on any doubt: a bad guess must never crash the host app.      */
-#define FT_BUF_SIDE_CAP 4096  /* per-dump cap: payloads are 2..1024 B today */
+#define FT_BUF_SIDE_CAP 8192  /* per-dump cap: 3b microcode chunks are 4106 B */
 #define FT_CAND_SRBPTR  0x36  /* dword at SRB offset 36 (descriptor/payload) */
 #define FT_CAND_IND0    0x51  /* *(u32*)(srbptr_target+0) */
 #define FT_CAND_IND1    0x52  /* *(u32*)(srbptr_target+4) */
@@ -304,6 +309,95 @@ static void ft_sidecar_dump(unsigned long seq, const void *srb,
     LeaveCriticalSection(&g_log_cs);
 }
 
+/* ---- async completion tracking ------------------------------------------- *
+ * Overlapped (err 997) calls fill lpOutBuffer AFTER DeviceIoControl returns,
+ * so the when=1 dump at return time is too early (the buffer still holds
+ * pre-call content). The app must wait for completion before issuing the
+ * next dependent SCSI command, so by the time the NEXT scanner SRB arrives
+ * the buffer is final. We therefore track pending async calls and re-dump
+ * their buffers once, tagged when=2, at the next scanner-SRB hook.
+ * All pointers re-checked with VirtualQuery at dump time; buffers that the
+ * app has since freed are skipped silently.                        */
+#define FT_PEND_MAX 64
+
+typedef struct {
+    int active;
+    unsigned long seq;
+    DWORD tick;             /* issue time (GetTickCount, correlates with t) */
+    const void *outbuf;     /* lpOutBuffer as passed at issue */
+    size_t outbuf_len;
+    void *srbptr;           /* SRB offset-36 target at issue */
+    size_t dlen;            /* SRB data length at issue */
+} ft_pend_rec;
+
+static ft_pend_rec g_pend[FT_PEND_MAX];
+static unsigned g_pend_next;
+
+static void ft_pend_add(unsigned long seq, const void *outbuf, size_t outbuf_len,
+                        const void *srb)
+{
+    const BYTE *b = (const BYTE *)srb;
+    DWORD dlen_le;
+    ft_pend_rec *r = &g_pend[g_pend_next];
+
+    ft_copy(&dlen_le, b + 16, 4);
+    r->dlen = dlen_le;
+    if (r->dlen == 0 || r->dlen > FT_BUF_SIDE_CAP) {
+        r->active = 0;
+        return;
+    }
+    r->seq = seq;
+    r->tick = GetTickCount();
+    r->outbuf = outbuf;
+    r->outbuf_len = outbuf_len;
+    ft_copy(&r->srbptr, b + FT_CAND_SRBPTR, 4);
+    r->active = 1;
+    g_pend_next = (g_pend_next + 1) % FT_PEND_MAX;
+}
+
+/* re-dump one tracked buffer set, same candidates as the main sidecar.
+ * Caller holds g_log_cs. */
+static void ft_pend_dump_one(ft_pend_rec *r, DWORD pid)
+{
+    DWORD nested0, nested1;
+
+    if (r->srbptr != NULL && ft_buf_readable(r->srbptr, r->dlen))
+        ft_sidecar_write(pid, r->seq, 2, FT_CAND_SRBPTR, r->srbptr, r->dlen);
+    if (ft_buf_readable(r->srbptr, 8)) {
+        ft_copy(&nested0, (BYTE *)r->srbptr + 0, 4);
+        ft_copy(&nested1, (BYTE *)r->srbptr + 4, 4);
+        if (ft_buf_readable((void *)nested0, r->dlen))
+            ft_sidecar_write(pid, r->seq, 2, FT_CAND_IND0,
+                             (void *)nested0, r->dlen);
+        if (ft_buf_readable((void *)nested1, r->dlen))
+            ft_sidecar_write(pid, r->seq, 2, FT_CAND_IND1,
+                             (void *)nested1, r->dlen);
+    }
+    if (r->outbuf != NULL && r->outbuf_len > 0 &&
+        r->outbuf_len <= FT_BUF_SIDE_CAP &&
+        ft_buf_readable(r->outbuf, r->outbuf_len))
+        ft_sidecar_write(pid, r->seq, 2, FT_CAND_OUTBUF,
+                         r->outbuf, r->outbuf_len);
+}
+
+static void ft_pend_flush(void)
+{
+    DWORD pid = GetCurrentProcessId();
+    unsigned i;
+
+    EnterCriticalSection(&g_log_cs);
+    if (g_bufs_file) {
+        for (i = 0; i < FT_PEND_MAX; i++) {
+            if (!g_pend[i].active)
+                continue;
+            g_pend[i].active = 0;
+            ft_pend_dump_one(&g_pend[i], pid);
+        }
+        fflush(g_bufs_file);
+    }
+    LeaveCriticalSection(&g_log_cs);
+}
+
 static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
                                           LPVOID lpInBuffer, DWORD nInBufferSize,
                                           LPVOID lpOutBuffer, DWORD nOutBufferSize,
@@ -314,7 +408,8 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
     unsigned char out_head[FT_MAX_HEAD];
     size_t in_head_len = 0, out_head_len = 0;
     BOOL ret;
-    char rec[520];
+    DWORD err_now = 0;
+    char rec[540];
     int rlen;
 
     if (g_passthru || g_inside) /* never recurse through our own logging */
@@ -337,15 +432,21 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
         /* payload sidecar: dump the SRB data buffer and lpOutBuffer pre-call
          * (what the app SENT: df/e0 write payloads, INQUIRY is a nothing) for
          * scanner SRBs except the streaming READ(10) (0x28) — its buffer is
-         * multi-MB and fully described by the CDB anyway */
+         * multi-MB and fully described by the CDB anyway. First flush any
+         * async completions still pending from earlier overlapped calls —
+         * their buffers are final now (the app waited before re-issuing). */
         if (g_bufs_file && dwIoControlCode == FT_CODE_SRB &&
             lpInBuffer != NULL && nInBufferSize >= 44 &&
-            ((const BYTE *)lpInBuffer)[20] != 0x28)
+            ((const BYTE *)lpInBuffer)[20] != 0x28) {
+            ft_pend_flush();
             ft_sidecar_dump(seq, lpInBuffer, lpOutBuffer, nOutBufferSize, 0);
+        }
 
         ret = g_tramp(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
                       lpOutBuffer, nOutBufferSize, lpBytesReturned,
                       lpOverlapped);
+        if (ret == 0)
+            err_now = GetLastError(); /* capture NOW: CRT below clobbers it */
 
         /* post-call: the buffers now hold what the DEVICE answered (df ack,
          * 24 status bytes, 3c buffer contents, INQUIRY page). Only when the
@@ -355,6 +456,15 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
             lpInBuffer != NULL && nInBufferSize >= 44 &&
             ((const BYTE *)lpInBuffer)[20] != 0x28)
             ft_sidecar_dump(seq, lpInBuffer, lpOutBuffer, nOutBufferSize, 1);
+
+        /* overlapped completion pending: the response lands later, in the
+         * app thread's wait. Track it; the when=2 dump fires at the next
+         * scanner-SRB hook, when the buffer is final. */
+        if (g_bufs_file && ret == 0 && err_now == ERROR_IO_PENDING &&
+            dwIoControlCode == FT_CODE_SRB &&
+            lpInBuffer != NULL && nInBufferSize >= 44 &&
+            ((const BYTE *)lpInBuffer)[20] != 0x28)
+            ft_pend_add(seq, lpOutBuffer, nOutBufferSize, lpInBuffer);
 
     /* The true failure reason must be captured NOW: our own CRT logging
      * calls below (fopen/fwrite/...) clobber GetLastError. Emitted as a

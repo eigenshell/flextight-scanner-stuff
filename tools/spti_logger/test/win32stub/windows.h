@@ -49,6 +49,7 @@ typedef long LONG;
 #define WAIT_OBJECT_0 0
 #define WAIT_TIMEOUT 0x102
 #define STILL_ACTIVE 0x103
+#define ERROR_IO_PENDING 997L
 
 typedef struct _STARTUPINFOA {
     DWORD cb;
