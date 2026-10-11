@@ -47,6 +47,10 @@ Suggested first session, in order: `inquiry`, `poll 10`, `win`, `park`,
   ~9M), steps to 50, and every step waits for df == `0000`.
 - Ctrl+C mid-move only abandons the console; the device finishes the
   current small step to a commanded position.
+- Every command except `inquiry` first retries INQUIRY (1 s apart, up to
+  20 s) until the device answers: right after the driver opens, the
+  scanner fails I/O with ERROR_IO_DEVICE for ~1 s (FlexColor's own first
+  7 INQUIRYs fail the same way, session 4).
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching
   FlexColor's own 5 s wait.
 

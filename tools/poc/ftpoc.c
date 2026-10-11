@@ -109,6 +109,20 @@ static int srb_exec(const BYTE *cdb, int cdb_len, BYTE dir,
     return (int)transferred;
 }
 
+static const char *srb_errstr(int r)
+{
+    static char buf[64];
+    switch (r) {
+    case -1: sprintf(buf, "DeviceIoControl rejected (GLE=%lu)",
+                     GetLastError()); break;
+    case -2: sprintf(buf, "timed out after wait"); break;
+    case -3: sprintf(buf, "I/O completed with error (GLE=%lu)",
+                     GetLastError()); break;
+    default: sprintf(buf, "code %d", r); break;
+    }
+    return buf;
+}
+
 /* ----------------------------------------------------------------- commands */
 
 static const BYTE CDB_INQUIRY[6] = { 0x12, 0, 0, 0, 0x60, 0 };
@@ -151,7 +165,7 @@ static int cmd_inquiry(void)
     int r, i;
     memset(buf, 0, sizeof buf);
     r = srb_exec(CDB_INQUIRY, 6, SRB_DIR_IN, buf, sizeof buf, TIMEOUT_MS);
-    if (r < 0) { printf("INQUIRY: transport error %d\n", r); return 1; }
+    if (r < 0) { printf("INQUIRY: %s\n", srb_errstr(r)); return 1; }
     printf("INQUIRY: %d bytes\n", r);
     printf("  vendor : %.8s\n", buf + 8);
     printf("  product: %.16s\n", buf + 16);
@@ -164,6 +178,30 @@ static int cmd_inquiry(void)
         printf("  NOTE: loader firmware — run `upload MICROCOD.3XX` before "
                "anything else.\n");
     return 0;
+}
+
+/* The device needs ~1 s after driver open before it answers (FlexColor's
+ * own first INQUIRYs fail with ERROR_IO_DEVICE too — session 4, seq 5-19).
+ * Retry INQUIRY until it answers; give up after ~20 s. */
+static int wait_ready(void)
+{
+    int attempt;
+    char last[64] = "";
+    for (attempt = 0; attempt < 20; attempt++) {
+        BYTE buf[96];
+        int r = srb_exec(CDB_INQUIRY, 6, SRB_DIR_IN, buf, sizeof buf, 3000);
+        if (r >= 0) {
+            if (attempt > 0)
+                printf("ready after %d attempt(s)\n", attempt + 1);
+            return 0;
+        }
+        /* format now: GetLastError() is only meaningful right after the call */
+        strcpy(last, srb_errstr(r));
+        Sleep(1000);
+    }
+    fprintf(stderr, "scanner did not become ready within 20 s "
+                    "(last: %s)\n", last);
+    return 1;
 }
 
 static const char *poll_name(unsigned v)
@@ -201,7 +239,7 @@ static int cmd_poll(int n, int quiet)
     int i;
     for (i = 0; i < n; i++) {
         int v = poll_once();
-        if (v < 0) { printf("poll %d: transport error %d\n", i, v); return 1; }
+        if (v < 0) { printf("poll %d: %s\n", i, srb_errstr(v)); return 1; }
         if (!quiet)
             printf("poll %d: %04x  %s\n", i, v, poll_name((unsigned)v));
         else if (i == 0 || i == n - 1)
@@ -235,7 +273,7 @@ static int cmd_win(void)
     int r;
     memcpy(desc, IDLE_WIN, 84);
     r = win_exchange(desc, 1);
-    if (r < 0) { printf("SetWindow: transport error %d\n", r); return 1; }
+    if (r < 0) { printf("SetWindow: %s\n", srb_errstr(r)); return 1; }
     printf("SetWindow: %d bytes; device state bytes 0-7 = %02x %02x %02x %02x "
            "%02x %02x %02x %02x\n", r,
            desc[0], desc[1], desc[2], desc[3],
@@ -278,7 +316,7 @@ static int move_to(long pos, const char *why)
     desc[14] = (BYTE)((pos >> 24) & 0xff);
     printf("move -> %ld (%s)\n", pos, why);
     r = win_exchange(desc, 0);
-    if (r < 0) { printf("SetWindow: transport error %d\n", r); return 1; }
+    if (r < 0) { printf("SetWindow: %s\n", srb_errstr(r)); return 1; }
     r = wait_idle(30000);
     if (r != 0) {
         printf("warning: carriage did not report idle (%d)\n", r);
@@ -320,11 +358,14 @@ static int cmd_move(long delta, int steps)
 
 static int cmd_pages(void)
 {
-    static const struct { BYTE id, off; WORD len; const char *name; } pages[] = {
-        { 0xd8, 0x00, 0x42,   "descriptor page" },
-        { 0xe0, 0x16, 0x16,   "FaulPixs header" },
-        { 0xe0, 0x13e,0x13e,  "FaulPixs table" },
-        { 0xe0, 0x00, 0x400, "buffer e0/400" },
+    /* CDB: 3c 00 II 00 OFF_HI OFF_LO 00 LL_HI LL_LO 00 — offset and length
+     * are big-endian 16-bit fields (pinned from session-4 captures). */
+    static const struct { BYTE id; WORD off, len; const char *name; } pages[] = {
+        { 0xd8, 0x0000, 0x0042, "descriptor page" },
+        { 0xd8, 0x0037, 0x000a, "descriptor tail" },
+        { 0xe0, 0x0004, 0x0016, "FaulPixs header" },
+        { 0xe0, 0x0004, 0x013e, "FaulPixs table" },
+        { 0xe0, 0x0000, 0x0400, "buffer e0/400" },
     };
     size_t i;
     for (i = 0; i < sizeof pages / sizeof pages[0]; i++) {
@@ -332,13 +373,14 @@ static int cmd_pages(void)
         int r, j;
         memcpy(cdb, CDB_PAGE, 10);
         cdb[2] = pages[i].id;
-        cdb[4] = pages[i].off;
+        cdb[4] = (BYTE)(pages[i].off >> 8);
+        cdb[5] = (BYTE)(pages[i].off & 0xff);
         cdb[7] = (BYTE)(pages[i].len >> 8);
         cdb[8] = (BYTE)(pages[i].len & 0xff);
         memset(buf, 0, sizeof buf);
         r = srb_exec(cdb, 10, SRB_DIR_IN, buf, pages[i].len, TIMEOUT_MS);
-        if (r < 0) { printf("%s: transport error %d\n", pages[i].name, r); continue; }
-        printf("%s (%02x/%02x, %u bytes):", pages[i].name,
+        if (r < 0) { printf("%s: %s\n", pages[i].name, srb_errstr(r)); continue; }
+        printf("%s (%02x/%04x, %u bytes):", pages[i].name,
                pages[i].id, pages[i].off, pages[i].len);
         for (j = 0; j < r && j < 48; j++)
             printf(" %02x", buf[j]);
@@ -369,7 +411,7 @@ static int cmd_grab(long blocks, WORD blklen, const char *out)
     for (b = 0; b < blocks; b++) {
         int r = srb_exec(cdb, 10, SRB_DIR_IN, buf, blklen, TIMEOUT_MS);
         if (r < 0) {
-            printf("grab %ld: transport error %d, stopping\n", b, r);
+            printf("grab %ld: %s, stopping\n", b, srb_errstr(r));
             bad = 1;
             break;
         }
@@ -397,7 +439,7 @@ static int cmd_scan(long blocks, const char *out)
     printf("sending scan-arm descriptor (pos %ld)\n",
            (long)((desc[14] << 24) | (desc[13] << 16) | (desc[12] << 8) | desc[11]));
     r = win_exchange(desc, 0);
-    if (r < 0) { printf("SetWindow: transport error %d\n", r); return 1; }
+    if (r < 0) { printf("SetWindow: %s\n", srb_errstr(r)); return 1; }
 
     printf("calibration reads (200+50, discarded)\n");
     {
@@ -415,7 +457,7 @@ static int cmd_scan(long blocks, const char *out)
             v = poll_once();
             if (v == 0x1060)
                 break;
-            if (v < 0) { printf("poll transport error %d\n", v); break; }
+            if (v < 0) { printf("poll: %s\n", srb_errstr(v)); break; }
             if (v != 0x0400 && v != 0x0000)
                 printf("  ... %04x %s\n", v, poll_name((unsigned)v));
             if (GetTickCount() - start > 90000) {
@@ -522,36 +564,36 @@ int main(int argc, char **argv)
     if (strcmp(cmd, "inquiry") == 0 || strcmp(cmd, "devices") == 0) {
         g_dev = open_scanner();
         rc = cmd_inquiry();
-    } else if (strcmp(cmd, "poll") == 0) {
-        int n = argc > 2 ? atoi(argv[2]) : 10;
-        g_dev = open_scanner();
-        rc = cmd_poll(n, n > 20);
-    } else if (strcmp(cmd, "win") == 0) {
-        g_dev = open_scanner();
-        rc = cmd_win();
-    } else if (strcmp(cmd, "park") == 0) {
-        g_dev = open_scanner();
-        rc = cmd_park();
-    } else if (strcmp(cmd, "move") == 0 && argc > 2) {
-        g_dev = open_scanner();
-        rc = cmd_move(atol(argv[2]), argc > 3 ? atoi(argv[3]) : 1);
-    } else if (strcmp(cmd, "pages") == 0) {
-        g_dev = open_scanner();
-        rc = cmd_pages();
-    } else if (strcmp(cmd, "grab") == 0 && argc > 2) {
-        g_dev = open_scanner();
-        rc = cmd_grab(atol(argv[2]),
-                      argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
-    } else if (strcmp(cmd, "scan") == 0) {
-        g_dev = open_scanner();
-        rc = cmd_scan(argc > 2 ? atol(argv[2]) : 480, "scan.raw");
-    } else if (strcmp(cmd, "upload") == 0 && argc > 2) {
-        g_dev = open_scanner();
-        rc = cmd_upload(argv[2]);
     } else {
-        fprintf(stderr, "ftpoc: unknown command '%s' (try without args for "
-                        "usage)\n", cmd);
-        rc = 2;
+        /* every other command needs a live device */
+        g_dev = open_scanner();
+        if (wait_ready())
+            return 1;
+
+        if (0) { }
+        else if (strcmp(cmd, "poll") == 0) {
+            int n = argc > 2 ? atoi(argv[2]) : 10;
+            rc = cmd_poll(n, n > 20);
+        } else if (strcmp(cmd, "win") == 0) {
+            rc = cmd_win();
+        } else if (strcmp(cmd, "park") == 0) {
+            rc = cmd_park();
+        } else if (strcmp(cmd, "move") == 0 && argc > 2) {
+            rc = cmd_move(atol(argv[2]), argc > 3 ? atoi(argv[3]) : 1);
+        } else if (strcmp(cmd, "pages") == 0) {
+            rc = cmd_pages();
+        } else if (strcmp(cmd, "grab") == 0 && argc > 2) {
+            rc = cmd_grab(atol(argv[2]),
+                          argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
+        } else if (strcmp(cmd, "scan") == 0) {
+            rc = cmd_scan(argc > 2 ? atol(argv[2]) : 480, "scan.raw");
+        } else if (strcmp(cmd, "upload") == 0 && argc > 2) {
+            rc = cmd_upload(argv[2]);
+        } else {
+            fprintf(stderr, "ftpoc: unknown command '%s' (try without args "
+                            "for usage)\n", cmd);
+            rc = 2;
+        }
     }
 
     if (g_dev != INVALID_HANDLE_VALUE)
