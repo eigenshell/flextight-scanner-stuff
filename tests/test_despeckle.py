@@ -17,8 +17,10 @@ not import constants from the implementation). Assertions:
 """
 
 import shutil
+import struct
 import subprocess
 import time
+import zlib
 
 import numpy as np
 import pytest
@@ -186,6 +188,24 @@ def test_detect_false_positive_rate(color_fixture):
         max_defect_size=DEFAULT_MAX_DEFECT_SIZE,
     )
     assert not mask_clean.any()
+
+
+def test_detect_lower_sensitivity_operating_point(color_fixture):
+    """Second operating point: a lower threshold trades false positives on
+    the fine sinusoidal texture for marginally better recall. Bounds are
+    deliberately relaxed relative to the default-sensitivity test.
+    Measured on this fixture: recall 0.970, fp_rate 0.001205."""
+    _, dusted, defect = color_fixture
+    mask = detect_defects(
+        dusted,
+        sensitivity=0.02,
+        max_defect_size=DEFAULT_MAX_DEFECT_SIZE,
+    )
+    spot_free = ~dilate(defect, iterations=2)
+    recall = (mask & defect).sum() / defect.sum()
+    fp_rate = (mask & spot_free).sum() / spot_free.sum()
+    assert recall > 0.95, f"recall {recall:.4f} below 0.95 at sensitivity 0.02"
+    assert fp_rate < 0.005, f"fp_rate {fp_rate:.6f} >= 0.005 at sensitivity 0.02"
 
 
 # --- Inpainting quality -----------------------------------------------------
@@ -452,10 +472,68 @@ def test_cli_rejects_unknown_extension(tmp_path, capsys):
     assert "bmp" in capsys.readouterr().err.lower()
 
 
+def _png_chunk(tag: bytes, payload: bytes) -> bytes:
+    """One PNG chunk with a correct CRC; pinned wire format."""
+    return (
+        struct.pack(">I", len(payload))
+        + tag
+        + payload
+        + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
+    )
+
+
+@pytest.mark.parametrize(
+    "name, blob, needle",
+    [
+        pytest.param(
+            "truncated.tif",
+            b"II*\x00" + struct.pack("<I", 8) + b"\x01\x00" + b"\x00" * 6,
+            "malformed TIFF",
+            id="tiff-truncated",
+        ),
+        pytest.param(
+            "corrupt.png",
+            b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+            + _png_chunk(b"IDAT", b"not zlib data")
+            + _png_chunk(b"IEND", b""),
+            "malformed PNG",
+            id="png-bad-idat",
+        ),
+    ],
+)
+def test_cli_malformed_input_no_traceback(tmp_path, capsys, name, blob, needle):
+    """Truncated/corrupt input must exit 1 with an actionable message —
+    never a traceback (struct.error/zlib.error are wrapped in ValueError)."""
+    src = tmp_path / name
+    src.write_bytes(blob)
+    rc = run_cli([str(src), str(tmp_path / "out.tif")])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    assert needle in err
+
+
 def test_cli_missing_input(tmp_path, capsys):
     rc = run_cli([str(tmp_path / "nope.tif"), str(tmp_path / "out.tif")])
     assert rc == 1
     assert "nope" in capsys.readouterr().err
+
+
+def test_cli_bad_maskout_suffix_writes_nothing(color_fixture, tmp_path, capsys):
+    """--mask-out is validated up front: a bad suffix must fail before the
+    output image is written, not after (no partial success)."""
+    from tools.despeckle import _write_image
+
+    _, dusted, _ = color_fixture
+    src = tmp_path / "in.tif"
+    dst = tmp_path / "out.tif"
+    _write_image(src, dusted)
+    rc = run_cli([str(src), str(dst), "--mask-out", str(tmp_path / "m.bmp")])
+    assert rc == 1
+    assert "bmp" in capsys.readouterr().err.lower()
+    assert not dst.exists()
+    assert not (tmp_path / "m.bmp").exists()
 
 
 def test_cli_argparse_usage_error(color_fixture, tmp_path, capsys):
@@ -500,3 +578,38 @@ def test_perf_4mp_color_under_30s():
     elapsed = time.monotonic() - t0
     assert cleaned.shape == img.shape and cleaned.dtype == img.dtype
     assert elapsed < 25.0, f"4 MP despeckle took {elapsed:.1f}s (budget 30s)"
+
+
+def test_perf_4mp_color_with_defects_full_pass():
+    """Perf on a defect-laden 4 MP image: exercises detection AND inpainting
+    (the clean-image variant above early-returns on an empty mask)."""
+    yy, xx = np.mgrid[0:2048, 0:2048]
+    base = (8000 + 40 * xx + 25 * yy).astype(np.uint16)
+    img = np.dstack([base, np.roll(base, 7, axis=0), np.roll(base, 11, axis=1)])
+    # Long scratches at pinned rows/columns.
+    for row, c0, c1 in [(100, 300, 900), (1500, 100, 1900)]:
+        seg = img[row, c0:c1, :].astype(np.int32) + 9000
+        img[row, c0:c1, :] = np.clip(seg, 0, 65535).astype(np.uint16)
+    for col, r0, r1 in [(500, 200, 800), (1800, 1200, 1800)]:
+        seg = img[r0:r1, col, :].astype(np.int32) - 9000
+        img[r0:r1, col, :] = np.clip(seg, 0, 65535).astype(np.uint16)
+    # 200 random disks, radius 1-5 px, stamped in local windows.
+    rng = np.random.default_rng(42)
+    for _ in range(200):
+        cy = int(rng.integers(10, 2038))
+        cx = int(rng.integers(10, 2038))
+        r = int(rng.integers(1, 6))
+        y0, y1 = cy - r - 1, cy + r + 2
+        x0, x1 = cx - r - 1, cx + r + 2
+        ly, lx = np.mgrid[y0:y1, x0:x1]
+        m = (ly - cy) ** 2 + (lx - cx) ** 2 <= r * r
+        win = img[y0:y1, x0:x1, :].astype(np.int32)
+        win[m] += 10000
+        img[y0:y1, x0:x1, :] = np.clip(win, 0, 65535).astype(np.uint16)
+    t0 = time.monotonic()
+    cleaned, mask = despeckle(img)  # default settings
+    elapsed = time.monotonic() - t0
+    assert cleaned.shape == img.shape and cleaned.dtype == img.dtype
+    assert mask.any(), "expected the stamped defects to be detected"
+    assert mask.sum() < 50000, f"mask unexpectedly large: {mask.sum()} px"
+    assert elapsed < 25.0, f"4 MP defect-laden despeckle took {elapsed:.1f}s"

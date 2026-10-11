@@ -43,8 +43,9 @@ unsupported outright; see the test suite's structure-loss test.) A pure
 ``median`` method (masked sliding-median fill, no OpenCV photo module) is
 provided as a dependency-free fallback.
 
-Defaults process a 4 MP 16-bit RGB scan in ~20 s on the reference machine
-(budget: 30 s); the sliding 1-D medians dominate runtime.
+Defaults process a 4 MP 16-bit RGB scan in ~2 s on the reference machine
+(measured 1.4-2 s, first run with cold caches up to ~18 s; budget: 30 s);
+the sliding 1-D medians dominate runtime.
 
 Known limitations (documented trade-offs, pinned by the test suite):
   - defects sitting ON a hard edge or corner are suppressed together with
@@ -195,9 +196,8 @@ def detect_defects(
         strong_edge |= (
             cv2.magnitude(grad_x, grad_y) > _GRADIENT_FACTOR * threshold
         )
-    if min(height, width) >= _LINE_SE_RADIUS:
-        band = cv2.dilate(strong_edge.astype(np.uint8), se).astype(bool)
-        scratch &= ~band
+    band = cv2.dilate(strong_edge.astype(np.uint8), se).astype(bool)
+    scratch &= ~band
 
     raw = (blob | scratch).astype(np.uint8)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
@@ -383,6 +383,15 @@ def _write_tiff(path: Path, image: np.ndarray) -> None:
 def _read_tiff(path: Path) -> np.ndarray:
     """Read a baseline uncompressed TIFF (8/16-bit, gray or chunky RGB)."""
     blob = path.read_bytes()
+    try:
+        return _parse_tiff(blob, path)
+    except (struct.error, KeyError, IndexError) as exc:
+        # struct.error: truncated file mid-parse; KeyError/IndexError: a tag
+        # with a legal-but-unsupported field type (e.g. ASCII, RATIONAL).
+        raise ValueError(f"{path}: malformed TIFF ({exc})") from exc
+
+
+def _parse_tiff(blob: bytes, path: Path) -> np.ndarray:
     if blob[:2] == b"II":
         order = "<"
     elif blob[:2] == b"MM":
@@ -414,9 +423,7 @@ def _read_tiff(path: Path) -> np.ndarray:
             if default is None:
                 raise ValueError(f"{path}: TIFF is missing required tag {tag}")
             return default
-        type_, _, raw = tags[tag]
-        fmt = {1: "B", 3: "H", 4: "I"}[type_]
-        return struct.unpack(order + fmt, raw[: struct.calcsize(fmt)])[0]
+        return _tiff_scalar(tags[tag], order, path)
 
     width = scalar(_T_WIDTH)
     height = scalar(_T_HEIGHT)
@@ -429,12 +436,19 @@ def _read_tiff(path: Path) -> np.ndarray:
         )
     if scalar(_T_PLANAR_CONFIG, 1) != 1:
         raise ValueError(f"{path}: only chunky (planar config 1) TIFF is supported")
-    bits_values = _tiff_values(tags[_T_BITS_PER_SAMPLE], order)
+    for tag, label in (
+        (_T_BITS_PER_SAMPLE, "BitsPerSample"),
+        (_T_STRIP_OFFSETS, "StripOffsets"),
+        (_T_STRIP_BYTE_COUNTS, "StripByteCounts"),
+    ):
+        if tag not in tags:
+            raise ValueError(f"{path}: TIFF is missing required tag {label}")
+    bits_values = _tiff_values(tags[_T_BITS_PER_SAMPLE], order, path)
     depth = bits_values[0]
     if depth not in (8, 16) or any(b != depth for b in bits_values):
         raise ValueError(f"{path}: unsupported BitsPerSample {bits_values}")
     fmt_values = (
-        _tiff_values(tags[_T_SAMPLE_FORMAT], order)
+        _tiff_values(tags[_T_SAMPLE_FORMAT], order, path)
         if _T_SAMPLE_FORMAT in tags
         else [1] * channels
     )
@@ -443,8 +457,8 @@ def _read_tiff(path: Path) -> np.ndarray:
     if channels not in (1, 3):
         raise ValueError(f"{path}: unsupported SamplesPerPixel {channels}")
 
-    offsets = _tiff_values(tags[_T_STRIP_OFFSETS], order)
-    byte_counts = _tiff_values(tags[_T_STRIP_BYTE_COUNTS], order)
+    offsets = _tiff_values(tags[_T_STRIP_OFFSETS], order, path)
+    byte_counts = _tiff_values(tags[_T_STRIP_BYTE_COUNTS], order, path)
     pixel_bytes = b"".join(
         blob[o : o + n] for o, n in zip(offsets, byte_counts)
     )
@@ -462,9 +476,30 @@ def _read_tiff(path: Path) -> np.ndarray:
     return arr.reshape(shape).copy()
 
 
-def _tiff_values(entry: tuple[int, int, bytes], order: str) -> list[int]:
+_TIFF_INT_FMT = {1: "B", 3: "H", 4: "I"}
+
+
+def _tiff_fmt(type_: int, order: str, path: Path) -> str:
+    try:
+        return _TIFF_INT_FMT[type_]
+    except KeyError:
+        raise ValueError(
+            f"{path}: unsupported TIFF field type {type_} "
+            "(supported: 1 BYTE, 3 SHORT, 4 LONG)"
+        ) from None
+
+
+def _tiff_scalar(entry: tuple[int, int, bytes], order: str, path: Path) -> int:
+    type_, _, raw = entry
+    fmt = _tiff_fmt(type_, order, path)
+    return struct.unpack(order + fmt, raw[: struct.calcsize(fmt)])[0]
+
+
+def _tiff_values(
+    entry: tuple[int, int, bytes], order: str, path: Path
+) -> list[int]:
     type_, n, raw = entry
-    fmt = {1: "B", 3: "H", 4: "I"}[type_]
+    fmt = _tiff_fmt(type_, order, path)
     size = struct.calcsize(fmt)
     return [struct.unpack_from(order + fmt, raw, i * size)[0] for i in range(n)]
 
@@ -520,6 +555,13 @@ def _paeth(a: int, b: int, c: int) -> int:
 def _read_png(path: Path) -> np.ndarray:
     """Read a non-interlaced 8/16-bit gray or RGB PNG (all filter types)."""
     blob = path.read_bytes()
+    try:
+        return _parse_png(blob, path)
+    except (zlib.error, struct.error) as exc:
+        raise ValueError(f"{path}: malformed PNG ({exc})") from exc
+
+
+def _parse_png(blob: bytes, path: Path) -> np.ndarray:
     if blob[:8] != _PNG_SIGNATURE:
         raise ValueError(f"{path}: not a PNG file (bad signature)")
     pos = 8
@@ -666,9 +708,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _check_format(path_like: str | Path, what: str) -> None:
+    """Reject unsupported output suffixes before any work is done."""
+    suffix = Path(path_like).suffix.lower()
+    if suffix not in (".tif", ".tiff", ".png"):
+        raise ValueError(
+            f"unsupported {what} format {suffix!r} "
+            "(supported: .tif, .tiff, .png)"
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
+        # Validate every output suffix up front so a bad --mask-out can not
+        # leave a fully written output behind on failure.
+        _check_format(args.output, "output")
+        if args.mask_out is not None:
+            _check_format(args.mask_out, "mask output")
         image = _read_image(args.input)
         cleaned, mask = despeckle(
             image,
