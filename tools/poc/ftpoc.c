@@ -358,14 +358,17 @@ static int cmd_move(long delta, int steps)
 
 static int cmd_pages(void)
 {
-    /* CDB: 3c 00 II 00 OFF_HI OFF_LO 00 LL_HI LL_LO 00 — offset and length
-     * are big-endian 16-bit fields (pinned from session-4 captures). */
-    static const struct { BYTE id; WORD off, len; const char *name; } pages[] = {
-        { 0xd8, 0x0000, 0x0042, "descriptor page" },
-        { 0xd8, 0x0037, 0x000a, "descriptor tail" },
-        { 0xe0, 0x0004, 0x0016, "FaulPixs header" },
-        { 0xe0, 0x0004, 0x013e, "FaulPixs table" },
-        { 0xe0, 0x0000, 0x0400, "buffer e0/400" },
+    /* CDB: 3c 00 II OO OO OO LL LL LL 00 — standard SCSI READ BUFFER(10):
+     * 24-bit big-endian offset @3, 24-bit big-endian length @6. Every 0x3c
+     * CDB in the session-4 trace (flextrace_ioctl.jsonl) fits this layout;
+     * Faul Pixs lives at offset 0x400 of buffer e0, right after the 1 KiB
+     * block FlexColor reads at offset 0. */
+    static const struct { BYTE id; DWORD off; WORD len; const char *name; } pages[] = {
+        { 0xd8, 0x000000, 0x0042, "descriptor page" },
+        { 0xd8, 0x000037, 0x000a, "descriptor tail" },
+        { 0xe0, 0x000400, 0x0016, "FaulPixs header" },
+        { 0xe0, 0x000400, 0x013e, "FaulPixs table" },
+        { 0xe0, 0x000000, 0x0400, "buffer e0/400" },
     };
     size_t i;
     for (i = 0; i < sizeof pages / sizeof pages[0]; i++) {
@@ -373,6 +376,7 @@ static int cmd_pages(void)
         int r, j;
         memcpy(cdb, CDB_PAGE, 10);
         cdb[2] = pages[i].id;
+        cdb[3] = (BYTE)(pages[i].off >> 16);
         cdb[4] = (BYTE)(pages[i].off >> 8);
         cdb[5] = (BYTE)(pages[i].off & 0xff);
         cdb[7] = (BYTE)(pages[i].len >> 8);
@@ -380,8 +384,8 @@ static int cmd_pages(void)
         memset(buf, 0, sizeof buf);
         r = srb_exec(cdb, 10, SRB_DIR_IN, buf, pages[i].len, TIMEOUT_MS);
         if (r < 0) { printf("%s: %s\n", pages[i].name, srb_errstr(r)); continue; }
-        printf("%s (%02x/%04x, %u bytes):", pages[i].name,
-               pages[i].id, pages[i].off, pages[i].len);
+        printf("%s (%02x/%06lx, %u bytes):", pages[i].name,
+               pages[i].id, (unsigned long)pages[i].off, pages[i].len);
         for (j = 0; j < r && j < 48; j++)
             printf(" %02x", buf[j]);
         printf("%s\n", r > 48 ? " ..." : "");
