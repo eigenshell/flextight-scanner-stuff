@@ -28,6 +28,7 @@ typedef unsigned char BYTE;
 typedef void *LPSECURITY_ATTRIBUTES;
 typedef void *LPOVERLAPPED;
 typedef unsigned long *PULONG;
+typedef long LONG;
 
 #define WINAPI
 #define TRUE 1
@@ -106,6 +107,7 @@ BOOL CreateProcessA(LPCSTR lpApplicationName, LPSTR lpCommandLine,
                     STARTUPINFOA *lpStartupInfo,
                     PROCESS_INFORMATION *lpProcessInformation);
 DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize);
+DWORD GetEnvironmentVariableA(LPCSTR lpName, LPSTR lpBuffer, DWORD nSize);
 LPVOID VirtualAllocEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize,
                       DWORD flAllocationType, DWORD flProtect);
 BOOL WriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer,

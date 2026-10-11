@@ -14,7 +14,11 @@
  *   3. Run:  inject.exe "C:\Program Files\Imacon\FlexColor\FlexColor.exe"
  *      FlexColor starts suspended, the DLL is injected, the hook installed,
  *      then the app resumes.
- *   4. Traces land in C:\flextrace_ioctl.jsonl (appended, flushed per record).
+ *   4. Traces land in flextrace_ioctl.jsonl NEXT TO ft_hook.dll (the trace
+ *      path is derived from the DLL's own location at load time; C:\ root is
+ *      NOT used because non-elevated processes cannot create files there on
+ *      Vista+, and the silent fopen failure cost a whole debugging session).
+ *      Appended, flushed per record.
  *      A line {"tag":"hook_loaded","target":"DeviceIoControl"} marks a loaded
  *      hook; one {"h":...,"code":...,"in_len":...,"in_head":...,"ok":...,
  *      "out_len":...,"out_head":...} line per DeviceIoControl call.
@@ -43,10 +47,10 @@
  *   re-entry, so the hook cannot recurse into itself.
  * - Antivirus/EDR on modern Windows may flag inline hooking of system DLLs;
  *   prefer the era-appropriate rig (WinXP/2K x86) where this is unremarkable.
- * - Trace file grows unboundedly during long sessions; delete/rotate
- *   C:\flextrace_ioctl.jsonl between runs.
+ * - Trace file grows unboundedly during long sessions; rotate
+ *   flextrace_ioctl.jsonl (next to ft_hook.dll) between runs.
  *
- * Build: i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -o ft_hook.dll hook.c fmt.c
+ * Build: i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -static-libgcc -o ft_hook.dll hook.c fmt.c
  */
 #include <windows.h>
 #include <stdio.h>
@@ -56,7 +60,7 @@
 #error "ft_hook must be built 32-bit (FlexColor is a 32-bit app)"
 #endif
 
-#define FT_LOG_PATH  "C:\\flextrace_ioctl.jsonl"
+#define FT_LOG_NAME  "flextrace_ioctl.jsonl"
 #define FT_TRAMP_SZ  64
 
 typedef BOOL (WINAPI *DeviceIoControl_fn)(HANDLE hDevice, DWORD dwIoControlCode,
@@ -69,7 +73,28 @@ static DeviceIoControl_fn g_tramp;        /* RWX trampoline: saved 5 bytes + jmp
 static LPVOID g_tramp_mem;                /* VirtualAlloc'd, PAGE_EXECUTE_READWRITE */
 static int  g_installed;                  /* hook installed flag */
 static int  g_inside;                     /* recursion guard */
+static int  g_passthru;                   /* FT_PASSTHRU=1: hook installed, zero logging (bisect tool) */
+static int  g_quiet;                      /* FT_QUIET=1: log only scanner SRB codes (bisect tool) */
+static long g_quiet_logged;               /* quiet-mode record cap counter */
 static CRITICAL_SECTION g_log_cs;         /* serializes trace-file writes */
+static char g_log_path[MAX_PATH] = FT_LOG_NAME; /* resolved to the DLL's dir at load */
+static FILE *g_log_file;                /* opened ONCE at boot; kept open
+                                           (per-record fopen/fclose was 2+
+                                           syscalls per ioctl and stalled the
+                                           app's realtime SCSI thread — the
+                                           driver answered the stalls with
+                                           ERROR_IO_DEVICE (1117), which the
+                                           app retried in a storm) */
+
+/* FT_QUIET record cap: the SRB retry storm can hit thousands of identical
+ * failures; beyond this many quiet-mode records the picture cannot get
+ * clearer and the file only grows. */
+#define FT_QUIET_LIMIT 500
+
+/* The scanner SRB control codes (learned from the first live trace; see
+ * README). Quiet mode logs ONLY these. */
+#define FT_CODE_SRB   0x190012
+#define FT_CODE_SRB2  0x190022
 
 static void ft_copy(void *dst, const void *src, size_t n)
 {
@@ -79,15 +104,47 @@ static void ft_copy(void *dst, const void *src, size_t n)
         *d++ = *s++;
 }
 
+/* Resolve the trace path to the directory containing ft_hook.dll. The C:\ root
+ * is not writable for non-elevated processes on Vista+, and the earlier
+ * silent fopen failure there cost a debugging session; the DLL's own
+ * directory is always writable (inject.exe already requires the pair to be
+ * co-located). Falls back to the bare filename (process cwd) if the module
+ * path cannot be determined. */
+static void ft_log_path_init(HINSTANCE hinst)
+{
+    char p[MAX_PATH];
+    DWORD n = GetModuleFileNameA(hinst, p, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
+        char *slash = NULL;
+        DWORD i;
+        for (i = 0; i < n; i++)
+            if (p[i] == '\\')
+                slash = p + i;
+        if (slash) {
+            size_t namelen = sizeof FT_LOG_NAME - 1; /* compile-time constant */
+            size_t j, newlen;
+            slash++; /* keep the backslash, drop the DLL filename */
+            for (j = 0; j < namelen; j++)
+                slash[j] = FT_LOG_NAME[j];
+            slash[namelen] = '\0';
+            /* length AFTER the overwrite: dir + name (+ NUL). Copying the
+             * original module-path length here truncates the appended name
+             * (produced "flextrace_io" instead of flextrace_ioctl.jsonl). */
+            newlen = (size_t)(slash - p) + namelen;
+            ft_copy(g_log_path, p, newlen + 1);
+        }
+    }
+}
+
 /* Append one line (a full JSONL record) to the trace file as a SINGLE fwrite
- * of line+'\n' in "a" mode: append mode makes each individual write atomic at
- * the filesystem level, so records never interleave even from concurrent
- * callers; the critical section additionally serializes the fopen/fwrite/
- * fclose sequence. Flushed immediately so an app crash loses nothing. */
+ * of line+'\n' under the critical section: concurrent callers cannot
+ * interleave records. The stream is opened once at boot and flushed per
+ * record (fflush, not fclose — with a full stdio buffer most records cost
+ * only a memcpy, no syscall). Per-record fopen/fclose measurably stalled the
+ * host's realtime SCSI thread and made the scanner driver fail commands. */
 static void ft_log_line(const char *line, size_t len)
 {
     char full[522];
-    FILE *f;
 
     if (len + 2 > sizeof full)
         return;
@@ -96,13 +153,27 @@ static void ft_log_line(const char *line, size_t len)
     full[len + 1] = '\0';
 
     EnterCriticalSection(&g_log_cs);
-    f = fopen(FT_LOG_PATH, "a");
-    if (f) {
-        fwrite(full, 1, len + 1, f); /* line + newline, one write */
-        fflush(f);
-        fclose(f);
+    if (g_log_file) {
+        fwrite(full, 1, len + 1, g_log_file); /* line + newline, one write */
+        fflush(g_log_file);
     }
     LeaveCriticalSection(&g_log_cs);
+}
+
+/* Foreign-schema control record: the GetLastError of a failed ioctl, captured
+ * immediately after the tramp returns (our CRT logging clobbers it). Lets us
+ * see the DRIVER's real reason instead of whatever stale value the host app
+ * prints in its error dialog. Parsers must skip lines that don't match the
+ * ioctl-record schema, so this costs the main schema nothing. */
+static void ft_log_lasterr(unsigned long h, unsigned long code)
+{
+    char line[160];
+    int n = snprintf(line, sizeof line,
+                     "{\"tag\":\"lasterr\",\"h\":\"0x%lx\","
+                     "\"code\":\"0x%lx\",\"err\":%lu}",
+                     h, code, (unsigned long)GetLastError());
+    if (n > 0 && (size_t)n < sizeof line)
+        ft_log_line(line, (size_t)n);
 }
 
 static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
@@ -118,15 +189,17 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
     char rec[520];
     int rlen;
 
-    if (g_inside) /* never recurse through our own logging */
+    if (g_passthru || g_inside) /* never recurse through our own logging */
         return g_tramp(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
                        lpOutBuffer, nOutBufferSize, lpBytesReturned,
                        lpOverlapped);
 
     g_inside = 1;
 
-    /* pre-call state */
-    if (lpInBuffer != NULL && nInBufferSize > 0) {
+    /* pre-call state (quiet mode: only bother for the scanner SRB codes) */
+    if (lpInBuffer != NULL && nInBufferSize > 0 &&
+        (!g_quiet || dwIoControlCode == FT_CODE_SRB ||
+         dwIoControlCode == FT_CODE_SRB2)) {
         in_head_len = nInBufferSize < FT_MAX_HEAD ? nInBufferSize : FT_MAX_HEAD;
         ft_copy(in_head, lpInBuffer, in_head_len);
     }
@@ -134,6 +207,30 @@ static BOOL WINAPI hooked_DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode,
     ret = g_tramp(hDevice, dwIoControlCode, lpInBuffer, nInBufferSize,
                   lpOutBuffer, nOutBufferSize, lpBytesReturned,
                   lpOverlapped);
+
+    /* The true failure reason must be captured NOW: our own CRT logging
+     * calls below (fopen/fwrite/...) clobber GetLastError. Emitted as a
+     * separate foreign-schema control record so the ioctl-record schema
+     * stays untouched. */
+    if (ret == 0 &&
+        (!g_quiet || dwIoControlCode == FT_CODE_SRB ||
+         dwIoControlCode == FT_CODE_SRB2))
+        ft_log_lasterr((unsigned long)(ULONG_PTR)hDevice,
+                       (unsigned long)dwIoControlCode);
+
+    /* quiet mode: drop everything except the scanner SRB codes (and cap the
+     * storm) — bisects "hook presence on the call stack" against "logging
+     * volume/timing" without changing what the hook intercepts. */
+    if (g_quiet && dwIoControlCode != FT_CODE_SRB &&
+        dwIoControlCode != FT_CODE_SRB2) {
+        g_inside = 0;
+        return ret;
+    }
+    if (g_quiet && g_quiet_logged >= FT_QUIET_LIMIT) {
+        g_inside = 0;
+        return ret;
+    }
+    g_quiet_logged++;
 
     /* post-call state */
     if (ret != 0 && lpOutBuffer != NULL && lpBytesReturned != NULL &&
@@ -179,9 +276,10 @@ static int ft_patch5(void *target, const void *dst)
  * complete instructions. Blindly copying 5 arbitrary bytes could split an
  * instruction mid-operand and crash the app. Known-good shapes:
  *   - XP/2K-era:  8B FF 55 8B EC   (mov edi,edi; push ebp; mov ebp,esp)
- *   - Win7+ kernel32 thunk: E9 rel32 (one complete jmp into kernelbase)
- * Any 0xE8 (call rel32) is rejected outright (its rel32 operand would need
- * relocation, which the trampoline does not do). On mismatch the caller must
+ *   - Win7+ kernel32 thunk: E9 rel32 (one complete jmp into kernelbase;
+ *     the trampoline re-bases the rel32, see ft_install_hook)
+ * Any 0xE8 (call rel32) is rejected outright (a call needs return-address
+ * semantics the trampoline does not replicate). On mismatch the caller must
  * fail closed: no patch, DeviceIoControl left untouched. */
 static int ft_prologue_ok(const BYTE *p, const char **reason)
 {
@@ -195,9 +293,15 @@ static int ft_prologue_ok(const BYTE *p, const char **reason)
         }
     }
     if (p[0] == 0xE9) {
-        /* jmp-thunk: the five bytes are exactly one instruction, safe. The
-         * rel32 operand is position-independent (relative), so it survives
-         * the copy into the trampoline unchanged. */
+        /* jmp-thunk: the five bytes are exactly one instruction, so stealing
+         * them is safe. A copied E9 rel32 is NOT position-independent,
+         * though: rel32 is measured from the NEXT instruction, so the copy
+         * in the trampoline must be re-based by (target - tramp) to still
+         * reach the original kernelbase destination (ft_install_hook does
+         * this). The earlier verbatim copy sent every hooked call
+         * (tramp - kernel32) bytes off the real function, which manifested
+         * as DeviceIoControl "failing" with a stale unrelated LastError
+         * while the app limped along on retries. */
         return 1;
     }
     for (i = 0; i < 5; i++) {
@@ -238,6 +342,16 @@ static int ft_install_hook(const char **reason)
     }
 
     ft_copy(g_tramp_mem, target, 5);
+    if (((BYTE *)g_tramp_mem)[0] == 0xE9) {
+        /* Re-base the stolen jmp-thunk: rel' = rel + (target - tramp), since
+         * the E9 sits at offset 0 in both places and rel32 is measured from
+         * the next instruction. Without this, the trampoline dispatches to
+         * kernelbase_target + (tramp - kernel32) — arbitrary memory. */
+        LONG rel, rebased;
+        ft_copy(&rel, (BYTE *)g_tramp_mem + 1, 4);
+        rebased = rel + (LONG)((BYTE *)target - (BYTE *)g_tramp_mem);
+        ft_copy((BYTE *)g_tramp_mem + 1, &rebased, 4);
+    }
     ((BYTE *)g_tramp_mem)[5] = 0xE9;
     jmp_back = (DWORD)((BYTE *)target + 5 - (BYTE *)g_tramp_mem - 5 - 5);
     ft_copy((BYTE *)g_tramp_mem + 6, &jmp_back, 4);
@@ -252,15 +366,15 @@ static int ft_install_hook(const char **reason)
     return 1;
 }
 
-static void ft_log_boot(const char *status)
+static void ft_log_boot(const char *status, const char *prologue)
 {
-    char line[160];
+    char line[200];
     int n;
     /* hand-written; does not depend on hook installation success */
     n = snprintf(line, sizeof line,
                  "{\"tag\":\"hook_loaded\",\"target\":\"DeviceIoControl\","
-                 "\"status\":\"%s\",\"pid\":%lu}",
-                 status, (unsigned long)GetCurrentProcessId());
+                 "\"status\":\"%s\",\"prologue\":\"%s\",\"pid\":%lu}",
+                 status, prologue, (unsigned long)GetCurrentProcessId());
     if (n > 0 && (size_t)n < sizeof line)
         ft_log_line(line, (size_t)n);
 }
@@ -283,14 +397,34 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         const char *fail_reason = "unknown";
+        const char *prologue = (*(BYTE *)GetProcAddress(
+            GetModuleHandleA("kernel32.dll"), "DeviceIoControl") == 0xE9)
+            ? "e9_thunk" : "xp_hotpatch";
+        char envbuf[8];
+        DWORD envn = GetEnvironmentVariableA("FT_PASSTHRU", envbuf,
+                                             sizeof envbuf);
+        DWORD qn = GetEnvironmentVariableA("FT_QUIET", envbuf,
+                                           sizeof envbuf);
         InitializeCriticalSection(&g_log_cs);
         DisableThreadLibraryCalls(hinst);
+        ft_log_path_init(hinst);
+        /* open ONCE: per-record fopen/fclose dominated the per-call cost and
+         * stalled the host's SCSI thread (see g_log_file comment) */
+        g_log_file = fopen(g_log_path, "a");
+        g_passthru = (envn > 0 && envn < sizeof envbuf);
+        g_quiet = (qn > 0 && qn < sizeof envbuf);
         g_installed = ft_install_hook(&fail_reason);
         if (g_installed)
-            ft_log_boot("ok");
+            ft_log_boot("ok", prologue);
         else
             ft_log_install_failed(fail_reason);
     } else if (reason == DLL_PROCESS_DETACH) {
+        EnterCriticalSection(&g_log_cs);
+        if (g_log_file) {
+            fclose(g_log_file);
+            g_log_file = NULL;
+        }
+        LeaveCriticalSection(&g_log_cs);
         DeleteCriticalSection(&g_log_cs);
     }
     return TRUE;

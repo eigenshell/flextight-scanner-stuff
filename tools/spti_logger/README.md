@@ -53,19 +53,58 @@ install.
 1. Build **32-bit** binaries (`i686-w64-mingw32-gcc` or `build.bat` on
    Windows; BOTH must be 32-bit — FlexColor.exe is PE32 i386):
    ```
-   i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -o ft_hook.dll hook.c fmt.c
-   i686-w64-mingw32-gcc -O2 -Wall -Wextra -o inject.exe inject.c
+   i686-w64-mingw32-gcc -shared -O2 -Wall -Wextra -static-libgcc -o ft_hook.dll hook.c fmt.c
+   i686-w64-mingw32-gcc -O2 -Wall -Wextra -static-libgcc -o inject.exe inject.c
    ```
+   `-static-libgcc` is REQUIRED, not an optimization: the default links the
+   shared DWARF-unwind runtime (`libgcc_s_dw2-1.dll`), which inject.exe then
+   fails to find at launch, and which ft_hook.dll would have to resolve from
+   inside FlexColor's process (its search path, not yours).
 2. Place `ft_hook.dll` **next to** `inject.exe` (inject derives the DLL path
    from its own location).
 3. Run: `inject.exe "C:\Program Files\Imacon\FlexColor\FlexColor.exe"`
    FlexColor starts suspended, the hook installs, the app resumes; inject's
    console stays attached until FlexColor exits and propagates its exit code.
-4. Traces land in `C:\flextrace_ioctl.jsonl` (append, flushed per record).
+4. Traces land in `flextrace_ioctl.jsonl` **next to `ft_hook.dll`** (the path
+   is derived from the DLL's own location at load; the old `C:\` root path
+   failed silently for non-elevated processes on Vista+ and is gone).
+   Append mode, flushed per record. The boot line
+   `{"tag":"hook_loaded","status":"ok","prologue":"e9_thunk"|"xp_hotpatch",...}`
+   tells you which prologue shape the hook saw — `e9_thunk` means a Win7+
+   kernel32→kernelbase jmp-thunk (its rel32 is re-based in the trampoline;
+   a verbatim copy dispatches to wild memory and breaks every hooked call).
 5. **First capture goal:** the scanner-handle calls (opened on `\\.\Scanner%d`)
    dominate and repeat the same `code` on every CDB exchange — that hex value
    IS `IOCTL_SCSISCAN_CMD`. Then diff `in_head` CDB bytes against the 0xD0..0xE3
    opcodes from static recon.
+
+### Diagnostic aids (added after the first live session)
+
+- **`{"tag":"lasterr",...}` records**: for every failed ioctl (`ok:0`), the
+  hook emits a separate control record with the real `GetLastError`,
+  captured immediately after the tramp returns (the hook's own CRT logging
+  clobbers it afterwards, and the host app's error dialog only shows a
+  *stale* value — e.g. 183 from an unrelated earlier call). This is how we
+  learned the first Windows rig's failure storm wasn't dispatch corruption.
+- **`FT_PASSTHRU=1` environment variable**: installs the hook but forwards
+  every call with zero logging work — bisects {patch/dispatch} vs
+  {our logging code} when a hooked app misbehaves. If pass-through is clean
+  and logging is not, the logging path (timing/memory) is the culprit.
+- **`FT_QUIET=1` environment variable**: logs only the two scanner SRB codes
+  (0x190012/0x190022), capped at 500 records — the middle rung of the bisect
+  ladder (pass-thru → quiet → full). Used on the Adaptec 2940AU rig to prove
+  the SRB failure storm was caused by per-record `fopen/fclose` syscalls
+  stalling the app's realtime SCSI thread (the driver answered the stalls
+  with ERROR_IO_DEVICE, the app retried into a storm). The shipped build
+  opens the trace file ONCE at boot for the same reason; per-record
+  fopen/fclose is not coming back.
+
+## Captured traces
+
+First live session (2026-10-11, interactive: preview, TIFF scan, 3F scan,
+settings changes): distilled command vocabulary, SRB layout, and phase map in
+`docs/recon/live-session-trace.md`. The full 73 MB trace stays on the Windows
+box next to the tool; rotate it between sessions.
 
 ## Offline build/test (Linux dev box)
 
@@ -116,7 +155,7 @@ useless against a 32-bit target process.
 - **AV/EDR** on modern Windows may flag inline hooking of system DLLs; prefer
   the era-appropriate rig (WinXP/2K x86).
 - **Unbounded trace growth** during long sessions; rotate
-  `C:\flextrace_ioctl.jsonl` between runs.
+  `flextrace_ioctl.jsonl` (next to the DLL) between runs.
 - If `CreateRemoteThread` is ever blocked by exploit mitigations, the fallback
   is to hijack the suspended main thread's context to run `LoadLibraryA`
   (documented here; not implemented).
