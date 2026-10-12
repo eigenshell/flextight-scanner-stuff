@@ -24,12 +24,13 @@ ftpoc win            one SetWindow exchange with the idle template, hexdump
 ftpoc park           rest position: FlexColor's shutdown descriptor (36000000)
 ftpoc goto <pos>     absolute position, 0..63000000 (FlexColor's range)
 ftpoc move <+/-d> [n]  n relative moves, max 5000000/step, 50 steps
-ftpoc stop           end-of-scan descriptor x2, then park
+ftpoc stop           end-of-scan descriptor x2 (FlexColor's end/Stop)
 ftpoc pages          the standard ReadBuffer pages (Faul Pixs map etc.)
 ftpoc grab <n> [len] n ReadExt blocks (default 3996 B) -> grab.raw
-ftpoc scan [n]       preview: pages, scan descriptor, settle, 200+50
-                     calibration reads, poll 1060, n blocks -> scan.raw,
-                     end x2, park (full preview = 59592 blocks, 238 MB)
+ftpoc scan [n] [s]   preview: pages, scan descriptor, hold s seconds
+                     (default 35 = cold lamp; 10 works warm), 200+50
+                     calibration reads, flood until n full blocks
+                     -> scan.raw, END x2. n=2000 ≈ 16 s, 8 MB.
 ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only
 ftpoc scanstop       0xdb (kHwiScanStop) — device rejects it (CHECK COND.)
 ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
@@ -64,7 +65,12 @@ zero-padded the `[84]` array, which shifted every field: the scan
 descriptor sent that way put the device into a scan it never finished
 (df stuck at `0800`). Never hand-edit; regenerate.
 
-The preview sequence is from session-4 seq 279–60400 (menu → Preview).
+`SCAN_WIN`/`END_WIN` come from session 5 (pid 412: a full preview and a
+preview stopped halfway — both end with END ×2). The preview sequence
+and its timing are in `docs/protocol.md` "Per-scan sequence".
 Seq 41–278 are *not* preview — they are the Position dialog's
 "CCD & Optic" button (UI timeline), a service calibration that `ftpoc`
 deliberately does not replay.
+
+`scan.raw` layout: one 3996 B block per line = 666 px × RGB, u16 LE.
+Colour negatives come out orange-masked; invert per channel.
