@@ -30,6 +30,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include "ft_calib.h"
+#include "ft_detect.h"
+#include "ft_focus.h"
+#include "ft_geom.h"
+#include "ft_holder.h"
+#include "ft_job.h"
+#include "ft_png.h"
 
 #define IOCTL_SRB 0x190012
 
@@ -357,32 +365,23 @@ static const long F3_Y[6] = { 50, 967, 1910, 2852, 3795, 4737 };
  *   3780  438790 /  911050   3f
  *   3600  440113 /  895204   idle and exit descriptors
  * and 1020000 / 1021000 in session 4. The two seem to share a rail: the
- * CCD stays below the lens (see parse_pos). */
+ * CCD stays below the lens (see parse_pos). The limits are FT_CCD_MIN..
+ * FT_OPTIC_MAX in libft/ft_focus.h. */
 #define F_CCD      56
 #define F_OPTIC    60
-#define CCD_MIN    254123L
-#define CCD_MAX    1020000L
-#define OPTIC_MIN  895204L
-#define OPTIC_MAX  1021000L
 static long g_ccd = -1, g_optic = -1;     /* -1: keep the template's */
 
+/* With the CCD past the lens (1020000 / 997296) the calibration lines
+ * flickered, the white batch never came and the carriage did not move to
+ * the start line. FlexColor always keeps CCD < lens. */
 static int pos_ok(long a, long b)
 {
-    if (a < CCD_MIN || a > CCD_MAX || b < OPTIC_MIN || b > OPTIC_MAX) {
-        fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent: CCD "
-                        "%ld..%ld, lens %ld..%ld\n", a, b, CCD_MIN, CCD_MAX,
-                OPTIC_MIN, OPTIC_MAX);
-        return 0;
-    }
-    /* With the CCD past the lens (1020000 / 997296) the calibration lines
-     * flickered, the white batch never came and the carriage did not move
-     * to the start line. FlexColor always keeps CCD < lens. */
-    if (a >= b) {
-        fprintf(stderr, "CCD/lens %ld/%ld: the CCD must stay below the "
-                        "lens\n", a, b);
-        return 0;
-    }
-    return 1;
+    if (ft_positions_ok(a, b))
+        return 1;
+    fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent (CCD "
+                    "%ld..%ld, lens %ld..%ld, CCD below lens)\n", a, b,
+            FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX);
+    return 0;
 }
 
 static int parse_pos(const char *v)
@@ -1227,54 +1226,115 @@ static int cmd_upload(const char *file)
  *   of 12 with ppi x bin <= 6300 (preview 12, 1000 -> 6, 2000 -> 3,
  *   1200 -> 4), @55 = 12 / bin.
  * CCD/lens @56/@60: the in-focus pair for the optical scale ppi x bin
- * (optics_for), or -p.
+ * (ft_optics_for on the focus curve, see load_lens), or -p.
  * mm in, clamped to the area the captured scans covered. */
 static BYTE CROP_SCAN[84], CROP_END[84];
 
-/* CCD pixel on the optical axis: the image scales about it when the
- * lens/CCD pair changes (fit of FlexColor's four pairs, 2026-10-12) */
-#define CCD_AXIS   4118
-#define CCD_PIXELS 7992     /* preview: 666 px x bin 12 from pixel 144 */
+/* Focus: thin lens on one rail (libft/ft_focus.h), fitted to the sharpest
+ * point of eight CCD focus brackets at 3807..6230 px/inch (2026-10-12).
+ * FlexColor's own crop/preview pairs sit 9000-10000 CCD steps short of
+ * that peak on this scanner, and are visibly softer, so crop does not use
+ * them. The curve: focus.txt next to ftpoc.exe if present (written by
+ * calibrate-focus), else this scanner's fit compiled into libft. */
+static ft_lens g_lens;
 
-/* Focus: thin lens on one rail, in motor steps (fit 2026-10-12). Film at
- * FOCUS_FILM, lens at L, CCD at C: object distance u = FOCUS_FILM - L,
- * image distance v = L - C + FOCUS_W, 1/u + 1/v = 1/FOCUS_FL, and the
- * magnification v/u = FOCUS_P * scale (scale = CCD px per inch of film,
- * so FOCUS_P = CCD pixel pitch in inches: 8.8 um). Fitted to the
- * sharpest point of eight CCD focus brackets at 3807..6230 px/inch
- * (sharpness = rms log-gradient across the film, magnification by image
- * correlation); rms residual 223 CCD / 114 lens steps, while sharpness
- * drops ~10 % at 1700 steps. FlexColor's own crop/preview pairs sit
- * 9000-10000 CCD steps short of that peak on this scanner, and are
- * visibly softer, so crop does not use them. */
-#define FOCUS_FILM 1468601.0
-#define FOCUS_W     268105.0
-#define FOCUS_FL    317836.0
-#define FOCUS_P     3.4799e-4
-#define SCALE_MIN   3800.0
-#define SCALE_MAX   6300.0
-
-static int optics_for(double scale, long *ccd, long *optic)
+static void load_lens(void)
 {
-    double m = FOCUS_P * scale;
-    double u = FOCUS_FL * (1 + 1 / m), v = FOCUS_FL * (1 + m);
-    double lens = FOCUS_FILM - u;
+    FILE *f = fopen("focus.txt", "r");
+    ft_err e;
+    g_lens = ft_lens_default;
+    if (!f)
+        return;
+    if (ft_lens_read(&g_lens, f, &e)) {
+        fprintf(stderr, "focus.txt: %s; using the built-in curve\n", e.msg);
+        g_lens = ft_lens_default;
+    }
+    fclose(f);
+}
 
-    if (scale < SCALE_MIN || scale > SCALE_MAX)
+/* One synthesized crop. ccd/optic >= 0: use them (after the safety check);
+ * otherwise the focus curve for ppi x bin, with ccd_offset added to the
+ * CCD (lens unchanged). */
+struct crop_req {
+    double ppi, x, y, w, h;      /* mm */
+    long ccd, optic, ccd_offset;
+    long keep;
+    DWORD hold;
+    const char *out;
+};
+
+static int crop_scan(const struct crop_req *r)
+{
+    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
+                                        "synthesized crop" };
+    long bin, ccd = r->ccd, optic = r->optic;
+    double scale, cx;
+    int i, rc;
+
+    if (r->ppi < 525 || r->ppi > 6300) {
+        fprintf(stderr, "crop: ppi 525..6300\n");
         return 1;
-    *optic = (long)(lens + 0.5);
-    *ccd = (long)(lens + FOCUS_W - v + 0.5);
-    return 0;
+    }
+    /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
+    if (r->x < 0 || r->w <= 0 || r->x + r->w > 32.0 || r->y < 0 ||
+        r->h <= 0 || r->y + r->h > 231.0) {
+        fprintf(stderr, "crop: window outside the holder area FlexColor "
+                        "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
+        return 1;
+    }
+    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
+     * keeps the optical scale ppi x bin within 6300 */
+    bin = ft_bin_for_ppi(r->ppi);
+    scale = r->ppi * bin;
+    if ((long)(r->w / 25.4 * r->ppi + 0.5) * 6 > 60000) {
+        fprintf(stderr, "crop: line too long for one ReadExt\n");
+        return 1;
+    }
+    if (ccd < 0) {
+        if (ft_optics_for(&g_lens, scale, &ccd, &optic)) {
+            fprintf(stderr, "crop: %g ppi x bin %ld = optical scale %.0f; "
+                            "focus is known for %.0f..%.0f (or give -p)\n",
+                    r->ppi, bin, scale, FT_SCALE_MIN, FT_SCALE_MAX);
+            return 1;
+        }
+        ccd += r->ccd_offset;
+    }
+    if (!pos_ok(ccd, optic))
+        return 1;
+    /* mm across are measured at the 6000 scale; other scales magnify
+     * about the optical axis */
+    cx = ft_mm_to_ccd(r->x, scale);
+    if (cx < FT_CCD_FIRST ||
+        cx + r->w / 25.4 * scale > FT_CCD_FIRST + FT_CCD_PIXELS) {
+        fprintf(stderr, "crop: window runs off the CCD at this scale\n");
+        return 1;
+    }
+    memcpy(CROP_SCAN, SCAN_2000, 84);
+    put_be32(CROP_SCAN, POS_OFF, (long)(r->ppi * 10000 + 0.5));
+    put_be32(CROP_SCAN, F_X, (long)((cx - FT_CCD_FIRST) / bin + 0.5));
+    put_be32(CROP_SCAN, F_Y, (long)(r->y / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_PX, (long)(r->w / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_LINES, (long)(r->h / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_CCD, ccd);
+    put_be32(CROP_SCAN, F_OPTIC, optic);
+    CROP_SCAN[F_BIN] = (BYTE)bin;
+    CROP_SCAN[55] = (BYTE)(12 / bin);
+    memcpy(CROP_END, CROP_SCAN, 84);
+    memset(CROP_END + 8, 0, 53 - 8);
+    printf("crop descriptor:");
+    for (i = 0; i < 84; i++)
+        printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
+    printf("\n");
+    g_ccd = ccd;                 /* cmd_scan applies these to scan + end */
+    g_optic = optic;
+    rc = cmd_scan(&crop, -1, r->keep, r->hold, r->out);
+    g_ccd = g_optic = -1;
+    return rc;
 }
 
 static int cmd_crop(int argc, char **argv)
 {
-    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
-                                        "synthesized crop" };
-    double ppi, x, y, w, h;
-    long bin, keep = 0;
-    DWORD hold = 10000;
-    const char *out = "crop.raw";
+    struct crop_req r;
     int i;
 
     if (argc < 5) {
@@ -1282,76 +1342,25 @@ static int cmd_crop(int argc, char **argv)
                         "[-n lines] [-h s] [-p ccd,lens] [-l lamp] [-o file]\n");
         return 2;
     }
-    ppi = atof(argv[0]); x = atof(argv[1]); y = atof(argv[2]);
-    w = atof(argv[3]); h = atof(argv[4]);
+    memset(&r, 0, sizeof r);
+    r.ppi = atof(argv[0]); r.x = atof(argv[1]); r.y = atof(argv[2]);
+    r.w = atof(argv[3]); r.h = atof(argv[4]);
+    r.ccd = r.optic = -1;
+    r.hold = 10000;
+    r.out = "crop.raw";
     for (i = 5; i + 1 < argc; i += 2) {
-        if (strcmp(argv[i], "-n") == 0) keep = atol(argv[i + 1]);
-        else if (strcmp(argv[i], "-h") == 0) hold = (DWORD)atol(argv[i + 1]) * 1000;
-        else if (strcmp(argv[i], "-o") == 0) out = argv[i + 1];
-        else if (strcmp(argv[i], "-p") == 0) { if (parse_pos(argv[i + 1])) return 2; }
+        if (strcmp(argv[i], "-n") == 0) r.keep = atol(argv[i + 1]);
+        else if (strcmp(argv[i], "-h") == 0) r.hold = (DWORD)atol(argv[i + 1]) * 1000;
+        else if (strcmp(argv[i], "-o") == 0) r.out = argv[i + 1];
+        else if (strcmp(argv[i], "-p") == 0) {
+            if (parse_pos(argv[i + 1])) return 2;
+            r.ccd = g_ccd; r.optic = g_optic;
+            g_ccd = g_optic = -1;
+        }
         else if (strcmp(argv[i], "-l") == 0) { if (parse_lamp(argv[i + 1])) return 2; }
         else { fprintf(stderr, "crop: unknown option %s\n", argv[i]); return 2; }
     }
-    if (ppi < 525 || ppi > 6300) {
-        fprintf(stderr, "crop: ppi 525..6300\n");
-        return 1;
-    }
-    /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
-    if (x < 0 || w <= 0 || x + w > 32.0 || y < 0 || h <= 0 || y + h > 231.0) {
-        fprintf(stderr, "crop: window outside the holder area FlexColor "
-                        "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
-        return 1;
-    }
-    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
-     * keeps the optical scale ppi x bin within 6300 */
-    {
-        static const int bins[] = { 12, 6, 4, 3, 2, 1 };
-        for (i = 0; bins[i] > 1 && ppi * bins[i] > 6300 + 1e-6; i++)
-            ;
-        bin = bins[i];
-    }
-    if ((long)(w / 25.4 * ppi + 0.5) * 6 > 60000) {
-        fprintf(stderr, "crop: line too long for one ReadExt\n");
-        return 1;
-    }
-    if (g_ccd < 0) {
-        if (optics_for(ppi * bin, &g_ccd, &g_optic)) {
-            fprintf(stderr, "crop: %g ppi x bin %ld = optical scale %.0f; "
-                            "focus is known for %.0f..%.0f (or give -p)\n",
-                    ppi, bin, ppi * bin, SCALE_MIN, SCALE_MAX);
-            return 1;
-        }
-        if (!pos_ok(g_ccd, g_optic))
-            return 1;
-    }
-    memcpy(CROP_SCAN, SCAN_2000, 84);
-    put_be32(CROP_SCAN, POS_OFF, (long)(ppi * 10000 + 0.5));
-    {
-        /* mm across are measured at the 6000 scale (CCD pixel 144 + px *
-         * 25.4 / 6000); other scales magnify about the optical axis */
-        double scale = ppi * bin;
-        double ccd = CCD_AXIS + (x / 25.4 * 6000.0 + 144 - CCD_AXIS) *
-                     scale / 6000.0;
-        if (ccd < 144 ||
-            ccd + w / 25.4 * scale > 144 + CCD_PIXELS) {
-            fprintf(stderr, "crop: window runs off the CCD at this scale\n");
-            return 1;
-        }
-        put_be32(CROP_SCAN, F_X, (long)((ccd - 144) / bin + 0.5));
-    }
-    put_be32(CROP_SCAN, F_Y, (long)(y / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_PX, (long)(w / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_LINES, (long)(h / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_CCD, g_ccd);
-    put_be32(CROP_SCAN, F_OPTIC, g_optic);
-    CROP_SCAN[F_BIN] = (BYTE)bin;
-    CROP_SCAN[55] = (BYTE)(12 / bin);
-    memcpy(CROP_END, CROP_SCAN, 84);
-    memset(CROP_END + 8, 0, 53 - 8);
-    printf("crop descriptor:");
-    for (i = 0; i < 84; i++) printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
-    printf("\n");
-    return cmd_scan(&crop, -1, keep, hold, out);
+    return crop_scan(&r);
 }
 
 static int scan_args(int argc, char **argv)
@@ -1413,6 +1422,7 @@ int main(int argc, char **argv)
     const char *cmd;
     int rc = 0;
 
+    load_lens();
     if (argc < 2) {
         fprintf(stderr,
             "usage: ftpoc <command> [args]\n"
