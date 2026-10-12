@@ -7,8 +7,8 @@ hundreds of thousands of traced calls between FlexColor and our scanner.
 
 ## Why this exists
 
-It's the de-risking step before the Linux SG_IO driver: if a 300-line C
-program can move the holder and pull pixels on Windows with the protocol
+It's the de-risking step before the Linux SG_IO driver: if a single-file
+C program can move the holder and pull pixels on Windows with the protocol
 spec alone, the spec is right and the driver is just a port. If not, we
 learn what the spec got wrong — cheaply.
 
@@ -76,7 +76,33 @@ ends reported apart), checks focus at the first, middle and last frame,
 and writes `strip.job` plus `strip.png` (numbered boxes; dim yellow =
 excluded, orange = low confidence). Edit `strip.job` — `include`,
 `ppi`, `sprockets`, `straighten`, `window` per frame — then run
-`scan --job`.
+`scan --job`. Detected windows are clamped to the holder's crop limits
+(32 mm across, 231 mm along; the preview itself reaches 0.92..33.14 mm
+across and ~232 mm along); if the job would still be refused, `frames`
+warns per frame and writes it anyway.
+
+Job file keys (`key = value`, `#` starts a comment anywhere):
+
+```
+[strip]
+holder        holder geometry name (24x217)
+film          negative | slide
+focus         shifted (one offset for the strip) | per-frame (bracket each frame)
+focus_offset  CCD steps added to the focus curve (shifted mode; the
+              per-frame brackets' default centre)
+[frame N]
+type          full | half | panorama | partial (informational)
+include       yes | no: scan this frame or not
+ppi           scan resolution: 525, 634..3150 or 3800..6300
+window        y0 x0 length width, mm from the holder origin (what is scanned)
+tilt          strip tilt in degrees (widens the scan window; recorded)
+sprockets     yes | no: set by `frames --sprockets`, whose window then
+              spans the hole rows; changing it alone does not move the window
+straighten    yes | no: recorded in the .txt for post-processing
+confidence    high | low: detection confidence (informational)
+focus_offset  per-frame mode: the measured offset; 0 = use the strip's
+done          yes | no: scanned already (scan --job skips it; set no to redo)
+```
 
 `scan --job` validates the job and runs every remaining frame's scan
 window through the crop checks before the scanner does anything; a
@@ -94,14 +120,16 @@ after every frame (via `strip.job.tmp`, renamed over it), with finished
 frames marked `done = yes`, so a run stopped by Ctrl+C or a failed scan
 resumes where it left off.
 
-Hold: the first scan of every run holds at least 10 s before its
-calibration whatever was asked; `-h` on `scan --job` and
-`calibrate-focus` sets that first hold (0..120 s, e.g. `-h 35` after a
-cold power-up). Later scans hold 3 s.
+Hold: the first scan of a run holds at least 10 s before its
+calibration, whatever was asked, except that `-h` on `frames`,
+`scan --job` and `calibrate-focus` sets that first hold explicitly
+(0..120 s, e.g. `-h 35` after a cold power-up, `-h 0` when the lamp is
+already warm). Their later scans hold 3 s.
 
-Ctrl+C (`scan`, `crop`, `frames`, `scan --job`, `calibrate-focus`,
-`park`, `goto`, `move`) stops at the next safe point: the line flood
-ends, the end handshake is still sent, and no new scan or move starts.
+Ctrl+C: scans (`scan`, `crop`, `frames`, `scan --job`,
+`calibrate-focus`) stop at the next line read and send END; `park` and
+`goto` finish their current move (Ctrl+C is held until then); `move`
+stops before its next step. No new scan or move starts afterwards.
 Other commands are stopped by Ctrl+C at once, as before.
 
 Focus: the curve comes from `focus.txt` in the current directory
@@ -148,6 +176,9 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
   from its focus model) and the lamp level (@76, `-l`). Each stays
   within the values FlexColor sent, and the CCD always stays below the
   lens.
+- `frames`, `scan --job` and `calibrate-focus` force the lamp level to
+  255 (full) on every scan: the level persists in the scanner, so a
+  dimmed level left by an earlier `-l` must not leak into them.
 - Resolution is limited to FlexColor's range (0..63000000 = 6300 ppi); the
   start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching

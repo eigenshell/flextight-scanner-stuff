@@ -435,8 +435,9 @@ static BOOL WINAPI on_ctrl(DWORD type)
 }
 
 /* The first scan of the process holds at least this long before its
- * calibration, whatever the caller asks (lamp warm-up); scan --job and
- * calibrate-focus set it with -h (e.g. 35 s after a cold power-up). */
+ * calibration, whatever the caller asks (lamp warm-up); frames, scan --job
+ * and calibrate-focus set it with -h, 0..120 s (e.g. 35 s after a cold
+ * power-up). */
 static DWORD g_first_hold = 10000;
 
 /* -h: hold before calibration, 0..120 s */
@@ -1439,7 +1440,7 @@ static void load_lens(void)
  * CCD (lens unchanged). Returns 0 ok, CROP_REFUSED when a check refused
  * the request before anything was sent, 1 when the scan failed. */
 #define CROP_REFUSED 2
-#define CROP_X_MAX   32.0        /* mm across: the preview's coverage */
+#define CROP_X_MAX   32.0        /* mm across: the holder's crop limit */
 struct crop_req {
     double ppi, x, y, w, h;      /* mm */
     long ccd, optic, ccd_offset;
@@ -1467,7 +1468,8 @@ static int crop_check(const struct crop_req *r, long *ccd_out,
         fprintf(stderr, "crop: ppi 525..6300\n");
         return CROP_REFUSED;
     }
-    /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
+    /* the preview covers 0.92..33.14 mm across and ~232 mm along; crops
+     * stay within the holder's crop limits, 32 x 231 mm */
     if (!(r->x >= 0 && r->w > 0 && r->x + r->w <= CROP_X_MAX && r->y >= 0 &&
           r->h > 0 && r->y + r->h <= 231.0)) {
         fprintf(stderr, "crop: window outside the holder area FlexColor "
@@ -2052,7 +2054,6 @@ static int cmd_frames(int argc, char **argv)
     ft_film film = FT_FILM_NEGATIVE;
     double ppi = 2000;
     int sprockets = 0, i, lines = 0, rc, focus_failed;
-    DWORD hold = 10000;
     const ft_holder *h = ft_holder_find("24x217");
     static ft_layout L;
     static ft_job j;
@@ -2083,7 +2084,7 @@ static int cmd_frames(int argc, char **argv)
             }
         }
         else if (strcmp(argv[i], "-h") == 0) {
-            if (parse_hold(argv[i + 1], &hold)) return 2;
+            if (parse_hold(argv[i + 1], &g_first_hold)) return 2;
         }
         else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
         else {
@@ -2106,7 +2107,8 @@ static int cmd_frames(int argc, char **argv)
     }
 
     g_lamp = 255;                    /* the lamp level persists: set it */
-    if (cmd_scan(&PRESETS[0], -1, 0, hold, raw))
+    /* the preview is the run's first scan: it holds g_first_hold (-h) */
+    if (cmd_scan(&PRESETS[0], -1, 0, g_first_hold, raw))
         return 1;
     /* the axes below assume SCAN_WIN's geometry: 666 px from pixel 2 */
     if (meta_long(raw, "px") != 666 || meta_long(raw, "x") != 2) {
@@ -2722,25 +2724,30 @@ int main(int argc, char **argv)
             "                        FlexColor's values, CCD below lens)\n"
             "                     -l <0..255> lamp level @76 (scans send 0)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
-            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-o file]\n"
+            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]\n"
+            "       [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
             "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no] [-h s] [-o strip]\n"
             "                     preview (lamp 255), detect frames, 3-point focus\n"
             "                     check -> strip.job (edit it) + strip.png;\n"
             "                     fb.raw* are scratch focus crops\n"
+            "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  scan --job strip.job [-h s]  scan the job's included frames\n"
             "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
             "                     crop, named after the job file)\n"
+            "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  calibrate-focus <x> <y> <w> [-h s]  fit this scanner's focus curve\n"
             "                     on a textured window (mm) -> focus.txt\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped. The first scan of a\n"
-            "run holds at least 10 s (or scan --job / calibrate-focus -h). Ctrl+C\n"
-            "stops scan, crop, frames, scan --job, calibrate-focus, park, goto and\n"
-            "move at the next safe point (end handshake sent, nothing new starts).\n");
+            "run holds at least 10 s, except that frames, scan --job and\n"
+            "calibrate-focus -h set that first hold (0..120 s). Ctrl+C: scans (scan,\n"
+            "crop, frames, scan --job, calibrate-focus) stop at the next line read\n"
+            "and send END; park and goto finish their current move (Ctrl+C is held\n"
+            "until then); move stops before its next step. Nothing new starts.\n");
         return 2;
     }
     cmd = argv[1];
