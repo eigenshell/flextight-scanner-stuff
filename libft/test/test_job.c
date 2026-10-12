@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include "ft_focus.h"
@@ -84,5 +85,85 @@ int main(void)
     b.focus = FT_FOCUS_SHIFTED;
     b.focus_offset = 900000;                  /* CCD would pass the lens */
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    /* hardening */
+    f = text("[strip]\r\nholder = 24x217\r\n[frame 1]\r\nppi = 2000\r\n"
+             "window = 1 2 3 4\r\n");
+    CHECK(ft_job_read(&b, f, &e) == 0 && b.nframes == 1);
+    fclose(f);
+    {
+        char big[400] = "[strip]\nholder = 24x217\n# ";
+        memset(big + 26, 'x', 300);
+        strcpy(big + 326, "\n");
+        f = text(big);
+        CHECK(ft_job_read(&b, f, &e) == -1);
+        CHECK(strstr(e.msg, "line 3") && strstr(e.msg, "too long"));
+        fclose(f);
+    }
+#define GOOD "[strip]\nholder = 24x217\n"
+#define FR "[frame 1]\nppi = 2000\nwindow = 1 2 3 4\n"
+    f = text(GOOD FR "[frame 1]\nppi = 2000\nwindow = 1 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "repeated"));
+    fclose(f);
+    f = text(GOOD "[frame 1 junk]\nppi = 2000\nwindow = 1 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text(GOOD "[frame 0]\nppi = 2000\nwindow = 1 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text(GOOD "[frame 1]\nppi = 2000\nwindow = nan 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "line 5"));
+    fclose(f);
+    f = text(GOOD "[frame 1]\nppi = inf\nwindow = 1 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text(GOOD "[frame 1]\nppi = 2000\nwindow = 1 2 3 4 5\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text(GOOD "[frame 1]\nppi = 2000\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "no window"));
+    fclose(f);
+    f = text(GOOD "[frame 1]\nwindow = 1 2 3 4\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "no ppi"));
+    fclose(f);
+    f = text("[strip]\n" FR);
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "no holder"));
+    fclose(f);
+    f = text(FR);
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text("");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "[strip]"));
+    fclose(f);
+    f = text(GOOD "[strip]\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "line 3"));
+    fclose(f);
+    f = text(GOOD "film = slide\nfilm = slide\n");
+    CHECK(ft_job_read(&b, f, &e) == -1 && strstr(e.msg, "duplicate key"));
+    fclose(f);
+    f = text(GOOD "focus_offset = 99999999999999999999\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
+    f = text(GOOD "film = slide  # comment\n" FR);
+    CHECK(ft_job_read(&b, f, &e) == 0 && b.film == FT_FILM_SLIDE);
+    fclose(f);
+
+    /* validation hardening */
+    b = a;
+    b.focus = FT_FOCUS_PER_FRAME;
+    b.f[0].focus_offset = 900000;
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    b = a;
+    b.f[0].focus_offset = -2000000000L;
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    b = a;
+    b.f[0].tilt_deg = 60;
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    b = a;
+    b.f[0].len = NAN;
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    b = a;
+    b.nframes = 0;
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1 &&
+          strstr(e.msg, "no frames"));
     return TEST_DONE();
 }

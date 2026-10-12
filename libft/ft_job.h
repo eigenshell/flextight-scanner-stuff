@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The job file: what `ftpoc frames` found and `ftpoc scan --job` scans.
- * Plain key = value text; see notes/specs (local) or tools/poc/README.md. */
+ * Plain key = value text; see tools/poc/README.md. '#' always starts a
+ * comment, even after a value. */
 #ifndef FT_JOB_H
 #define FT_JOB_H
 #include <stdio.h>

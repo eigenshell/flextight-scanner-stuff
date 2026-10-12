@@ -1,5 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <ctype.h>
+#include <errno.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ft_holder.h"
@@ -12,6 +14,9 @@ static const char *yn(int v) { return v ? "yes" : "no"; }
 int ft_job_write(const ft_job *j, FILE *out)
 {
     int i;
+    for (i = 0; i < j->nframes; i++)
+        if ((int)j->f[i].type < 0 || (int)j->f[i].type > 3)
+            return -1;
     fprintf(out, "[strip]\nholder = %s\nfilm = %s\nfocus = %s\n"
                  "focus_offset = %ld\n", j->holder,
             j->film == FT_FILM_SLIDE ? "slide" : "negative",
@@ -20,7 +25,7 @@ int ft_job_write(const ft_job *j, FILE *out)
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
-                     "window = %.2f %.2f %.2f %.2f   # y0 x0 length width, mm\n"
+                     "window = %.3f %.3f %.3f %.3f   # y0 x0 length width, mm\n"
                      "tilt = %.2f\nsprockets = %s\nstraighten = %s\n"
                      "confidence = %s\nfocus_offset = %ld\ndone = %s\n",
                 f->index, TYPES[f->type], yn(f->include), f->ppi,
@@ -54,48 +59,98 @@ static int num(const char *v, double *out)
 {
     char *end;
     *out = strtod(v, &end);
-    return end != v && *trim(end) == 0 ? 0 : -1;
+    return end != v && *trim(end) == 0 && isfinite(*out) ? 0 : -1;
 }
 
 static int lnum(const char *v, long *out)
 {
     char *end;
+    errno = 0;
     *out = strtol(v, &end, 10);
-    return end != v && *trim(end) == 0 ? 0 : -1;
+    return end != v && *trim(end) == 0 && errno != ERANGE ? 0 : -1;
+}
+
+static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset" };
+static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
+    "sprockets", "straighten", "confidence", "focus_offset", "done" };
+#define K_PPI 2
+#define K_WINDOW 3
+
+static int key_index(const char **tab, int n, const char *k)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (strcmp(tab[i], k) == 0)
+            return i;
+    return -1;
+}
+
+static int finish_frame(const ft_job_frame *f, unsigned seen, ft_err *e)
+{
+    if (!(seen & (1u << K_PPI)))
+        return ft_fail(e, "line %d: frame %d has no ppi", f->line, f->index);
+    if (!(seen & (1u << K_WINDOW)))
+        return ft_fail(e, "line %d: frame %d has no window", f->line,
+                       f->index);
+    return 0;
 }
 
 int ft_job_read(ft_job *j, FILE *in, ft_err *e)
 {
     char line[256];
-    int ln = 0, in_strip = 0;
+    int ln = 0, in_strip = 0, strip_line = 0, i;
+    unsigned seen = 0;
     ft_job_frame *f = NULL;
 
     memset(j, 0, sizeof *j);
     while (fgets(line, sizeof line, in)) {
         char *s, *k, *v, *hash;
-        int bad = 0;
+        int bad = 0, ki;
         ln++;
+        if (!strchr(line, '\n') && !feof(in))
+            return ft_fail(e, "line %d: too long", ln);
         if ((hash = strchr(line, '#')) != NULL)
             *hash = 0;
         s = trim(line);
         if (!*s)
             continue;
         if (*s == '[') {
-            int n;
             if (strcmp(s, "[strip]") == 0) {
+                if (f && finish_frame(f, seen, e))
+                    return -1;
+                if (strip_line)
+                    return ft_fail(e, "line %d: duplicate [strip] section "
+                                      "(first at line %d)", ln, strip_line);
+                strip_line = ln;
                 in_strip = 1;
                 f = NULL;
+                seen = 0;
                 continue;
             }
-            if (sscanf(s, "[frame %d]", &n) == 1) {
+            if (strncmp(s, "[frame ", 7) == 0) {
+                char *end;
+                long n;
+                errno = 0;
+                n = strtol(s + 7, &end, 10);
+                if (end == s + 7 || end[0] != ']' || end[1] != 0 ||
+                    errno == ERANGE || n < 1 || n > 1000000)
+                    return ft_fail(e, "line %d: bad frame header %s", ln, s);
+                if (f && finish_frame(f, seen, e))
+                    return -1;
+                for (i = 0; i < j->nframes; i++)
+                    if (j->f[i].index == (int)n)
+                        return ft_fail(e, "line %d: frame %d repeated "
+                                          "(first at line %d)", ln, (int)n,
+                                       j->f[i].line);
                 if (j->nframes == FT_MAX_FRAMES)
                     return ft_fail(e, "line %d: more than %d frames", ln,
                                    FT_MAX_FRAMES);
                 f = &j->f[j->nframes++];
-                f->index = n;
+                f->index = (int)n;
                 f->line = ln;
                 f->include = 1;
                 in_strip = 0;
+                seen = 0;
                 continue;
             }
             return ft_fail(e, "line %d: unknown section %s", ln, s);
@@ -106,63 +161,83 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
         *v++ = 0;
         k = trim(s);
         v = trim(v);
+        if (in_strip)
+            ki = key_index(STRIP_KEYS, 4, k);
+        else if (f)
+            ki = key_index(FRAME_KEYS, 10, k);
+        else
+            return ft_fail(e, "line %d: %s outside a section", ln, k);
+        if (ki < 0)
+            return ft_fail(e, "line %d: unknown key %s", ln, k);
+        if (seen & (1u << ki))
+            return ft_fail(e, "line %d: duplicate key %s", ln, k);
+        seen |= 1u << ki;
         if (in_strip) {
-            if (strcmp(k, "holder") == 0) {
-                if (strlen(v) >= sizeof j->holder)
+            if (ki == 0) {
+                if (strlen(v) >= sizeof j->holder || !*v)
                     bad = 1;
                 else
                     strcpy(j->holder, v);
-            } else if (strcmp(k, "film") == 0) {
+            } else if (ki == 1) {
                 if (strcmp(v, "negative") == 0) j->film = FT_FILM_NEGATIVE;
                 else if (strcmp(v, "slide") == 0) j->film = FT_FILM_SLIDE;
                 else bad = 1;
-            } else if (strcmp(k, "focus") == 0) {
+            } else if (ki == 2) {
                 if (strcmp(v, "shifted") == 0) j->focus = FT_FOCUS_SHIFTED;
                 else if (strcmp(v, "per-frame") == 0) j->focus = FT_FOCUS_PER_FRAME;
                 else bad = 1;
-            } else if (strcmp(k, "focus_offset") == 0) {
-                bad = lnum(v, &j->focus_offset);
             } else {
-                return ft_fail(e, "line %d: unknown key %s", ln, k);
+                bad = lnum(v, &j->focus_offset);
             }
-        } else if (f) {
-            if (strcmp(k, "type") == 0) {
+        } else {
+            switch (ki) {
+            case 0: {
                 int t;
                 for (t = 0; t < 4 && strcmp(v, TYPES[t]) != 0; t++)
                     ;
                 if (t == 4) bad = 1; else f->type = (ft_frame_type)t;
-            } else if (strcmp(k, "include") == 0) {
-                bad = yesno(v, &f->include);
-            } else if (strcmp(k, "ppi") == 0) {
-                bad = num(v, &f->ppi);
-            } else if (strcmp(k, "window") == 0) {
+                break;
+            }
+            case 1: bad = yesno(v, &f->include); break;
+            case 2: bad = num(v, &f->ppi); break;
+            case 3: {
                 char extra;
                 bad = sscanf(v, "%lf %lf %lf %lf %c", &f->y0, &f->x0, &f->len,
-                             &f->width, &extra) != 4;
-            } else if (strcmp(k, "tilt") == 0) {
-                bad = num(v, &f->tilt_deg);
-            } else if (strcmp(k, "sprockets") == 0) {
-                bad = yesno(v, &f->sprockets);
-            } else if (strcmp(k, "straighten") == 0) {
-                bad = yesno(v, &f->straighten);
-            } else if (strcmp(k, "confidence") == 0) {
+                             &f->width, &extra) != 4 ||
+                      !isfinite(f->y0) || !isfinite(f->x0) ||
+                      !isfinite(f->len) || !isfinite(f->width);
+                break;
+            }
+            case 4: bad = num(v, &f->tilt_deg); break;
+            case 5: bad = yesno(v, &f->sprockets); break;
+            case 6: bad = yesno(v, &f->straighten); break;
+            case 7:
                 if (strcmp(v, "low") == 0) f->confidence_low = 1;
                 else if (strcmp(v, "high") == 0) f->confidence_low = 0;
                 else bad = 1;
-            } else if (strcmp(k, "focus_offset") == 0) {
-                bad = lnum(v, &f->focus_offset);
-            } else if (strcmp(k, "done") == 0) {
-                bad = yesno(v, &f->done);
-            } else {
-                return ft_fail(e, "line %d: unknown key %s", ln, k);
+                break;
+            case 8: bad = lnum(v, &f->focus_offset); break;
+            default: bad = yesno(v, &f->done); break;
             }
-        } else {
-            return ft_fail(e, "line %d: %s outside a section", ln, k);
         }
         if (bad)
             return ft_fail(e, "line %d: bad value for %s: %s", ln, k, v);
     }
+    if (f && finish_frame(f, seen, e))
+        return -1;
+    if (!strip_line)
+        return ft_fail(e, "no [strip] section");
+    if (!j->holder[0])
+        return ft_fail(e, "line %d: [strip] has no holder", strip_line);
     return 0;
+}
+
+static void where(char *buf, size_t n, const ft_job_frame *f)
+{
+    if (f->line > 0)
+        snprintf(buf, n, "line %d (frame %d)", f->line, f->index);
+    else
+        snprintf(buf, n, "frame %d", f->index);
 }
 
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
@@ -171,27 +246,32 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
     int i;
     if (!h)
         return ft_fail(e, "unknown holder '%s'", j->holder);
+    if (j->nframes <= 0)
+        return ft_fail(e, "no frames");
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         long ccd, optic, off;
+        char w[48];
         if (!f->include)
             continue;
-        if (!ft_ppi_supported(f->ppi))
-            return ft_fail(e, "line %d (frame %d): ppi %g not supported "
-                              "(525, 634..3150, 3800..6300)", f->line,
-                           f->index, f->ppi);
-        if (f->len <= 0 || f->width <= 0 || f->y0 < 0 || f->x0 < 0 ||
-            f->y0 + f->len > h->scan_len_mm ||
-            f->x0 + f->width > h->scan_width_mm)
-            return ft_fail(e, "line %d (frame %d): window outside the "
-                              "holder (%.0f x %.0f mm)", f->line, f->index,
-                           h->scan_len_mm, h->scan_width_mm);
+        where(w, sizeof w, f);
+        if (!isfinite(f->ppi) || !ft_ppi_supported(f->ppi))
+            return ft_fail(e, "%s: ppi %g not supported "
+                              "(525, 634..3150, 3800..6300)", w, f->ppi);
+        if (!(f->len > 0 && f->width > 0 && f->y0 >= 0 && f->x0 >= 0 &&
+              f->y0 + f->len <= h->scan_len_mm &&
+              f->x0 + f->width <= h->scan_width_mm))
+            return ft_fail(e, "%s: window outside the holder (%.0f x %.0f mm)",
+                           w, h->scan_len_mm, h->scan_width_mm);
+        if (!(fabs(f->tilt_deg) <= 45))
+            return ft_fail(e, "%s: tilt %g out of range (+-45 degrees)", w,
+                           f->tilt_deg);
         off = j->focus == FT_FOCUS_PER_FRAME ? f->focus_offset : j->focus_offset;
-        if (ft_optics_for(lens, f->ppi * ft_bin_for_ppi(f->ppi), &ccd, &optic) ||
+        if (off < -FT_CCD_MAX || off > FT_CCD_MAX ||
+            ft_optics_for(lens, f->ppi * ft_bin_for_ppi(f->ppi), &ccd, &optic) ||
             !ft_positions_ok(ccd + off, optic))
-            return ft_fail(e, "line %d (frame %d): focus offset %ld puts "
-                              "the CCD outside FlexColor's range", f->line,
-                           f->index, off);
+            return ft_fail(e, "%s: focus offset %ld puts the CCD outside "
+                              "FlexColor's range", w, off);
     }
     return 0;
 }
