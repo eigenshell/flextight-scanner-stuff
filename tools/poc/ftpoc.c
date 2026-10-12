@@ -2265,7 +2265,11 @@ static void write_crop(const char *out, const ft_job_frame *fr, long off)
     double px_mm = fr->ppi / 25.4;
     FILE *m;
 
-    snprintf(meta, sizeof meta, "%s.txt", out);
+    if (snprintf(meta, sizeof meta, "%s.txt", out) >= (int)sizeof meta) {
+        fprintf(stderr, "warning: %s: name too long; crop not recorded\n",
+                out);
+        return;
+    }
     k = bin >= 1 ? 12 / bin : 0;
     ls -= 2 * k;                        /* aligned image height */
     if (xs < 0 || ys < 0 || pxs < 1 || ls < 1 || bin < 1) {
