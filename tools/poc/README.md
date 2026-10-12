@@ -21,16 +21,25 @@ build.bat            REM cl or i686-w64-mingw32-gcc, see header
 ftpoc inquiry        identity; "SCSI Loader" means run `upload` first
 ftpoc poll [n]       ScannerReady polls (status vocabulary in protocol.md)
 ftpoc win            one SetWindow exchange with the idle template, hexdump
-ftpoc park           rest position: FlexColor's shutdown descriptor (36000000)
-ftpoc goto <pos>     absolute position, 0..63000000 (FlexColor's range)
-ftpoc move <+/-d> [n]  n relative moves, max 5000000/step, 50 steps
+ftpoc park           rest: FlexColor's shutdown descriptor (3600 ppi zoom)
+ftpoc goto <ppi*1e4> CCD + optics to that resolution's zoom, 0..63000000
+ftpoc move <+/-d> [n]  n relative zoom steps, max 5000000/step, 50 steps
 ftpoc stop           end-of-scan descriptor x2 (FlexColor's end/Stop)
 ftpoc pages          the standard ReadBuffer pages (Faul Pixs map etc.)
 ftpoc grab <n> [len] n ReadExt blocks (default 3996 B) -> grab.raw
-ftpoc scan [n] [s]   preview: pages, scan descriptor, hold s seconds
-                     (default 35 = cold lamp; 10 works warm), 200+50
-                     calibration reads, flood until n full blocks
-                     -> scan.raw, END x2. n=2000 ≈ 16 s, 8 MB.
+ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
+                     presets (captured, byte-exact):
+                       preview  525 ppi, whole holder, 666 px x 4795 lines
+                       2000     2000 ppi crop, 1818 px x 2807 lines
+                       1000     1000 ppi crop, 1142 px x 1490 lines
+                       3f       630 ppi frame, 655 px x 992 lines
+                     -n  stop after n lines (FlexColor's Stop: END x2)
+                     -y  start line along the strip (holder-clamped);
+                         e.g. `scan 1000 -y 4600` = one frame earlier
+                     -f  3f frame 1-6; 0 = whole strip -> frame1..6.raw
+                     -h  hold before calibration (default 10 s; 35 cold)
+                     writes <file> (lines), <file>.cal (250 calibration
+                     lines), <file>.faul (Faul Pixs table), <file>.txt
 ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only
 ftpoc scanstop       0xdb (kHwiScanStop) — device rejects it (CHECK COND.)
 ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
@@ -48,11 +57,13 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
 
 ## Safety model
 
-- The only motion primitive is the SetWindow position field (BE u32 @
-  byte 10) patched into a captured descriptor; every other byte is what
-  FlexColor sent on the wire.
-- Positions are limited to what FlexColor used (0..63000000; values are
-  round — 833333, 5250000, 9000000, 36000000 — likely nm of travel).
+- Every descriptor is one FlexColor sent, byte for byte. Only two fields
+  are ever patched: the resolution (BE u32 @10, `goto`/`move` on the idle
+  template — the firmware moves CCD and optics for it from its flashed
+  motor table) and the start line (BE u32 @18, `scan -y` — FlexColor's
+  six 3f frames differ only in that field).
+- Resolution is limited to FlexColor's range (0..63000000 = 6300 ppi); the
+  start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching
   FlexColor's own 5 s wait.
 
@@ -72,5 +83,19 @@ Seq 41–278 are *not* preview — they are the Position dialog's
 "CCD & Optic" button (UI timeline), a service calibration that `ftpoc`
 deliberately does not replay.
 
-`scan.raw` layout: one 3996 B block per line = 666 px × RGB, u16 LE.
-Colour negatives come out orange-masked; invert per channel.
+## Images: `ftraw.py`
+
+```
+python3 ftraw.py scan.raw --negative      # -> scan.png
+python3 ftraw.py scan.raw --raw           # uncorrected, shows the lines
+```
+
+`<file>` is one block per line = px × RGB, u16 LE, linear. The scanner
+does **not** correct its CCD: before every scan it sends 200 dark lines
+and 50 white (open beam) lines, and the host corrects
+`(raw − dark) / (white − dark)` per CCD pixel — FlexColor's
+`CCalibrateLineHandler`. Without it, pixel gain differences show as fine
+lines along the strip. Pixels in the device's Faul Pixs table flicker
+line to line and are interpolated instead (output pixel j covers CCD
+pixels `(x + j) × bin + 144 …`, `bin` = descriptor byte 51). `--negative`
+is a rough inversion, not FlexColor's film profiles.

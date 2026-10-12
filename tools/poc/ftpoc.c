@@ -16,11 +16,11 @@
  * others fail every command with UNEXPECTED_BUS_FREE. open_scanner() picks
  * the one whose INQUIRY says Imacon.
  *
- * SAFETY: the only motion primitive is SetWindow's position field (BE u32
- * @byte 10), patched into a descriptor captured byte-for-byte from
- * FlexColor; every other byte is what FlexColor sent. Positions are limited
- * to the range FlexColor itself used (0..63000000); park is FlexColor's own
- * shutdown descriptor.
+ * SAFETY: every descriptor sent is one FlexColor sent, byte for byte. The
+ * only fields ever patched are the resolution (BE u32 @10, goto/move on the
+ * idle template; the firmware moves CCD + optics for it) and the start line
+ * (BE u32 @18, scan -y; FlexColor's own 3f frames differ only there), both
+ * clamped to ranges FlexColor used. Park is FlexColor's shutdown descriptor.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -40,7 +40,7 @@
 static HANDLE g_dev = INVALID_HANDLE_VALUE;
 static HANDLE g_evt = NULL;
 
-/* Current carriage position in microsteps, as far as this process has
+/* Current resolution field (ppi x 10000 = zoom setting), as far as this process has
  * commanded it. Seeded by park(), updated by move/step. Display only. */
 static long g_pos = -1;
 static int  g_pos_known = 0;
@@ -221,25 +221,133 @@ static const BYTE EXIT_WIN[] = {
     0x00,0x00,0x1e,0x00,0x01,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
 };
 typedef char EXIT_WIN_is_84[sizeof EXIT_WIN == 84 ? 1 : -1];
+/* session 6 (pid 1428) seq 64676: 2000 ppi crop, 1818 px x 2807 lines from line 9314 */
+static const BYTE SCAN_2000[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x01,0x31,
+    0x2d,0x00,0x00,0x00,0x01,0x9b,0x00,0x00,0x24,0x62,0x00,0x00,
+    0x07,0x1a,0x00,0x00,0x0a,0xf7,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x03,0x00,0xe6,0x00,0x04,0x00,0x04,0x49,0x6f,
+    0x00,0x0f,0x37,0xb0,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char SCAN_2000_is_84[sizeof SCAN_2000 == 84 ? 1 : -1];
+/* session 6 seq 225610: its end descriptor, sent twice */
+static const BYTE END_2000[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0xe6,0x00,0x04,0x00,0x04,0x49,0x6f,
+    0x00,0x0f,0x37,0xb0,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char END_2000_is_84[sizeof END_2000 == 84 ? 1 : -1];
+/* session 6 seq 225620: 1000 ppi crop, 1142 px x 1490 lines from line 6097 */
+static const BYTE SCAN_1000[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x98,
+    0x96,0x80,0x00,0x00,0x00,0x62,0x00,0x00,0x17,0xd1,0x00,0x00,
+    0x04,0x76,0x00,0x00,0x05,0xd2,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x06,0x00,0xe6,0x00,0x02,0x00,0x04,0x49,0x6f,
+    0x00,0x0f,0x37,0xb0,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char SCAN_1000_is_84[sizeof SCAN_1000 == 84 ? 1 : -1];
+/* session 6 seq 265797: its end descriptor, sent twice */
+static const BYTE END_1000[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0xe6,0x00,0x02,0x00,0x04,0x49,0x6f,
+    0x00,0x0f,0x37,0xb0,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char END_1000_is_84[sizeof END_1000 == 84 ? 1 : -1];
+/* session 6 seq 265806: 3f strip frame 1 of 6, 630 ppi, 655 px x 992 lines from line 50 */
+static const BYTE SCAN_3F[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x60,
+    0x21,0x60,0x00,0x00,0x01,0x56,0x00,0x00,0x00,0x32,0x00,0x00,
+    0x02,0x8f,0x00,0x00,0x03,0xe0,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x06,0x00,0xe6,0x00,0x02,0x00,0x06,0xb2,0x06,
+    0x00,0x0d,0xe6,0xca,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char SCAN_3F_is_84[sizeof SCAN_3F == 84 ? 1 : -1];
+/* session 6 seq 296339: its end descriptor (all six frames), sent twice */
+static const BYTE END_3F[] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+    0x00,0x00,0x00,0x00,0x00,0xe6,0x00,0x02,0x00,0x06,0xb2,0x06,
+    0x00,0x0d,0xe6,0xca,0x00,0x00,0x5f,0xb4,0x00,0x00,0x00,0x02,
+    0x00,0x00,0x1e,0x00,0x00,0x01,0x00,0x00,0x00,0x00,0x00,0xb4,
+};
+typedef char END_3F_is_84[sizeof END_3F == 84 ? 1 : -1];
 
-/* Carriage position: big-endian u32 @10. FlexColor's values are round
- * (833333, 5250000, 9000000, 36000000 ... 63000000), likely nm of holder
- * travel. Never command outside the observed range. */
+/* Descriptor geometry, all big-endian u32 (session 6: 2000/1000 ppi crops
+ * and a 3f strip, checked against the TIFFs FlexColor saved):
+ *  @10 resolution x 10000 (5250000 = 525 ppi preview, 63000000 = 6300 ppi
+ *      max). The firmware moves CCD + optics (zoom/focus) and sets the drum
+ *      speed for it from its flashed motor table (FP...txt CCD/OPTIC/DRUM).
+ *  @14 first pixel across the film     @22 pixels per line (block = px*6)
+ *  @18 first line along the strip      @26 number of lines
+ * The six 3f frames differ ONLY in @18; each end descriptor is its scan
+ * descriptor with bytes 8-52 zeroed. Never command outside the observed
+ * range. */
 #define POS_OFF    10
 #define POS_MAX    63000000L
+#define F_X        14
+#define F_Y        18
+#define F_PX       22
+#define F_LINES    26
+#define F_BIN      51   /* CCD pixels summed per output pixel: 12 preview,
+                           6 for 1000 ppi and 3f, 3 for 2000 ppi; byte 55
+                           is always 12 / bin. Output pixel j covers CCD
+                           pixels (x + j) * bin + 144 ... + bin - 1 */
+
+static long be32(const BYTE *d, int off)
+{
+    return ((long)d[off] << 24) | ((long)d[off + 1] << 16) |
+           ((long)d[off + 2] << 8) | (long)d[off + 3];
+}
+
+static void put_be32(BYTE *d, int off, long v)
+{
+    d[off]     = (BYTE)(v >> 24);
+    d[off + 1] = (BYTE)(v >> 16);
+    d[off + 2] = (BYTE)(v >> 8);
+    d[off + 3] = (BYTE)v;
+}
+
+/* Captured scan setups. Each pairs a scan descriptor with the end
+ * descriptor FlexColor sent after it. */
+static const struct preset {
+    const char *name;
+    const BYTE *scan, *end;
+    const char *what;
+} PRESETS[] = {
+    { "preview", SCAN_WIN,  END_WIN,  "525 ppi, whole holder" },
+    { "2000",    SCAN_2000, END_2000, "2000 ppi, one frame (session 6 crop)" },
+    { "1000",    SCAN_1000, END_1000, "1000 ppi, one frame (session 6 crop)" },
+    { "3f",      SCAN_3F,   END_3F,   "3f raw, 630 ppi, autoframe frame" },
+};
+/* 3f autoframe start lines for frames 1-6 of the 24x36x6 holder */
+static const long F3_Y[6] = { 50, 967, 1910, 2852, 3795, 4737 };
+/* holder length in lines at 525 ppi (preview @26); scales with resolution */
+#define HOLDER_LINES_525 4795L
 
 static long desc_pos(const BYTE *d)
 {
-    return ((long)d[POS_OFF] << 24) | ((long)d[POS_OFF + 1] << 16) |
-           ((long)d[POS_OFF + 2] << 8) | (long)d[POS_OFF + 3];
+    return be32(d, POS_OFF);
 }
 
 static void set_pos(BYTE *d, long pos)
 {
-    d[POS_OFF]     = (BYTE)(pos >> 24);
-    d[POS_OFF + 1] = (BYTE)(pos >> 16);
-    d[POS_OFF + 2] = (BYTE)(pos >> 8);
-    d[POS_OFF + 3] = (BYTE)pos;
+    put_be32(d, POS_OFF, pos);
 }
 
 static int cmd_inquiry(void)
@@ -586,6 +694,27 @@ static int read_pages(int verbose)
     return 0;
 }
 
+/* Save the device's Faul Pixs table (e0 @ 0x400, 318 B; ASCII, per
+ * channel a "100 0" line then "<ccd pixel>\t<+999 | -n>" lines) so the
+ * host can interpolate the defective CCD pixels, as FlexColor does. */
+static void save_faul(const char *path)
+{
+    BYTE cdb[10], buf[0x13e];
+    FILE *f;
+    int r;
+    memcpy(cdb, CDB_PAGE, 10);
+    cdb[2] = 0xe0;
+    cdb[4] = 0x04;
+    cdb[7] = 0x01;
+    cdb[8] = 0x3e;
+    r = srb_exec(cdb, 10, SRB_DIR_IN, buf, sizeof buf, TIMEOUT_MS);
+    if (r < 0) { printf("Faul Pixs: %s\n", srb_errstr(r)); return; }
+    f = fopen(path, "wb");
+    if (!f) { perror(path); return; }
+    fwrite(buf, 1, (size_t)r, f);
+    fclose(f);
+}
+
 static int cmd_grab(long blocks, WORD blklen, const char *out)
 {
     BYTE cdb[10];
@@ -621,37 +750,6 @@ static int cmd_grab(long blocks, WORD blklen, const char *out)
     printf("\nwrote %ld blocks x %u bytes -> %s%s\n",
            blocks, blklen, out, bad ? " (INCOMPLETE)" : "");
     return bad;
-}
-
-/* ReadExt n blocks of blklen into f (NULL = discard). INQUIRY every 400
- * blocks as FlexColor does mid-flood. Returns blocks read. */
-static long read_blocks(long n, WORD blklen, FILE *f)
-{
-    BYTE cdb[10], inq[96];
-    BYTE *buf = malloc(blklen);
-    long b;
-    DWORD t0 = GetTickCount(), dt;
-    if (!buf) return 0;
-    memcpy(cdb, CDB_GRAB, 10);
-    cdb[7] = (BYTE)(blklen >> 8);
-    cdb[8] = (BYTE)(blklen & 0xff);
-    for (b = 0; b < n; b++) {
-        int r = srb_exec(cdb, 10, SRB_DIR_IN, buf, blklen, TIMEOUT_MS);
-        if (r < 0) {
-            printf("\nread %ld: %s\n", b, srb_errstr(r));
-            break;
-        }
-        if (f && fwrite(buf, 1, (size_t)r, f) != (size_t)r) break;
-        if (b && b % 400 == 0)
-            srb_exec(CDB_INQUIRY, 6, SRB_DIR_IN, inq, sizeof inq, TIMEOUT_MS);
-        if (f && n > 20 && b % 200 == 0)
-            printf("  %ld/%ld\r", b, n), fflush(stdout);
-    }
-    free(buf);
-    dt = GetTickCount() - t0;
-    printf("  [%ld reads in %lu ms%s]\n", b, (unsigned long)dt,
-           dt ? "" : " (<1 ms)");
-    return b;
 }
 
 /* Pipelined flood: keep DEPTH overlapped ReadExt requests queued so the
@@ -779,39 +877,100 @@ out:
     return kept;
 }
 
-/* Preview, as FlexColor's menu-driven preview (session 4 seq 279-60400,
- * session 5 pid 412 seq 41-64720): page burst -> scan descriptor -> settle
- * (32 s cold lamp, ~3 s warm) -> 200 + 50 calibration reads -> poll for
- * 1060 -> ReadExt flood -> end descriptor x2. n = blocks to keep; a full
- * preview is ~60-64k x 3996 B (59592 / 64101 seen) and stopping early
- * with END x2 is what FlexColor's own Stop does. */
-static int cmd_scan(long blocks, DWORD settle_ms, const char *out)
+/* End descriptor x2, as FlexColor after the last line or on Stop. */
+static int send_end(const struct preset *p)
 {
-    FILE *f;
-    long got;
-    int v = -1, last = -1;
+    printf("end of scan (%s end descriptor x2)\n", p->name);
+    return send_win(p->end, "end") || send_win(p->end, "end");
+}
+
+/* Poll (265 ms, like FlexColor) until the carriage move that follows a
+ * calibration batch is over: idle, and at least min_ms since the batch. */
+static int wait_move(DWORD min_ms, DWORD timeout_ms, const char *what)
+{
+    DWORD t0 = GetTickCount();
+    int v, last = -1;
+    for (;;) {
+        Sleep(265);
+        v = poll_once();
+        if (v < 0) { printf("poll: %s\n", srb_errstr(v)); return 1; }
+        if (v != last)
+            printf("  ... %04x %s (%lu ms)\n", v, poll_name((unsigned)v),
+                   (unsigned long)(GetTickCount() - t0));
+        last = v;
+        if (v == 0x0000 && GetTickCount() - t0 >= min_ms)
+            return 0;
+        if (GetTickCount() - t0 > timeout_ms) {
+            printf("%s: carriage never went idle\n", what);
+            return 1;
+        }
+    }
+}
+
+/* One scan, as FlexColor does it for previews, crops and each 3f frame
+ * (sessions 5-6): page burst -> scan descriptor -> hold (FlexColor 0.8-8 s
+ * warm, 32 s cold) -> 200 calibration lines -> carriage move -> 50 lines
+ * -> move to the start line -> line flood -> end descriptor x2.
+ *
+ * The 250 calibration lines are reference data for the HOST: FlexColor's
+ * CCalibrateLineHandler/CLineHandlerCorrection build the per-pixel
+ * correction from them (the device does not correct the CCD). They go to
+ * <out>.cal; geometry goes to <out>.txt.
+ *
+ * y >= 0 moves the window along the strip (only @18 changes, exactly as
+ * between FlexColor's 3f frames). keep > 0 stops after that many lines
+ * with the end descriptor, as FlexColor's Stop does. */
+static int cmd_scan(const struct preset *p, long y, long keep,
+                    DWORD hold_ms, const char *out)
+{
+    BYTE desc[84];
+    FILE *f, *fc;
+    long got, px, lines, res, maxl;
+    WORD blklen;
+    int v, last = -1;
     DWORD start;
+    char meta[260];
+
+    memcpy(desc, p->scan, 84);
+    res = be32(desc, POS_OFF);
+    px = be32(desc, F_PX);
+    lines = be32(desc, F_LINES);
+    maxl = (long)((double)HOLDER_LINES_525 * res / 5250000.0);
+    if (y >= 0) {
+        if (y + lines > maxl) {
+            fprintf(stderr, "start line %ld + %ld lines is past the holder end "
+                            "(%ld lines at %ld ppi)\n", y, lines, maxl,
+                    res / 10000);
+            return 1;
+        }
+        put_be32(desc, F_Y, y);
+    }
+    if (keep <= 0 || keep > lines)
+        keep = lines;
+    blklen = (WORD)(px * 6);
+    printf("%s: %s\n  %ld ppi, %ld px from %ld x %ld lines from %ld, "
+           "%u-byte lines; keeping %ld\n", p->name, p->what, res / 10000, px,
+           be32(desc, F_X), lines, be32(desc, F_Y), blklen, keep);
 
     printf("page burst\n");
     read_pages(0);
-    printf("scan descriptor (pos %ld)\n", desc_pos(SCAN_WIN));
-    if (send_win(SCAN_WIN, "scan"))
-        return 1;
+    sprintf(meta, "%s.faul", out);
+    save_faul(meta);
+    printf("scan descriptor\n");
+    {
+        int r = win_exchange(desc, 0);
+        if (r < 0) { printf("SetWindow (scan): %s\n", srb_errstr(r)); return 1; }
+    }
     start = GetTickCount();
-    printf("waiting for carriage/lamp to settle (up to 120 s)\n");
     if (wait_settled(120000)) {
         printf("device never settled; stopping\n");
-        cmd_stop();
+        send_end(p);
         return 1;
     }
-    /* FlexColor holds off 32 s (cold lamp) / 2.6 s (warm) after the scan
-     * descriptor before the first calibration read, polling every 265 ms;
-     * reading earlier overruns (device sends > 3996 B). Keep polling for
-     * at least settle_ms, logging every live status change. */
-    printf("holding %lu ms before calibration\n", (unsigned long)settle_ms);
-    while (GetTickCount() - start < settle_ms) {
+    printf("holding %lu ms before calibration\n", (unsigned long)hold_ms);
+    while (GetTickCount() - start < hold_ms) {
         v = poll_once();
-        if (v < 0) { printf("poll: %s\n", srb_errstr(v)); cmd_stop(); return 1; }
+        if (v < 0) { printf("poll: %s\n", srb_errstr(v)); send_end(p); return 1; }
         if (v != last)
             printf("  ... %04x %s (%lu ms)\n", v, poll_name((unsigned)v),
                    (unsigned long)(GetTickCount() - start));
@@ -819,46 +978,38 @@ static int cmd_scan(long blocks, DWORD settle_ms, const char *out)
         Sleep(265);
     }
 
-    printf("calibration reads\n");
-    got = read_blocks(200, 3996, NULL);
+    /* Calibration: count FULL lines — at high resolution many reads come
+     * back empty (FlexColor issues ~300 reads for the 200 at 2000 ppi). */
+    sprintf(meta, "%s.cal", out);
+    fc = fopen(meta, "wb");
+    if (!fc) { perror(meta); send_end(p); return 1; }
+    printf("calibration: 200 lines\n");
+    got = read_flood(200, blklen, fc);
     if (got < 200) {
-        printf("calibration read failed after %ld blocks; stopping\n", got);
-        cmd_stop();
+        printf("calibration got %ld/200 lines; stopping\n", got);
+        fclose(fc);
+        send_end(p);
         return 1;
     }
-    /* between the 200 and 50 batches the carriage moves (live 0800 for
-     * ~600 ms); FlexColor polls 4x at 265 ms before the 50. Reading the 50
-     * during the move means 1060 never comes. */
-    {
-        DWORD t0 = GetTickCount();
-        last = -1;
-        for (;;) {
-            Sleep(265);
-            v = poll_once();
-            if (v < 0) { printf("poll: %s\n", srb_errstr(v)); cmd_stop(); return 1; }
-            if (v != last)
-                printf("  ... %04x %s (%lu ms)\n", v, poll_name((unsigned)v),
-                       (unsigned long)(GetTickCount() - t0));
-            last = v;
-            if (v == 0x0000 && GetTickCount() - t0 >= 1000)
-                break;
-            if (GetTickCount() - t0 > 30000) {
-                printf("carriage never settled between batches; stopping\n");
-                cmd_stop();
-                return 1;
-            }
-        }
+    /* carriage move between the batches (~550 ms); reading during it
+     * means the scan never starts */
+    if (wait_move(1000, 30000, "between calibration batches")) {
+        fclose(fc);
+        send_end(p);
+        return 1;
     }
-    got += read_blocks(50, 3996, NULL);
-    printf("  %ld/250 calibration blocks\n", got);
-    last = -1;
+    printf("calibration: 50 lines\n");
+    got = read_flood(50, blklen, fc);
+    fclose(fc);
+    if (got < 50) {
+        printf("calibration got %ld/50 lines; stopping\n", got);
+        send_end(p);
+        return 1;
+    }
 
-    /* After the 50 the carriage moves to the scan start (live 0800, ~2.5 s);
-     * the flood starts when it is idle again — FlexColor's first ReadExt
-     * lands 1.9-2.7 s after the last calibration read. The "10 60"
-     * responses in the captures are stale host-buffer bytes, like "bb 12"
-     * (= descriptor bytes 28-29 "12 bb") — accept 1060 but don't need it. */
-    printf("waiting for carriage at scan start (up to 90 s)\n");
+    /* move to the start line (2.5 s preview, ~7.5 s for a crop deep in
+     * the holder); the flood starts on busy -> idle */
+    printf("waiting for carriage at the start line (up to 90 s)\n");
     {
         int seen_busy = 0;
         start = GetTickCount();
@@ -882,21 +1033,30 @@ static int cmd_scan(long blocks, DWORD settle_ms, const char *out)
         }
     }
     if (v != 0x1060 && v != 0x0000) {
-        printf("carriage never reached scan start (%d); stopping\n", v);
-        cmd_stop();
+        printf("carriage never reached the start line (%d); stopping\n", v);
+        send_end(p);
         return 1;
     }
 
-    printf("data ready — reading %ld blocks -> %s\n", blocks, out);
+    printf("reading %ld lines -> %s\n", keep, out);
     f = fopen(out, "wb");
-    if (!f) { perror(out); cmd_stop(); return 1; }
-    got = read_flood(blocks, 3996, f);   /* blocks kept, in order */
+    if (!f) { perror(out); send_end(p); return 1; }
+    got = read_flood(keep, blklen, f);
     fclose(f);
-    printf("\nwrote %ld x 3996 B -> %s%s\n", got, out,
-           got == blocks ? "" : " (INCOMPLETE)");
+    printf("\nwrote %ld x %u B -> %s%s\n", got, blklen, out,
+           got == keep ? "" : " (INCOMPLETE)");
+    send_end(p);
 
-    cmd_stop();
-    return got == blocks ? 0 : 1;
+    sprintf(meta, "%s.txt", out);
+    f = fopen(meta, "w");
+    if (f) {
+        fprintf(f, "preset=%s\nppi=%ld\npx=%ld\nx=%ld\nlines=%ld\ny=%ld\n"
+                   "bin=%u\nblklen=%u\nkept=%ld\ncal_lines=250\n",
+                p->name, res / 10000, px, be32(desc, F_X), lines,
+                be32(desc, F_Y), desc[F_BIN], blklen, got);
+        fclose(f);
+    }
+    return got == keep ? 0 : 1;
 }
 
 /* MICROCOD.3XX upload: 16 x 4096-byte chunks + 10-byte trailer, then poll
@@ -954,6 +1114,58 @@ static int cmd_upload(const char *file)
 
 /* ------------------------------------------------------------------- driver */
 
+static int scan_args(int argc, char **argv)
+{
+    const struct preset *p = &PRESETS[0];
+    long keep = 0, y = -1;
+    int frame = -1, i, rc = 0;
+    DWORD hold = 10000;
+    const char *out = "scan.raw";
+    char name[32];
+
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        if (a[0] == '-' && a[1] && !a[2] && i + 1 < argc) {
+            const char *v = argv[++i];
+            switch (a[1]) {
+            case 'n': keep = atol(v); break;
+            case 'y': y = atol(v); break;
+            case 'f': frame = atoi(v); break;
+            case 'h': hold = (DWORD)atol(v) * 1000; break;
+            case 'o': out = v; break;
+            default: fprintf(stderr, "scan: unknown option %s\n", a); return 2;
+            }
+        } else {
+            size_t k;
+            for (k = 0; k < sizeof PRESETS / sizeof PRESETS[0]; k++)
+                if (strcmp(a, PRESETS[k].name) == 0) break;
+            if (k == sizeof PRESETS / sizeof PRESETS[0]) {
+                fprintf(stderr, "scan: unknown preset %s\n", a);
+                return 2;
+            }
+            p = &PRESETS[k];
+        }
+    }
+    if (frame >= 0 && strcmp(p->name, "3f") != 0) {
+        fprintf(stderr, "scan: -f only applies to the 3f preset\n");
+        return 2;
+    }
+    if (frame > 6) { fprintf(stderr, "scan: frame 1-6 (0 = all)\n"); return 2; }
+    if (frame > 0)
+        return cmd_scan(p, F3_Y[frame - 1], keep, hold, out);
+    if (frame == 0) {
+        /* FlexColor's 3f strip: one full scan cycle per frame */
+        for (i = 0; i < 6 && rc == 0; i++) {
+            sprintf(name, "frame%d.raw", i + 1);
+            printf("\n=== frame %d/6\n", i + 1);
+            rc = cmd_scan(p, F3_Y[i], keep, hold, name);
+            hold = 2500;     /* lamp warm after the first frame */
+        }
+        return rc;
+    }
+    return cmd_scan(p, y, keep, hold, out);
+}
+
 int main(int argc, char **argv)
 {
     const char *cmd;
@@ -966,14 +1178,18 @@ int main(int argc, char **argv)
             "  poll [n]           n ScannerReady polls (default 10)\n"
             "  win                one SetWindow exchange (idle template), hexdump\n"
             "  park               rest position (FlexColor's shutdown descriptor)\n"
-            "  goto <pos>         absolute carriage position, 0..63000000\n"
-            "  move <+/-d> [n]    n relative moves of d (max 5000000/step, 50 steps)\n"
+            "  goto <ppi*10000>   CCD + optics to that resolution's zoom, 0..63000000\n"
+            "  move <+/-d> [n]    n relative zoom steps of d (max 5000000, 50 steps)\n"
             "  stop               end-of-scan descriptor x2 (FlexColor end/Stop)\n"
             "  pages              read the standard ReadBuffer pages\n"
             "  grab <n> [len]     n ReadExt blocks (default len 3996) -> grab.raw\n"
-            "  scan [n] [s]       preview: n x 3996-B blocks (default 2000) -> scan.raw,\n"
-            "                     holding s seconds for lamp warm-up (default 35)\n"
-            "                     (full preview is 59592 blocks, 238 MB)\n"
+            "  scan [preset] [-n lines] [-y line] [-f frame] [-h hold_s] [-o file]\n"
+            "                     presets: preview (525 ppi), 2000, 1000, 3f (630 ppi)\n"
+            "                     -n stop after n lines (default: the whole window)\n"
+            "                     -y start line along the strip (holder-clamped)\n"
+            "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
+            "                     -h hold before calibration, s (default 10; 35 cold)\n"
+            "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped; Ctrl+C aborts.\n");
@@ -1015,9 +1231,7 @@ int main(int argc, char **argv)
             rc = cmd_grab(atol(argv[2]),
                           argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
         } else if (strcmp(cmd, "scan") == 0) {
-            rc = cmd_scan(argc > 2 ? atol(argv[2]) : 2000,
-                          argc > 3 ? (DWORD)atol(argv[3]) * 1000 : 35000,
-                          "scan.raw");
+            rc = scan_args(argc - 2, argv + 2);
         } else if (strcmp(cmd, "upload") == 0 && argc > 2) {
             rc = cmd_upload(argv[2]);
         } else {
