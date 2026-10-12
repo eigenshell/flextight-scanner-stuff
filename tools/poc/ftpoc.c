@@ -379,7 +379,7 @@ static int pos_ok(long a, long b)
 {
     if (ft_positions_ok(a, b))
         return 1;
-    fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent (CCD "
+    fprintf(stderr, "CCD/lens %ld/%ld outside the safe range (CCD "
                     "%ld..%ld, lens %ld..%ld, CCD below lens)\n", a, b,
             FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX);
     return 0;

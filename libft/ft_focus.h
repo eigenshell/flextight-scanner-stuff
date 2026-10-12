@@ -18,8 +18,13 @@ extern const ft_lens ft_lens_default;
 #define FT_SCALE_MAX     6300.0
 #define FT_FOCUS_MARGIN  1200L      /* CCD steps: ~5 % sharpness loss */
 #define FT_BRACKET_MAX   12000L     /* never bracket further from the curve */
-/* every value FlexColor sent; the CCD must also stay below the lens */
-#define FT_CCD_MIN    254123L
+/* every value FlexColor sent; the CCD must also stay below the lens.
+ * Exception: the CCD may go to 240000, ~14k steps under FlexColor's
+ * 254123: at 3150 ppi negative focus was still rising at 254270
+ * (hardware 2026-10-12). Both counters grow towards the film below; a
+ * lower CCD value moves the CCD up, away from the lens. Stepped to 241813
+ * with steady motor times (user approved). */
+#define FT_CCD_MIN    240000L
 #define FT_CCD_MAX    1020000L
 #define FT_OPTIC_MIN  895204L
 #define FT_OPTIC_MAX  1021000L
