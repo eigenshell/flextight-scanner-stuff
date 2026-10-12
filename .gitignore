@@ -53,3 +53,6 @@ libft/libft.a
 libft/test/test_*
 !libft/test/test_*.c
 libft/test/png_dump
+
+# ssh credential helper (local-only credential, notes/ already ignored)
+notes/ssh-askpass.sh
