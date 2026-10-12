@@ -54,6 +54,11 @@
  * and the test strip has a 100 mm panorama; 110 mm separates that from
  * three touching frames (114 mm). */
 #define GRID_RUN_MM 110.0
+/* Real panoramas on 35 mm: Horizon/Widelux 58-59 mm, XPan 65, Noblex 66.
+ * A longer run between trusted gaps is more likely frames whose gap was
+ * missed (touching frames, a light leak across the gap): flagged low. */
+#define PANO_MIN_MM 55.0
+#define PANO_MAX_MM 70.0
 #define MAX_TILT_DEG 2.0
 #define MIN_TILT_DEG 0.05   /* edge-based tilt below this is ignored */
 
@@ -373,19 +378,26 @@ static int base_levels(const det_t *d, const unsigned char *halo, int has_holes,
 }
 
 /* Strip tilt from the two hole rows: the along-shift that best aligns the
- * right row's open profile with the left row's (sub-line by parabola). */
-static double holes_tilt(const det_t *d)
+ * right row's open profile with the left row's (sub-line by parabola).
+ * *ok = 0 (tilt 0) when the strip is too short or nothing correlates. */
+static double holes_tilt(const det_t *d, int *ok)
 {
     int nl = d->f1 - d->f0, l, s, best = 0, ms;
     double xl = 0.5 * (d->hl0 + d->b0) * d->xm, xr = 0.5 * (d->b1 + d->hr1) * d->xm;
     double *pl = calloc(nl, sizeof *pl), *pr = calloc(nl, sizeof *pr);
     double ml = 0, mr = 0, cbest = -1e300, cm = 0, cp = 0, sh;
+    *ok = 0;
     if (!pl || !pr || xr - xl < 5) {
         free(pl);
         free(pr);
         return 0;
     }
     ms = (int)ceil((xr - xl) * tan(MAX_TILT_DEG * PI / 180) / d->ym) + 1;
+    if (nl < 4 * ms) {                 /* too short to correlate: no tilt */
+        free(pl);
+        free(pr);
+        return 0;
+    }
     for (l = 0; l < nl; l++) {
         int c, n = 0;
         for (c = d->hl0; c < d->b0; c++)
@@ -423,6 +435,12 @@ static double holes_tilt(const det_t *d)
         }
         free(cc);
     }
+    if (!(cbest > 0)) {                /* no hole pattern match: no tilt */
+        free(pl);
+        free(pr);
+        return 0;
+    }
+    *ok = 1;
     sh = best;
     if (best > -ms && best < ms && cm - 2 * cbest + cp < 0)
         sh += 0.5 * (cm - cp) / (cm - 2 * cbest + cp);
@@ -679,7 +697,8 @@ static void add_run(const det_t *d, ft_layout *L, const ft_holder *h,
     for (l = s; l < e; l++)
         if (d->g[l] >= NEAR_GAP)
             near += ym;
-    if (type == FT_FRAME_PANORAMA && near >= 0.3)
+    if (type == FT_FRAME_PANORAMA &&
+        (near >= 0.3 || len < PANO_MIN_MM || len > PANO_MAX_MM))
         low = 1;                       /* maybe a gap we did not trust */
     /* One trusted edge and one untrusted: base-like content at the frame
      * end may have moved the gap boundary into the frame. Extend to the
@@ -733,7 +752,7 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
     unsigned char *halo = NULL;
     float *base_l = NULL;
     double sig[3];
-    int c, l, b0, b1, i, nok, rc = -1;
+    int c, l, b0, b1, i, nok, rc = -1, tilt_ok = 0;
 
     if (!L)
         return ft_fail(e, "detect: no layout");
@@ -865,11 +884,11 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
         goto out;
     }
 
-    /* 6. tilt, gaps, edges. Without hole rows: a first pass untilted, then
-     * again at the median slope of the accepted edges. */
-    d->tn = L->has_holes ? holes_tilt(d) : 0;
+    /* 6. tilt, gaps, edges. Without a hole-row tilt: a first pass
+     * untilted, then again at the median slope of the accepted edges. */
+    d->tn = L->has_holes ? holes_tilt(d, &tilt_ok) : 0;
     nok = analyse(d);
-    if (!L->has_holes && nok > 0) {
+    if (!tilt_ok && nok > 0) {
         double sl[2 * FT_MAX_FRAMES];
         int n = 0;
         for (i = 0; i < d->ng && n < 2 * FT_MAX_FRAMES - 1; i++) {
@@ -926,10 +945,17 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
             }
         }
     }
-    /* 9. long trusted gaps are blank frames (also at the strip ends) */
-    for (i = 0; i < d->ng; i++)
-        if (d->gaps[i].ok && (d->gaps[i].b - d->gaps[i].a) * d->ym > BLANK_MM)
-            L->nblank += blanks(L, ax, d->ym, &d->gaps[i]);
+    /* 9. long trusted gaps are blank frames; at the strip ends they may
+     * be leader, so they are counted apart */
+    for (i = 0; i < d->ng; i++) {
+        const gap_t *q = &d->gaps[i];
+        if (q->ok && (q->b - q->a) * d->ym > BLANK_MM) {
+            if (q->a > d->f0 && q->b < d->f1)
+                L->nblank += blanks(L, ax, d->ym, q);
+            else
+                L->nblank_end += blanks(L, ax, d->ym, q);
+        }
+    }
     rc = 0;
 out:
     free(col);

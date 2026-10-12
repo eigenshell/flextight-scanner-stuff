@@ -30,6 +30,8 @@ typedef struct {
     int nspeck;                            /* open-beam specks on the film */
     double speck_r;                        /* their radius, mm */
     int open_outside;                      /* holder outside the film is open */
+    int nleak;                             /* light leaks: dense rectangles */
+    struct { double y0, y1, x0, x1; } leak[4];
 } synth_spec;
 
 void synth_default(synth_spec *s, ft_film film);

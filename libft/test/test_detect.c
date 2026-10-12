@@ -83,7 +83,7 @@ int main(void)
     CHECK_NEAR(L.holes_x1, 31.6, 0.3);
     CHECK_NEAR(L.film_y0, 3.0, 0.1);
     CHECK_NEAR(L.base[0], 0.62, 0.01);
-    CHECK(L.nblank == 0 && !L.fallback);
+    CHECK(L.nblank == 0 && L.nblank_end == 0 && !L.fallback);
 
     /* job: sprockets widen the window across to the hole rows */
     {
@@ -120,12 +120,42 @@ int main(void)
     CHECK_NEAR(L.f[2].y0, 81, 0.3);
     CHECK_NEAR(L.f[5].y0, 140, 0.3);
 
-    /* panorama */
+    /* panorama: 100 mm is longer than any real 35 mm panorama (55-70 mm),
+     * so it is kept whole but flagged */
     synth_default(&s, FT_FILM_NEGATIVE);
     synth_add(&s, 4, 100, 0);
     synth_add(&s, 106, 36, 0);
     CHECK(run(&s) == 0);
     expect_types("PF");
+    CHECK(L.f[0].confidence_low && !L.f[1].confidence_low);
+    CHECK(L.nblank == 0 && L.nblank_end == 2);    /* 89 mm unexposed tail */
+
+    /* XPan-size panorama (65 mm): trusted */
+    synth_default(&s, FT_FILM_NEGATIVE);
+    synth_add(&s, 4, 65, 0);
+    synth_add(&s, 71, 36, 0);
+    CHECK(run(&s) == 0);
+    expect_types("PF");
+    CHECK(nlow() == 0);
+
+    /* two frames touching mid-strip: one run of 74 mm, a flagged panorama */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.fr[1].len = 38;
+    CHECK(run(&s) == 0);
+    expect_types("FPFFF");
+    CHECK(L.f[1].confidence_low && nlow() == 1);
+
+    /* light leak across 20 % of one gap's columns: the gap is lost, the
+     * merged run is a flagged panorama */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.nleak = 1;
+    s.leak[0].y0 = 39.5;
+    s.leak[0].y1 = 42.5;
+    s.leak[0].x0 = 4.1;
+    s.leak[0].x1 = 8.9;
+    CHECK(run(&s) == 0);
+    expect_types("PFFFF");
+    CHECK(L.f[0].confidence_low && nlow() == 1);
 
     /* partial: the film starts inside frame 1 */
     ff6(&s, FT_FILM_NEGATIVE);
@@ -138,7 +168,7 @@ int main(void)
     s.fr[2].blank = 1;
     CHECK(run(&s) == 0);
     expect_types("FFFFF");
-    CHECK(L.nblank == 1);
+    CHECK(L.nblank == 1 && L.nblank_end == 0);
     CHECK_NEAR(L.f[2].y0, 118, 0.3);
 
     /* tilted strip */
@@ -234,7 +264,8 @@ int main(void)
         CHECK_NEAR(L.f[i].tilt_deg, 0.5, 0.05);
     }
 
-    /* slide at a realistic Dmax with sensor noise; frame 1 black (blank) */
+    /* slide at a realistic Dmax with sensor noise; frame 1 black: blank at
+     * the strip start, counted with the ends (could be leader) */
     ff6(&s, FT_FILM_SLIDE);
     s.base[0] = s.base[1] = s.base[2] = 0.0005f;
     s.noise = 2e-4;
@@ -245,7 +276,7 @@ int main(void)
     s.patch[0].x1 = 28.1;
     CHECK(run(&s) == 0);
     expect_types("FFFFF");
-    CHECK(!L.fallback && L.nblank == 1);
+    CHECK(!L.fallback && L.nblank == 0 && L.nblank_end == 1);
     CHECK_NEAR(L.f[0].y0, 42, 0.3);
 
     /* thin base-like content against both edges of one gap */

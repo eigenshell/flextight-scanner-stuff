@@ -30,7 +30,9 @@ typedef struct {
     double tilt_deg;               /* strip tilt (hole rows, else edges) */
     int nframes;
     ft_det_frame f[FT_MAX_FRAMES];
-    int nblank;                    /* blank frames dropped */
+    int nblank;                    /* blank frames dropped (between frames) */
+    int nblank_end;                /* frame-sized unexposed film at the strip
+                                      ends: blank frames or leader */
     int fallback;                  /* fixed grid used (no edge found) */
 } ft_layout;
 

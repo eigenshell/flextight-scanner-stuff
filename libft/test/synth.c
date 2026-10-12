@@ -70,6 +70,16 @@ static int base_like_area(const synth_spec *s, double x, double yf)
                       (yf - s->blob_y) * (yf - s->blob_y) < s->blob_r * s->blob_r;
 }
 
+static int leak_area(const synth_spec *s, double x, double yf)
+{
+    int i;
+    for (i = 0; i < s->nleak && i < 4; i++)
+        if (yf >= s->leak[i].y0 && yf < s->leak[i].y1 &&
+            x >= s->leak[i].x0 && x < s->leak[i].x1)
+            return 1;
+    return 0;
+}
+
 /* Gaussian deviate from its own LCG (keeps the default noise sequence). */
 static double gauss(unsigned *st)
 {
@@ -166,6 +176,9 @@ float *synth_preview(const synth_spec *s)
                     fr = i;
             for (k = 0; k < 3; k++) {
                 double v = base[k];
+                if (leak_area(s, x, yf))      /* fogged: dense / clear */
+                    v = s->film == FT_FILM_NEGATIVE ? base[k] * 0.05 : 0.5;
+                else
                 if (fr >= 0 && !s->fr[fr].blank && x >= s->img_x0 &&
                     x < s->img_x1 && !base_like_area(s, x, yf)) {
                     double n = content(x, yf, k, s->seed);
