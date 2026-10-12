@@ -7,8 +7,8 @@ hundreds of thousands of traced calls between FlexColor and our scanner.
 
 ## Why this exists
 
-It's the de-risking step before the Linux SG_IO driver: if a 300-line C
-program can move the holder and pull pixels on Windows with the protocol
+It's the de-risking step before the Linux SG_IO driver: if a single-file
+C program can move the holder and pull pixels on Windows with the protocol
 spec alone, the spec is right and the driver is just a port. If not, we
 learn what the spec got wrong — cheaply.
 
@@ -36,7 +36,8 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                      -y  start line along the strip (holder-clamped);
                          e.g. `scan 1000 -y 4600` = one frame earlier
                      -f  3f frame 1-6; 0 = whole strip -> frame1..6.raw
-                     -h  hold before calibration (default 10 s; 35 cold)
+                     -h  hold before calibration (default 10 s; 35 cold;
+                         the first scan of a run holds at least 10 s)
                      -p  <ccd>,<lens> positions (@56/@60): they set
                          magnification and focus; there is no exposure field
                      -l  <0..255> lamp level (@76): 0 keeps the current
@@ -61,6 +62,103 @@ ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
                      does NOT clear the scanner's scan state
 ```
 
+### Smart scanning
+
+```
+ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no] [-h s] [-o strip]
+ftpoc scan --job strip.job [-h s]
+ftpoc calibrate-focus <x_mm> <y_mm> <w_mm> [-h s]
+```
+
+`frames` scans a preview, finds every frame (full, half, panorama,
+partial; blank frames dropped and counted, unexposed film at the strip
+ends reported apart), checks focus at the first, middle and last frame,
+and writes `strip.job` plus `strip.png` (numbered boxes; dim yellow =
+excluded, orange = low confidence). Edit `strip.job` — `include`,
+`ppi`, `sprockets`, `straighten`, `window` per frame — then run
+`scan --job`. Detected windows are clamped to the holder's crop limits
+(32 mm across, 231 mm along; the preview itself reaches 0.92..33.14 mm
+across and ~232 mm along); if the job would still be refused, `frames`
+warns per frame and writes it anyway.
+
+Job file keys (`key = value`, `#` starts a comment anywhere):
+
+```
+[strip]
+holder        holder geometry name (24x217)
+film          negative | slide
+focus         shifted (one offset for the strip) | per-frame (bracket each frame)
+focus_offset  CCD steps added to the focus curve (shifted mode; the
+              per-frame brackets' default centre)
+[frame N]
+type          full | half | panorama | partial (informational)
+include       yes | no: scan this frame or not
+ppi           scan resolution: 525, 634..3150 or 3800..6300
+window        y0 x0 length width, mm from the holder origin (what is scanned)
+tilt          strip tilt in degrees (widens the scan window; recorded)
+sprockets     yes | no: set by `frames --sprockets`, whose window then
+              spans the hole rows; changing it alone does not move the window
+straighten    yes | no: recorded in the .txt for post-processing
+confidence    high | low: detection confidence (informational)
+focus_offset  per-frame mode: the measured offset; 0 = use the strip's
+done          yes | no: scanned already (scan --job skips it; set no to redo)
+```
+
+`scan --job` validates the job and runs every remaining frame's scan
+window through the crop checks before the scanner does anything; a
+refused frame is listed then, skipped, left `done = no`, and makes the
+exit status non-zero (the other frames are still scanned). Each frame
+is scanned slightly wider than its window (tilt + 0.3 mm, clipped to the
+holder and to what the CCD reaches at that ppi) into
+`<jobbase>_frameNN.raw`, where `<jobbase>` is the job path without its
+extension (`neg.job` -> `neg_frame01.raw`, `neg_frame02.raw`, ...), so
+scans of different jobs never overwrite each other (+ `.cal`, `.faul`,
+`.txt`); the tight crop is appended to the matching `.raw.txt`
+(`crop_x/y/w/h` in output pixels of the scan as sent,
+plus `tilt`, `straighten`, `focus_offset`). `crop_y`/`crop_h` count rows
+of the RGB-aligned image (as `ftraw.py` writes it): row r is the scan's
+green row r + k, k = 12 / bin lines dropped at each end. The job file is rewritten
+after every frame (via `strip.job.tmp`, renamed over it), with finished
+frames marked `done = yes`, so a run stopped by Ctrl+C or a failed scan
+resumes where it left off.
+
+Hold: the first scan of a run holds at least 10 s before its
+calibration, whatever was asked, except that `-h` on `frames`,
+`scan --job` and `calibrate-focus` sets that first hold explicitly
+(0..120 s, e.g. `-h 35` after a cold power-up, `-h 0` when the lamp is
+already warm). Their later scans hold 3 s.
+
+Ctrl+C: scans (`scan`, `crop`, `frames`, `scan --job`,
+`calibrate-focus`) stop at the next line read and send END; `park` and
+`goto` finish their current move (Ctrl+C is held until then); `move`
+stops before its next step. No new scan or move starts afterwards.
+Other commands are stopped by Ctrl+C at once, as before.
+
+Focus: the curve comes from `focus.txt` in the current directory
+(written there by `calibrate-focus` on a textured window) or the
+built-in curve for the development scanner. If the three check points
+agree within ±1200 CCD steps of their mean the curve is shifted by the
+mean; otherwise every frame gets its own focus bracket before it is
+scanned, centred on its `focus_offset` (the strip's when 0); a frame
+with no usable peak is scanned at that centre, with a warning. Focus
+crops go to the scratch files `fb.raw`, `fb.raw.cal`, `fb.raw.faul`
+and `fb.raw.txt`, overwritten by each crop.
+
+`calibrate-focus` brackets the CCD, lens on the current curve, at eight
+optical scales (3800..6300) on a 1 mm band at `y` across `x..x+w`
+(clipped to the CCD's reach): the first usable scale gets a coarse
+bracket (5 crops, 3000 steps, moving up to ±12000 if the peak is at an
+edge), then each scale a fine one (9 crops, 1000 steps) around the
+coarse peak or the previous scale's. Scales without a usable peak are
+skipped. The magnification at each peak follows from the current curve
+(moving the CCD by d shortens the image distance by d), and the
+thin-lens curve is fitted to the peaks. It writes `focus.txt` only with
+at least six usable scales, rms residuals of at most 600 CCD and 300
+lens steps, every point within ±1200 CCD steps of the fit, and a curve
+that keeps every measured scale inside FlexColor's positions. Brackets
+never leave ±12000 steps of the current curve; a peak further off is
+skipped like any other unusable scale.
+
 ## Device selection
 
 The scanner answers on all 8 LUNs of its SCSI target, so Windows creates
@@ -80,6 +178,9 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
   from its focus model) and the lamp level (@76, `-l`). Each stays
   within the values FlexColor sent, and the CCD always stays below the
   lens.
+- `frames`, `scan --job` and `calibrate-focus` force the lamp level to
+  255 (full) on every scan: the level persists in the scanner, so a
+  dimmed level left by an earlier `-l` must not leak into them.
 - Resolution is limited to FlexColor's range (0..63000000 = 6300 ppi); the
   start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching

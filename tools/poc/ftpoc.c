@@ -30,6 +30,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include "ft_calib.h"
+#include "ft_detect.h"
+#include "ft_focus.h"
+#include "ft_geom.h"
+#include "ft_holder.h"
+#include "ft_job.h"
+#include "ft_png.h"
 
 #define IOCTL_SRB 0x190012
 
@@ -357,32 +365,23 @@ static const long F3_Y[6] = { 50, 967, 1910, 2852, 3795, 4737 };
  *   3780  438790 /  911050   3f
  *   3600  440113 /  895204   idle and exit descriptors
  * and 1020000 / 1021000 in session 4. The two seem to share a rail: the
- * CCD stays below the lens (see parse_pos). */
+ * CCD stays below the lens (see parse_pos). The limits are FT_CCD_MIN..
+ * FT_OPTIC_MAX in libft/ft_focus.h. */
 #define F_CCD      56
 #define F_OPTIC    60
-#define CCD_MIN    254123L
-#define CCD_MAX    1020000L
-#define OPTIC_MIN  895204L
-#define OPTIC_MAX  1021000L
 static long g_ccd = -1, g_optic = -1;     /* -1: keep the template's */
 
+/* With the CCD past the lens (1020000 / 997296) the calibration lines
+ * flickered, the white batch never came and the carriage did not move to
+ * the start line. FlexColor always keeps CCD < lens. */
 static int pos_ok(long a, long b)
 {
-    if (a < CCD_MIN || a > CCD_MAX || b < OPTIC_MIN || b > OPTIC_MAX) {
-        fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent: CCD "
-                        "%ld..%ld, lens %ld..%ld\n", a, b, CCD_MIN, CCD_MAX,
-                OPTIC_MIN, OPTIC_MAX);
-        return 0;
-    }
-    /* With the CCD past the lens (1020000 / 997296) the calibration lines
-     * flickered, the white batch never came and the carriage did not move
-     * to the start line. FlexColor always keeps CCD < lens. */
-    if (a >= b) {
-        fprintf(stderr, "CCD/lens %ld/%ld: the CCD must stay below the "
-                        "lens\n", a, b);
-        return 0;
-    }
-    return 1;
+    if (ft_positions_ok(a, b))
+        return 1;
+    fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent (CCD "
+                    "%ld..%ld, lens %ld..%ld, CCD below lens)\n", a, b,
+            FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX);
+    return 0;
 }
 
 static int parse_pos(const char *v)
@@ -414,11 +413,43 @@ static int parse_lamp(const char *v)
 {
     char *end;
     long l = strtol(v, &end, 10);
-    if (*end || l < 0 || l > 255) {
+    if (*end || !(l >= 0 && l <= 255)) {
         fprintf(stderr, "-l wants a lamp level 0..255\n");
         return 1;
     }
     g_lamp = (int)l;
+    return 0;
+}
+
+/* Ctrl+C / Ctrl+Break (scan --job, frames, calibrate-focus): read_flood
+ * stops, cmd_scan still sends the end descriptor, and no new scan starts. */
+static volatile int g_abort;
+
+static BOOL WINAPI on_ctrl(DWORD type)
+{
+    if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
+        g_abort = 1;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+/* The first scan of the process holds at least this long before its
+ * calibration, whatever the caller asks (lamp warm-up); frames, scan --job
+ * and calibrate-focus set it with -h, 0..120 s (e.g. 35 s after a cold
+ * power-up). */
+static DWORD g_first_hold = 10000;
+
+/* -h: hold before calibration, 0..120 s */
+static int parse_hold(const char *v, DWORD *ms)
+{
+    char *end;
+    long s = strtol(v, &end, 10);
+    if (end == v || *end || !(s >= 0 && s <= 120)) {
+        fprintf(stderr, "-h wants a hold of 0..120 s\n");
+        return 1;
+    }
+    *ms = (DWORD)s * 1000;
     return 0;
 }
 
@@ -573,7 +604,7 @@ static int move_to(long pos, const char *why)
 {
     BYTE desc[84];
     int r;
-    if (pos < 0 || pos > POS_MAX) {
+    if (!(pos >= 0 && pos <= POS_MAX)) {
         fprintf(stderr, "refusing position %ld (observed range 0..%ld)\n",
                 pos, POS_MAX);
         return 1;
@@ -721,7 +752,7 @@ static int cmd_move(long delta, int steps)
     int s;
     if (steps < 1) steps = 1;
     if (steps > 50) { fprintf(stderr, "steps capped at 50\n"); return 1; }
-    if (delta == 0 || delta > 5000000L || delta < -5000000L) {
+    if (!(delta != 0 && delta >= -5000000L && delta <= 5000000L)) {
         fprintf(stderr, "per-step delta must be within +/-5000000 "
                         "(given %ld)\n", delta);
         return 1;
@@ -732,6 +763,10 @@ static int cmd_move(long delta, int steps)
             return 1;
     }
     for (s = 0; s < steps; s++) {
+        if (g_abort) {
+            printf("interrupted after %d of %d steps\n", s, steps);
+            return 1;
+        }
         if (move_to(g_pos + delta, "relative step"))
             return 1;
     }
@@ -872,6 +907,10 @@ static long read_flood(long n, WORD blklen, FILE *f)
 
     last_full = GetTickCount();
     while (kept < n) {
+        if (g_abort && !err) {
+            printf("\ninterrupted\n");
+            err = 1;
+        }
         /* top up the queue: empty reads are normal, so the number of reads
          * is open-ended; stop issuing once the queue could fill n */
         while (!err && kept + (issued - done) < n && issued - done < DEPTH) {
@@ -1007,6 +1046,7 @@ static int cmd_scan(const struct preset *p, long y, long keep,
 {
     static BYTE xscan[84], xend[84];
     static struct preset xp;
+    static int scanned;              /* a scan descriptor went out before */
     BYTE desc[84];
     FILE *f, *fc;
     long got, px, lines, res, maxl;
@@ -1015,6 +1055,14 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     DWORD start;
     char meta[260];
 
+    if (g_abort) {
+        printf("interrupted: not starting another scan\n");
+        return 1;
+    }
+    if (strlen(out) + sizeof ".faul" > sizeof meta) {
+        fprintf(stderr, "output name too long: %s\n", out);
+        return 1;
+    }
     if (g_ccd >= 0 || g_lamp >= 0) {
         /* the end descriptor carries these too (bytes 53+) */
         memcpy(xscan, p->scan, 84);
@@ -1048,6 +1096,8 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     }
     if (keep <= 0 || keep > lines)
         keep = lines;
+    if (!scanned && hold_ms < g_first_hold)
+        hold_ms = g_first_hold;     /* first scan of the process */
     blklen = (WORD)(px * 6);
     printf("%s: %s\n  %ld ppi, %ld px from %ld x %ld lines from %ld, "
            "%u-byte lines; keeping %ld; CCD/lens %ld/%ld, lamp %u\n",
@@ -1063,6 +1113,7 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     {
         int r = win_exchange(desc, 0);
         if (r < 0) { printf("SetWindow (scan): %s\n", srb_errstr(r)); return 1; }
+        scanned = 1;
     }
     start = GetTickCount();
     if (wait_settled(120000)) {
@@ -1217,6 +1268,134 @@ static int cmd_upload(const char *file)
     return 0;
 }
 
+/* ------------------------------------------------------- files and images */
+
+/* Whole file into a malloc'd buffer (NULL on any error; *size set). */
+static void *load_file(const char *path, long *size)
+{
+    FILE *f = fopen(path, "rb");
+    void *buf = NULL;
+    long n;
+    *size = 0;
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) >= 0 &&
+        fseek(f, 0, SEEK_SET) == 0) {
+        buf = malloc(n > 0 ? (size_t)n : 1);
+        if (buf && fread(buf, 1, (size_t)n, f) != (size_t)n) {
+            free(buf);
+            buf = NULL;
+        }
+        if (buf)
+            *size = n;
+    }
+    fclose(f);
+    return buf;
+}
+
+/* key=value from a scan's .txt; -1 if absent */
+static long meta_long(const char *scan, const char *key)
+{
+    char path[300], line[128];
+    size_t n = strlen(key);
+    long v = -1;
+    FILE *f;
+    if (snprintf(path, sizeof path, "%s.txt", scan) >= (int)sizeof path)
+        return -1;
+    f = fopen(path, "r");
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof line, f))
+        if (strncmp(line, key, n) == 0 && line[n] == '=')
+            v = atol(line + n + 1);
+    fclose(f);
+    return v;
+}
+
+/* Load <scan>, <scan>.cal (and .faul when x >= 0: x = the scan's first
+ * output pixel) as a flat-fielded, aligned image: returns lines*px*3
+ * floats (caller frees), *lines_out set; NULL on failure. */
+static float *load_corrected(const char *scan, int px, int bin, int x,
+                             int *lines_out)
+{
+    char path[300];
+    long nraw = 0, ncal = 0, nfaul = 0, lines, cl;
+    unsigned short *raw = NULL, *cal = NULL;
+    float *dark = NULL, *white = NULL, *t = NULL;
+    ft_err e;
+
+    if (px < 1 || px > 20000 || bin < 1 || bin > 12) {
+        fprintf(stderr, "%s: bad geometry (px %d, bin %d)\n", scan, px, bin);
+        return NULL;
+    }
+    if (snprintf(path, sizeof path, "%s.cal", scan) >= (int)sizeof path) {
+        fprintf(stderr, "%s: name too long\n", scan);
+        return NULL;
+    }
+    raw = load_file(scan, &nraw);
+    cal = load_file(path, &ncal);
+    dark = malloc((size_t)px * 3 * sizeof *dark);
+    white = malloc((size_t)px * 3 * sizeof *white);
+    lines = nraw / ((long)px * 6);
+    cl = ncal / ((long)px * 6);
+    if (!raw || !cal || !dark || !white || lines < 1 || cl < 1 ||
+        lines > 1000000) {
+        fprintf(stderr, "%s: cannot load scan data\n", scan);
+        goto out;
+    }
+    if (ft_split_cal(cal, (int)cl, px, dark, white, &e)) {
+        fprintf(stderr, "%s: %s\n", scan, e.msg);
+        goto out;
+    }
+    t = malloc((size_t)lines * px * 3 * sizeof *t);
+    if (!t) {
+        fprintf(stderr, "%s: out of memory\n", scan);
+        goto out;
+    }
+    ft_flatfield(raw, (int)lines, px, dark, white, t);
+    if (x >= 0) {
+        char *faul;
+        snprintf(path, sizeof path, "%s.faul", scan);
+        faul = load_file(path, &nfaul);
+        if (faul) {
+            int pixs[3][FT_FAUL_MAX], cnt[3];
+            ft_faul_parse(faul, (size_t)nfaul, pixs, cnt);
+            free(faul);
+            if (ft_faul_fix(t, (int)lines, px, pixs, cnt, x, bin)) {
+                fprintf(stderr, "%s: defective pixel fix failed\n", scan);
+                free(t);
+                t = NULL;
+                goto out;
+            }
+        } else {
+            printf("note: no %s; defective pixels left as they are\n", path);
+        }
+    }
+    *lines_out = ft_align_rgb(t, (int)lines, px, 12 / bin);
+out:
+    free(raw);
+    free(cal);
+    free(dark);
+    free(white);
+    return t;
+}
+
+/* sharpness of the green channel of a lines x px RGB image; NaN when out
+ * of memory (ft_peak refuses non-finite values) */
+static double green_sharpness(const float *t, int lines, int px)
+{
+    size_t i, n = (size_t)lines * px;
+    float *gch = malloc((n ? n : 1) * sizeof *gch);
+    double s;
+    if (!gch)
+        return NAN;
+    for (i = 0; i < n; i++)
+        gch[i] = t[i * 3 + 1];
+    s = ft_sharpness(gch, px, lines);
+    free(gch);
+    return s;
+}
+
 /* ------------------------------------------------------------------- driver */
 
 /* Synthesized crop at any resolution: the 2000 ppi crop descriptor with
@@ -1227,54 +1406,149 @@ static int cmd_upload(const char *file)
  *   of 12 with ppi x bin <= 6300 (preview 12, 1000 -> 6, 2000 -> 3,
  *   1200 -> 4), @55 = 12 / bin.
  * CCD/lens @56/@60: the in-focus pair for the optical scale ppi x bin
- * (optics_for), or -p.
+ * (ft_optics_for on the focus curve, see load_lens), or -p.
  * mm in, clamped to the area the captured scans covered. */
 static BYTE CROP_SCAN[84], CROP_END[84];
 
-/* CCD pixel on the optical axis: the image scales about it when the
- * lens/CCD pair changes (fit of FlexColor's four pairs, 2026-10-12) */
-#define CCD_AXIS   4118
-#define CCD_PIXELS 7992     /* preview: 666 px x bin 12 from pixel 144 */
+/* Focus: thin lens on one rail (libft/ft_focus.h), fitted to the sharpest
+ * point of eight CCD focus brackets at 3807..6230 px/inch (2026-10-12).
+ * FlexColor's own crop/preview pairs sit 9000-10000 CCD steps short of
+ * that peak on this scanner, and are visibly softer, so crop does not use
+ * them. The curve: focus.txt in the current directory if present (written
+ * by calibrate-focus), else this scanner's fit compiled into libft. */
+static ft_lens g_lens;
 
-/* Focus: thin lens on one rail, in motor steps (fit 2026-10-12). Film at
- * FOCUS_FILM, lens at L, CCD at C: object distance u = FOCUS_FILM - L,
- * image distance v = L - C + FOCUS_W, 1/u + 1/v = 1/FOCUS_FL, and the
- * magnification v/u = FOCUS_P * scale (scale = CCD px per inch of film,
- * so FOCUS_P = CCD pixel pitch in inches: 8.8 um). Fitted to the
- * sharpest point of eight CCD focus brackets at 3807..6230 px/inch
- * (sharpness = rms log-gradient across the film, magnification by image
- * correlation); rms residual 223 CCD / 114 lens steps, while sharpness
- * drops ~10 % at 1700 steps. FlexColor's own crop/preview pairs sit
- * 9000-10000 CCD steps short of that peak on this scanner, and are
- * visibly softer, so crop does not use them. */
-#define FOCUS_FILM 1468601.0
-#define FOCUS_W     268105.0
-#define FOCUS_FL    317836.0
-#define FOCUS_P     3.4799e-4
-#define SCALE_MIN   3800.0
-#define SCALE_MAX   6300.0
-
-static int optics_for(double scale, long *ccd, long *optic)
+static void load_lens(void)
 {
-    double m = FOCUS_P * scale;
-    double u = FOCUS_FL * (1 + 1 / m), v = FOCUS_FL * (1 + m);
-    double lens = FOCUS_FILM - u;
+    FILE *f = fopen("focus.txt", "r");
+    ft_err e;
+    g_lens = ft_lens_default;
+    if (!f)
+        return;
+    if (ft_lens_read(&g_lens, f, &e)) {
+        fprintf(stderr, "focus.txt: %s; using the built-in curve\n", e.msg);
+        g_lens = ft_lens_default;
+    } else {
+        printf("focus.txt: film=%.0f w=%.0f fl=%.0f p=%.4e\n", g_lens.film,
+               g_lens.w, g_lens.fl, g_lens.p);
+    }
+    fclose(f);
+}
 
-    if (scale < SCALE_MIN || scale > SCALE_MAX)
-        return 1;
-    *optic = (long)(lens + 0.5);
-    *ccd = (long)(lens + FOCUS_W - v + 0.5);
+/* One synthesized crop. ccd/optic >= 0: use them (after the safety check);
+ * otherwise the focus curve for ppi x bin, with ccd_offset added to the
+ * CCD (lens unchanged). Returns 0 ok, CROP_REFUSED when a check refused
+ * the request before anything was sent, 1 when the scan failed. */
+#define CROP_REFUSED 2
+#define CROP_X_MAX   32.0        /* mm across: the holder's crop limit */
+struct crop_req {
+    double ppi, x, y, w, h;      /* mm */
+    long ccd, optic, ccd_offset;
+    long keep;
+    DWORD hold;
+    const char *out;
+};
+
+/* Every check crop_scan makes before it sends anything: 0 with the
+ * CCD/lens pair it would use in *ccd / *optic, or CROP_REFUSED (reason
+ * printed). */
+static int crop_check(const struct crop_req *r, long *ccd_out,
+                      long *optic_out)
+{
+    long bin, ccd = r->ccd, optic = r->optic;
+    double scale, cx;
+
+    /* every range check is written so that NaN fails it */
+    if (!isfinite(r->ppi) || !isfinite(r->x) || !isfinite(r->y) ||
+        !isfinite(r->w) || !isfinite(r->h)) {
+        fprintf(stderr, "crop: non-finite window\n");
+        return CROP_REFUSED;
+    }
+    if (!(r->ppi >= 525 && r->ppi <= 6300)) {
+        fprintf(stderr, "crop: ppi 525..6300\n");
+        return CROP_REFUSED;
+    }
+    /* the preview covers 0.92..33.14 mm across and ~232 mm along; crops
+     * stay within the holder's crop limits, 32 x 231 mm */
+    if (!(r->x >= 0 && r->w > 0 && r->x + r->w <= CROP_X_MAX && r->y >= 0 &&
+          r->h > 0 && r->y + r->h <= 231.0)) {
+        fprintf(stderr, "crop: window outside the holder area FlexColor "
+                        "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
+        return CROP_REFUSED;
+    }
+    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
+     * keeps the optical scale ppi x bin within 6300 */
+    bin = ft_bin_for_ppi(r->ppi);
+    if (bin < 0)
+        return CROP_REFUSED;
+    scale = r->ppi * bin;
+    if ((long)(r->w / 25.4 * r->ppi + 0.5) * 6 > 60000) {
+        fprintf(stderr, "crop: line too long for one ReadExt\n");
+        return CROP_REFUSED;
+    }
+    if (ccd < 0) {
+        if (ft_optics_for(&g_lens, scale, &ccd, &optic)) {
+            fprintf(stderr, "crop: %g ppi x bin %ld = optical scale %.0f; "
+                            "focus is known for %.0f..%.0f (or give -p)\n",
+                    r->ppi, bin, scale, FT_SCALE_MIN, FT_SCALE_MAX);
+            return CROP_REFUSED;
+        }
+        ccd += r->ccd_offset;
+    }
+    if (!pos_ok(ccd, optic))
+        return CROP_REFUSED;
+    /* mm across are measured at the 6000 scale; other scales magnify
+     * about the optical axis */
+    cx = ft_mm_to_ccd(r->x, scale);
+    if (!(cx >= FT_CCD_FIRST &&
+          cx + r->w / 25.4 * scale <= FT_CCD_FIRST + FT_CCD_PIXELS)) {
+        fprintf(stderr, "crop: window runs off the CCD at this scale\n");
+        return CROP_REFUSED;
+    }
+    *ccd_out = ccd;
+    *optic_out = optic;
     return 0;
+}
+
+static int crop_scan(const struct crop_req *r)
+{
+    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
+                                        "synthesized crop" };
+    long bin, ccd, optic;
+    double scale, cx;
+    int i, rc;
+
+    if (crop_check(r, &ccd, &optic))
+        return CROP_REFUSED;
+    bin = ft_bin_for_ppi(r->ppi);   /* crop_check: valid */
+    scale = r->ppi * bin;
+    cx = ft_mm_to_ccd(r->x, scale);
+    memcpy(CROP_SCAN, SCAN_2000, 84);
+    put_be32(CROP_SCAN, POS_OFF, (long)(r->ppi * 10000 + 0.5));
+    put_be32(CROP_SCAN, F_X, (long)((cx - FT_CCD_FIRST) / bin + 0.5));
+    put_be32(CROP_SCAN, F_Y, (long)(r->y / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_PX, (long)(r->w / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_LINES, (long)(r->h / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, F_CCD, ccd);
+    put_be32(CROP_SCAN, F_OPTIC, optic);
+    CROP_SCAN[F_BIN] = (BYTE)bin;
+    CROP_SCAN[55] = (BYTE)(12 / bin);
+    memcpy(CROP_END, CROP_SCAN, 84);
+    memset(CROP_END + 8, 0, 53 - 8);
+    printf("crop descriptor:");
+    for (i = 0; i < 84; i++)
+        printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
+    printf("\n");
+    g_ccd = ccd;                 /* cmd_scan applies these to scan + end */
+    g_optic = optic;
+    rc = cmd_scan(&crop, -1, r->keep, r->hold, r->out);
+    g_ccd = g_optic = -1;
+    return rc ? 1 : 0;
 }
 
 static int cmd_crop(int argc, char **argv)
 {
-    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
-                                        "synthesized crop" };
-    double ppi, x, y, w, h;
-    long bin, keep = 0;
-    DWORD hold = 10000;
-    const char *out = "crop.raw";
+    struct crop_req r;
     int i;
 
     if (argc < 5) {
@@ -1282,76 +1556,1092 @@ static int cmd_crop(int argc, char **argv)
                         "[-n lines] [-h s] [-p ccd,lens] [-l lamp] [-o file]\n");
         return 2;
     }
-    ppi = atof(argv[0]); x = atof(argv[1]); y = atof(argv[2]);
-    w = atof(argv[3]); h = atof(argv[4]);
+    memset(&r, 0, sizeof r);
+    r.ppi = atof(argv[0]); r.x = atof(argv[1]); r.y = atof(argv[2]);
+    r.w = atof(argv[3]); r.h = atof(argv[4]);
+    r.ccd = r.optic = -1;
+    r.hold = 10000;
+    r.out = "crop.raw";
     for (i = 5; i + 1 < argc; i += 2) {
-        if (strcmp(argv[i], "-n") == 0) keep = atol(argv[i + 1]);
-        else if (strcmp(argv[i], "-h") == 0) hold = (DWORD)atol(argv[i + 1]) * 1000;
-        else if (strcmp(argv[i], "-o") == 0) out = argv[i + 1];
-        else if (strcmp(argv[i], "-p") == 0) { if (parse_pos(argv[i + 1])) return 2; }
+        if (strcmp(argv[i], "-n") == 0) r.keep = atol(argv[i + 1]);
+        else if (strcmp(argv[i], "-h") == 0) { if (parse_hold(argv[i + 1], &r.hold)) return 2; }
+        else if (strcmp(argv[i], "-o") == 0) r.out = argv[i + 1];
+        else if (strcmp(argv[i], "-p") == 0) {
+            if (parse_pos(argv[i + 1])) return 2;
+            r.ccd = g_ccd; r.optic = g_optic;
+            g_ccd = g_optic = -1;
+        }
         else if (strcmp(argv[i], "-l") == 0) { if (parse_lamp(argv[i + 1])) return 2; }
         else { fprintf(stderr, "crop: unknown option %s\n", argv[i]); return 2; }
     }
-    if (ppi < 525 || ppi > 6300) {
-        fprintf(stderr, "crop: ppi 525..6300\n");
-        return 1;
+    return crop_scan(&r) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------ focus, frames */
+
+/* Focus bracket on a 1 mm band centred at (xc, yc), w mm across, at ppi:
+ * n (3..9) crops with the CCD at curve + centre + (i - n/2) * step, lens
+ * on the curve. Samples are kept by offset; on a peak at an end the
+ * bracket moves there (up to twice), scanning only offsets not yet
+ * sampled, at most max_samples (n..FB_SAMPLES) in all, and the peak is
+ * fitted over every sample. The bracket is clamped to +-FT_BRACKET_MAX of the curve.
+ * Returns 0 with *best = peak offset from the curve; FB_NO_PEAK when the
+ * point is unusable (crop refused before scanning, flat response, peak
+ * still at an edge); -1 on a scan or file failure. */
+#define FB_SAMPLES 17        /* array size; callers pass their own cap */
+#define FB_FRAME_SAMPLES 9   /* frames and scan --job per-frame focus */
+#define FB_NO_PEAK 2
+#define FB_MIN_CONTRAST 0.03    /* (max - min) / max below this: flat */
+
+static int focus_bracket(double ppi, double xc, double yc, double w,
+                         long centre, long step, int n, int max_samples,
+                         long *best)
+{
+    long off[FB_SAMPLES];
+    double sh[FB_SAMPLES];
+    int ns = 0, tries, i, k, m, bin = ft_bin_for_ppi(ppi), dir = 0;
+    long half;
+
+    if (n < 3 || n > max_samples || max_samples > FB_SAMPLES || step <= 0 ||
+        bin < 1 ||
+        (long)(n - 1) * step > 2 * FT_BRACKET_MAX) {
+        fprintf(stderr, "focus: bad bracket (n %d, step %ld, ppi %g)\n", n,
+                step, ppi);
+        return FB_NO_PEAK;
     }
-    /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
-    if (x < 0 || w <= 0 || x + w > 32.0 || y < 0 || h <= 0 || y + h > 231.0) {
-        fprintf(stderr, "crop: window outside the holder area FlexColor "
-                        "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
-        return 1;
+    half = (long)(n / 2) * step;
+    for (tries = 0; tries < 3; tries++) {
+        long lo, mn_i;
+        double mx, mn, pk;
+        int r;
+
+        /* keep the whole bracket inside +-FT_BRACKET_MAX */
+        lo = centre - half;
+        if (lo < -FT_BRACKET_MAX)
+            lo = -FT_BRACKET_MAX;
+        if (lo + (long)(n - 1) * step > FT_BRACKET_MAX)
+            lo = FT_BRACKET_MAX - (long)(n - 1) * step;
+        for (i = 0; i < n && ns < max_samples; i++) {
+            struct crop_req q;
+            int lines = 0, px, rc;
+            long o = lo + i * step, x;
+            float *t;
+            double s;
+            for (k = 0; k < ns && off[k] != o; k++)
+                ;
+            if (k < ns)
+                continue;               /* sampled on an earlier bracket */
+            if (labs(o) > FT_BRACKET_MAX) {   /* cannot happen; belt and braces */
+                fprintf(stderr, "focus: offset %ld beyond +-%ld\n", o,
+                        FT_BRACKET_MAX);
+                return FB_NO_PEAK;
+            }
+            memset(&q, 0, sizeof q);
+            q.ppi = ppi;
+            q.x = xc - w / 2;
+            q.y = yc - 0.5;
+            q.w = w;
+            q.h = 1.0;
+            q.ccd = q.optic = -1;
+            q.ccd_offset = o;
+            q.hold = 3000;
+            q.out = "fb.raw";
+            rc = crop_scan(&q);
+            if (rc == CROP_REFUSED)
+                return FB_NO_PEAK;
+            if (rc)
+                return -1;
+            px = (int)meta_long("fb.raw", "px");
+            x = meta_long("fb.raw", "x");
+            t = load_corrected("fb.raw", px, bin, x >= 0 ? (int)x : -1, &lines);
+            if (!t)
+                return -1;
+            s = green_sharpness(t, lines, px);
+            free(t);
+            printf("  focus %+6ld: sharpness %.4f\n", o, s);
+            /* insert sorted by offset */
+            for (k = ns; k > 0 && off[k - 1] > o; k--) {
+                off[k] = off[k - 1];
+                sh[k] = sh[k - 1];
+            }
+            off[k] = o;
+            sh[k] = s;
+            ns++;
+        }
+
+        m = 0;
+        mn_i = 0;
+        for (k = 1; k < ns; k++) {
+            if (sh[k] > sh[m]) m = k;
+            if (sh[k] < sh[mn_i]) mn_i = k;
+        }
+        mx = sh[m];
+        mn = sh[mn_i];
+        if (ns < 3 || !isfinite(mx) || !isfinite(mn) || !(mx > 0) ||
+            (mx - mn) / mx < FB_MIN_CONTRAST) {
+            printf("  focus: flat response (%.4f..%.4f); no usable peak\n",
+                   mn, mx);
+            return FB_NO_PEAK;
+        }
+        r = ft_peak(off, sh, ns, &pk);
+        if (r < 0) {
+            printf("  focus: no usable sharpness peak\n");
+            return FB_NO_PEAK;
+        }
+        *best = (long)(pk < 0 ? pk - 0.5 : pk + 0.5);
+        if (r == 0)
+            return 0;
+        /* maximum at an end of everything sampled */
+        if (dir != 0 && (m == 0 ? -1 : 1) != dir) {
+            printf("  focus: maximum went back to the other end; no usable "
+                   "peak\n");
+            return FB_NO_PEAK;
+        }
+        dir = m == 0 ? -1 : 1;
+        if (tries < 2)
+            printf("  focus: still rising at %+ld; moving the bracket\n",
+                   off[m]);
+        centre = off[m];
     }
-    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
-     * keeps the optical scale ppi x bin within 6300 */
+    printf("  focus: peak still at the bracket edge (%+ld); no usable peak\n",
+           *best);
+    return FB_NO_PEAK;
+}
+
+/* 3x5 digits, rows top to bottom, 3 bits each (MSB = left) */
+static const unsigned char DIGITS[10][5] = {
+    {7,5,5,5,7},{2,6,2,2,7},{7,1,7,4,7},{7,1,7,1,7},{5,5,7,1,1},
+    {7,4,7,1,7},{7,4,7,5,7},{7,1,1,1,1},{7,5,7,5,7},{7,5,7,1,7},
+};
+
+static void put_px(unsigned char *img, int w, int h, long x, long y,
+                   unsigned char r, unsigned char g, unsigned char b)
+{
+    size_t o;
+    if (x < 0 || y < 0 || x >= w || y >= h)
+        return;
+    o = ((size_t)y * w + (size_t)x) * 3;
+    img[o] = r;
+    img[o + 1] = g;
+    img[o + 2] = b;
+}
+
+static void draw_number(unsigned char *img, int w, int h, long x, long y, int v)
+{
+    char s[16];
+    int i, r, c, k, scale = 4;
+    snprintf(s, sizeof s, "%d", v);
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            continue;
+        for (r = 0; r < 5; r++)
+            for (c = 0; c < 3; c++)
+                if (DIGITS[s[i] - '0'][r] & (4 >> c))
+                    for (k = 0; k < scale * scale; k++)
+                        put_px(img, w, h, x + (i * 4 + c) * scale + k % scale,
+                               y + r * scale + k / scale, 255, 255, 0);
+    }
+}
+
+/* mm -> pixel index, clamped to -1..n+1 (NaN -> -1) so a bad window
+ * cannot run away; callers treat <0 and >n as outside */
+static long mm_to_idx(double mm, double mm0, double per, int n)
+{
+    double v = floor((mm - mm0) / per + 0.5);
+    if (!(v >= 0))
+        return -1;
+    if (v > n)
+        return (long)n + 1;
+    return (long)v;
+}
+
+/* strip horizontal: image x = preview line, image y = preview column.
+ * Included frames yellow (dimmer when excluded), low confidence orange. */
+static int write_strip_png(const char *path, const float *t, int lines, int px,
+                           const ft_axes *ax, const ft_job *j)
+{
+    unsigned char *img;
+    long l, c;
+    int i, k, rc;
+    ft_err e;
+    if (lines < 1 || px < 1)
+        return -1;
+    img = malloc((size_t)lines * px * 3);
+    if (!img) {
+        fprintf(stderr, "%s: out of memory\n", path);
+        return -1;
+    }
+    for (l = 0; l < lines; l++)
+        for (c = 0; c < px; c++)
+            for (k = 0; k < 3; k++) {
+                double v = t[((size_t)l * px + c) * 3 + k];
+                v = v > 0 ? pow(v < 1 ? v : 1, 1 / 2.2) : 0;
+                img[((size_t)c * lines + l) * 3 + k] = (unsigned char)(v * 255 + 0.5);
+            }
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        long x0 = mm_to_idx(f->y0, ax->y_mm0, ax->y_mm_per_line, lines);
+        long x1 = mm_to_idx(f->y0 + f->len, ax->y_mm0, ax->y_mm_per_line, lines);
+        long y0 = mm_to_idx(f->x0, ax->x_mm0, ax->x_mm_per_px, px);
+        long y1 = mm_to_idx(f->x0 + f->width, ax->x_mm0, ax->x_mm_per_px, px);
+        unsigned char r = f->include ? 255 : 128, g = f->confidence_low ? 64 : 255;
+        for (l = x0; l <= x1; l++) {
+            put_px(img, lines, px, l, y0, r, g, 0);
+            put_px(img, lines, px, l, y1, r, g, 0);
+        }
+        for (c = y0; c <= y1; c++) {
+            put_px(img, lines, px, x0, c, r, g, 0);
+            put_px(img, lines, px, x1, c, r, g, 0);
+        }
+        draw_number(img, lines, px, x0 + 6, y0 + 6, f->index);
+    }
+    rc = ft_png_write_rgb8(path, img, lines, px, &e);
+    if (rc)
+        fprintf(stderr, "%s\n", e.msg);
+    free(img);
+    return rc;
+}
+
+static const char *type_name(ft_frame_type t)
+{
+    static const char *const names[] = { "full", "half", "panorama", "partial" };
+    return (unsigned)t < sizeof names / sizeof names[0] ? names[t] : "?";
+}
+
+static void print_job(const ft_job *j)
+{
+    int i;
+    printf("\n frame  type      y0     len    x0   width  tilt  ppi   conf\n");
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        printf(" %3d%s  %-8s %6.1f %6.1f %5.1f %6.1f %5.2f %5g  %s\n",
+               f->index, f->include ? " " : "-", type_name(f->type), f->y0,
+               f->len, f->x0, f->width, f->tilt_deg, f->ppi,
+               f->confidence_low ? "LOW" : "ok");
+    }
+    printf(" focus: %s, offset %ld CCD steps\n",
+           j->focus == FT_FOCUS_PER_FRAME ? "per frame" : "shifted curve",
+           j->focus_offset);
+}
+
+/* most textured 1 mm band of a frame, by preview sharpness: centre (mm
+ * along) returned, *score = its sharpness (0 if no band fits) */
+static double textured_band(const float *t, int lines, int px,
+                            const ft_axes *ax, const ft_job_frame *f,
+                            double *score)
+{
+    double best_y = f->y0 + f->len / 2;
+    int k;
+    *score = 0;
+    for (k = 1; k <= 9; k++) {
+        double yc = f->y0 + 2 + (f->len - 4) * k / 10.0;
+        long l0 = mm_to_idx(yc - 0.5, ax->y_mm0, ax->y_mm_per_line, lines);
+        long l1 = mm_to_idx(yc + 0.5, ax->y_mm0, ax->y_mm_per_line, lines);
+        long c0 = mm_to_idx(f->x0, ax->x_mm0, ax->x_mm_per_px, px);
+        long c1 = mm_to_idx(f->x0 + f->width, ax->x_mm0, ax->x_mm_per_px, px);
+        double s;
+        float *band;
+        long l, c;
+        if (c0 < 0)                 /* across: the part inside the preview */
+            c0 = 0;
+        if (c1 > px)
+            c1 = px;
+        if (l0 < 0 || l1 > lines || l1 - l0 < 3 || c1 - c0 < 3)
+            continue;
+        band = malloc((size_t)(l1 - l0) * (c1 - c0) * sizeof *band);
+        if (!band)
+            continue;
+        for (l = l0; l < l1; l++)
+            for (c = c0; c < c1; c++)
+                band[(size_t)(l - l0) * (c1 - c0) + (c - c0)] =
+                    t[((size_t)l * px + c) * 3 + 1];
+        s = ft_sharpness(band, (int)(c1 - c0), (int)(l1 - l0));
+        free(band);
+        if (s > *score) {
+            *score = s;
+            best_y = yc;
+        }
+    }
+    return best_y;
+}
+
+#define TEXTURE_MIN 0.01    /* preview sharpness below this: featureless */
+
+/* preview axes: k = 1 line dropped by the RGB alignment; across from
+ * output pixel 2 (SCAN_WIN @14), bin 12, at the preview's 6300 scale */
+static void preview_axes(ft_axes *ax)
+{
+    ax->y_mm_per_line = 25.4 / 525;
+    ax->y_mm0 = 1 * ax->y_mm_per_line;
+    ax->x_mm0 = ft_ccd_to_mm(ft_out_to_ccd(2, 0, 12) + 5.5, 6300);
+    ax->x_mm_per_px = ft_ccd_to_mm(ft_out_to_ccd(2, 1, 12) + 5.5, 6300) -
+                      ax->x_mm0;
+}
+
+/* Across reach (mm) of a crop at ppi: crop_scan's holder limit
+ * (0..CROP_X_MAX) intersected with the CCD at the optical scale ppi x bin
+ * (crop_scan refuses a window that runs off it). -1 for an unusable ppi. */
+static int crop_reach(double ppi, double *lo, double *hi)
+{
+    int bin;
+    double scale;
+    if (!(ppi >= 525 && ppi <= 6300) || (bin = ft_bin_for_ppi(ppi)) < 1)
+        return -1;
+    scale = ppi * bin;
+    *lo = ft_ccd_to_mm(FT_CCD_FIRST, scale);
+    *hi = ft_ccd_to_mm(FT_CCD_FIRST + FT_CCD_PIXELS, scale);
+    if (!(*lo > 0))
+        *lo = 0;
+    if (!(*hi < CROP_X_MAX))
+        *hi = CROP_X_MAX;
+    return 0;
+}
+
+#define FOCUS_X_MARGIN 0.3  /* mm kept clear of the reach on each side */
+#define FOCUS_W_MIN 2.0     /* narrower band: not worth a bracket */
+
+/* The part of [x0, x1] mm across a focus crop at ppi can use: the crop
+ * reach less FOCUS_X_MARGIN each side. 0 with *lo and *hi set,
+ * FB_NO_PEAK when less than FOCUS_W_MIN remains. */
+static int focus_span(double ppi, double x0, double x1, double *lo,
+                      double *hi)
+{
+    double a, b;
+    if (crop_reach(ppi, &a, &b))
+        return FB_NO_PEAK;
+    a += FOCUS_X_MARGIN;
+    b -= FOCUS_X_MARGIN;
+    if (x0 > a)
+        a = x0;
+    if (x1 < b)
+        b = x1;
+    if (!(b - a >= FOCUS_W_MIN))
+        return FB_NO_PEAK;
+    *lo = a;
+    *hi = b;
+    return 0;
+}
+
+#define FOCUS_N     5       /* crops in the first bracket */
+#define CROP_S      12      /* rough seconds per focus crop */
+
+/* One check point on frame fr: 0 with *off, FB_NO_PEAK when the frame
+ * cannot give one (no texture, outside the crop area, no peak), -1 on a
+ * scan or file failure. */
+static int focus_point(const float *t, int lines, const ft_axes *ax,
+                       double ppi, const ft_job_frame *fr, long *off)
+{
+    double score, x0, x1, yc = textured_band(t, lines, 666, ax, fr, &score);
+    if (!(score >= TEXTURE_MIN)) {
+        printf("frame %d: no texture for focus\n", fr->index);
+        return FB_NO_PEAK;
+    }
+    if (focus_span(ppi, fr->x0, fr->x0 + fr->width, &x0, &x1)) {
+        printf("frame %d: outside the area a crop can scan\n", fr->index);
+        return FB_NO_PEAK;
+    }
+    printf("focus check, frame %d at %.1f mm (%.1f..%.1f mm across)\n",
+           fr->index, yc, x0, x1);
+    return focus_bracket(ppi, (x0 + x1) / 2, yc, x1 - x0, 0, 2000, FOCUS_N,
+                         FB_FRAME_SAMPLES, off);
+}
+
+/* 3-point focus check on the first, middle and last whole frame; a point
+ * that gives no peak moves to the next whole frame once, then is dropped.
+ * Sets j->focus / focus_offset. Returns -1 on a scan or file failure
+ * (j untouched), else 0. */
+static int focus_check(const float *t, int lines, const ft_axes *ax,
+                       double ppi, ft_job *j)
+{
+    int cand[FT_MAX_FRAMES], used[FT_MAX_FRAMES], nc = 0, np = 0, npt = 0;
+    int pos[3], dir[3], p, i, k, rc;
+    long off[3];
+
+    for (i = 0; i < j->nframes && i < FT_MAX_FRAMES; i++)
+        if (j->f[i].type != FT_FRAME_PARTIAL) {
+            used[nc] = 0;
+            cand[nc++] = i;
+        }
+    if (nc > 0) { pos[npt] = 0; dir[npt++] = 1; }
+    if (nc > 2) { pos[npt] = nc / 2; dir[npt++] = 1; }
+    if (nc > 1) { pos[npt] = nc - 1; dir[npt++] = -1; }
+    if (npt)
+        printf("focus check: %d points, ~%d crops (up to %d), ~%d min\n",
+               npt, npt * FOCUS_N, npt * 2 * FB_FRAME_SAMPLES,
+               (npt * FOCUS_N * CROP_S + 59) / 60);
+    for (p = 0; p < npt; p++) {
+        int tried = 0, ok = 0;
+        for (i = pos[p]; tried < 2 && i >= 0 && i < nc; i += dir[p]) {
+            if (used[i])
+                continue;
+            used[i] = 1;
+            tried++;
+            rc = focus_point(t, lines, ax, ppi, &j->f[cand[i]], &off[np]);
+            if (rc < 0)
+                return -1;
+            if (rc == 0) {
+                np++;
+                ok = 1;
+                break;
+            }
+            if (tried < 2)
+                printf("  trying the next frame for this point\n");
+        }
+        if (!ok)
+            printf("focus point %d of %d dropped\n", p + 1, npt);
+    }
+    if (np == 0) {
+        printf("WARNING: no usable focus point; using the focus curve as is\n");
+        j->focus = FT_FOCUS_SHIFTED;
+        j->focus_offset = 0;
+        return 0;
+    }
     {
-        static const int bins[] = { 12, 6, 4, 3, 2, 1 };
-        for (i = 0; bins[i] > 1 && ppi * bins[i] > 6300 + 1e-6; i++)
-            ;
-        bin = bins[i];
+        double s = 0, m;
+        long mean;
+        for (k = 0; k < np; k++)
+            s += off[k];
+        m = s / np;
+        mean = (long)(m < 0 ? m - 0.5 : m + 0.5);
+        while (np < 3)                   /* fewer points: repeat the mean */
+            off[np++] = mean;
     }
-    if ((long)(w / 25.4 * ppi + 0.5) * 6 > 60000) {
-        fprintf(stderr, "crop: line too long for one ReadExt\n");
+    j->focus = ft_focus_decide(off, &j->focus_offset);
+    printf("focus offsets %ld %ld %ld -> %s\n", off[0], off[1], off[2],
+           j->focus == FT_FOCUS_PER_FRAME ? "per-frame focus"
+                                          : "shifted curve");
+    if (j->focus == FT_FOCUS_PER_FRAME) {
+        int n = 0;
+        for (i = 0; i < j->nframes; i++)
+            n += j->f[i].include != 0;
+        printf("per-frame focus adds ~%d crops (~%d min) to scan --job\n",
+               n * FOCUS_N, (n * FOCUS_N * CROP_S + 59) / 60);
+    }
+    return 0;
+}
+
+/* Warn (per included frame) about anything ft_job_validate would refuse
+ * in scan --job; the job is written regardless, to be fixed by hand. */
+static void warn_job(const ft_job *j, const char *path)
+{
+    static ft_job one;
+    ft_err e, all;
+    int i, n = 0;
+
+    if (ft_job_validate(j, &g_lens, &all) == 0)
+        return;
+    printf("WARNING: scan --job will refuse %s as written (fix it there):\n",
+           path);
+    for (i = 0; i < j->nframes; i++) {
+        if (!j->f[i].include)
+            continue;
+        one = *j;
+        one.nframes = 1;
+        one.f[0] = j->f[i];
+        if (ft_job_validate(&one, &g_lens, &e)) {
+            printf("  %s\n", e.msg);
+            n++;
+        }
+    }
+    if (!n)
+        printf("  %s\n", all.msg);
+}
+
+static int cmd_frames(int argc, char **argv)
+{
+    const char *base = "strip";
+    char raw[260], path[260];
+    ft_film film = FT_FILM_NEGATIVE;
+    double ppi = 2000;
+    int sprockets = 0, i, lines = 0, rc, focus_failed;
+    const ft_holder *h = ft_holder_find("24x217");
+    static ft_layout L;
+    static ft_job j;
+    ft_axes ax;
+    ft_err e;
+    float *t;
+    FILE *f;
+
+    for (i = 0; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            fprintf(stderr, "frames: %s needs a value\n", argv[i]);
+            return 2;
+        }
+        if (strcmp(argv[i], "--film") == 0) {
+            if (strcmp(argv[i + 1], "slide") == 0) film = FT_FILM_SLIDE;
+            else if (strcmp(argv[i + 1], "neg") == 0) film = FT_FILM_NEGATIVE;
+            else {
+                fprintf(stderr, "frames: --film neg|slide\n");
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--ppi") == 0) ppi = atof(argv[i + 1]);
+        else if (strcmp(argv[i], "--sprockets") == 0) {
+            if (strcmp(argv[i + 1], "yes") == 0) sprockets = 1;
+            else if (strcmp(argv[i + 1], "no") == 0) sprockets = 0;
+            else {
+                fprintf(stderr, "frames: --sprockets yes|no\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "-h") == 0) {
+            if (parse_hold(argv[i + 1], &g_first_hold)) return 2;
+        }
+        else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
+        else {
+            fprintf(stderr, "frames: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!ft_ppi_supported(ppi)) {
+        fprintf(stderr, "frames: ppi %g not supported\n", ppi);
+        return 2;
+    }
+    if (!h) {
+        fprintf(stderr, "frames: no 24x217 holder geometry\n");
         return 1;
     }
-    if (g_ccd < 0) {
-        if (optics_for(ppi * bin, &g_ccd, &g_optic)) {
-            fprintf(stderr, "crop: %g ppi x bin %ld = optical scale %.0f; "
-                            "focus is known for %.0f..%.0f (or give -p)\n",
-                    ppi, bin, ppi * bin, SCALE_MIN, SCALE_MAX);
+    if (snprintf(raw, sizeof raw, "%s.raw", base) >= (int)sizeof raw ||
+        snprintf(path, sizeof path, "%s.job", base) >= (int)sizeof path) {
+        fprintf(stderr, "frames: -o name too long\n");
+        return 2;
+    }
+
+    g_lamp = 255;                    /* the lamp level persists: set it */
+    /* the preview is the run's first scan: it holds g_first_hold (-h) */
+    if (cmd_scan(&PRESETS[0], -1, 0, g_first_hold, raw))
+        return 1;
+    /* the axes below assume SCAN_WIN's geometry: 666 px from pixel 2 */
+    if (meta_long(raw, "px") != 666 || meta_long(raw, "x") != 2) {
+        fprintf(stderr, "frames: %s.txt: expected px=666 x=2 (got %ld, %ld)\n",
+                raw, meta_long(raw, "px"), meta_long(raw, "x"));
+        return 1;
+    }
+    t = load_corrected(raw, 666, 12, 2, &lines);
+    if (!t)
+        return 1;
+
+    preview_axes(&ax);
+    if (ft_detect(t, lines, 666, &ax, film, h, &L, &e)) {
+        fprintf(stderr, "frames: %s\n", e.msg);
+        free(t);
+        return 1;
+    }
+    if (L.fallback)
+        printf("WARNING: no frame edge found; using the fixed %g mm grid\n",
+               h->grid_pitch_mm);
+    if (L.nblank)
+        printf("note: %d blank frame(s) dropped\n", L.nblank);
+    if (L.nblank_end)
+        printf("note: %d blank frame(s) of unexposed film at the strip ends\n",
+               L.nblank_end);
+    ft_layout_to_job(&L, h, film, ppi, sprockets, &j);
+
+    focus_failed = focus_check(t, lines, &ax, ppi, &j) != 0;
+    if (focus_failed) {
+        j.focus = FT_FOCUS_SHIFTED;
+        j.focus_offset = 0;
+    }
+    warn_job(&j, path);
+
+    f = fopen(path, "w");
+    rc = !f;
+    if (f) {
+        rc = ft_job_write(&j, f) != 0;
+        rc |= fclose(f) != 0;
+    }
+    if (rc) {
+        fprintf(stderr, "frames: cannot write %s\n", path);
+        free(t);
+        return 1;
+    }
+    snprintf(path, sizeof path, "%s.png", base);
+    rc = write_strip_png(path, t, lines, 666, &ax, &j);
+    free(t);
+    print_job(&j);
+    printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
+           base, base, base);
+    if (focus_failed)
+        printf("\n*** FOCUS NOT CHECKED: a focus crop %s. The job uses the\n"
+               "*** focus curve as is (shifted, offset 0); check the scanner and\n"
+               "*** re-run frames, or edit focus/focus_offset by hand.\n",
+               g_abort ? "was interrupted" : "failed");
+    return rc || focus_failed ? 1 : 0;
+}
+
+/* ------------------------------------------------- scan --job, calibrate */
+
+/* Atomic rewrite: <path>.tmp, then renamed over path, so an interrupted
+ * write never leaves a truncated job. */
+static int save_job(const char *path, const ft_job *j)
+{
+    char tmp[300];
+    FILE *f;
+    int rc;
+    if (snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp) {
+        fprintf(stderr, "%s: name too long\n", path);
+        return 1;
+    }
+    f = fopen(tmp, "w");
+    rc = !f;
+    if (f) {
+        rc = ft_job_write(j, f) != 0;
+        rc |= fclose(f) != 0;
+    }
+    if (!rc && !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+        fprintf(stderr, "cannot replace %s (GLE=%lu)\n", path, GetLastError());
+        rc = 1;
+    }
+    if (rc) {
+        fprintf(stderr, "cannot rewrite %s\n", path);
+        remove(tmp);
+    }
+    return rc;
+}
+
+static long round_l(double v)
+{
+    return (long)floor(v + 0.5);
+}
+
+#define JOB_EDGE 0.01       /* mm kept inside the crop reach (rounding) */
+
+/* Per-frame focus centre: the frame's focus_offset, the strip's when 0. */
+static long frame_focus_base(const ft_job *j, const ft_job_frame *fr)
+{
+    return fr->focus_offset ? fr->focus_offset : j->focus_offset;
+}
+
+/* The scan request for a frame: its window plus a margin (measured tilt
+ * over the width + 0.3 mm), clipped to the holder and the CCD reach at
+ * the frame's ppi but never into the window (crop_check then refuses). */
+static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
+                       struct crop_req *q)
+{
+    double margin, rlo, rhi, x0, x1, y0, y1;
+    margin = fabs(tan(fr->tilt_deg * 3.14159265358979 / 180)) * fr->width
+             + 0.3;
+    if (crop_reach(fr->ppi, &rlo, &rhi)) {
+        rlo = 0;                        /* crop_check refuses the ppi */
+        rhi = CROP_X_MAX;
+    }
+    rlo += JOB_EDGE;
+    rhi -= JOB_EDGE;
+    if (rhi > h->scan_width_mm)
+        rhi = h->scan_width_mm;
+    x0 = fr->x0 - margin;
+    if (x0 < rlo)
+        x0 = rlo < fr->x0 ? rlo : fr->x0;
+    x1 = fr->x0 + fr->width + margin;
+    if (x1 > rhi)
+        x1 = rhi > fr->x0 + fr->width ? rhi : fr->x0 + fr->width;
+    y0 = fr->y0 - margin;
+    if (y0 < 0)
+        y0 = 0;
+    y1 = fr->y0 + fr->len + margin;
+    if (y1 > h->scan_len_mm)
+        y1 = h->scan_len_mm;
+    memset(q, 0, sizeof *q);
+    q->ppi = fr->ppi;
+    q->x = x0;
+    q->y = y0;
+    q->w = x1 - x0;
+    q->h = y1 - y0;
+    q->ccd = q->optic = -1;
+    q->ccd_offset = off;
+    q->hold = 3000;                     /* cmd_scan: >= g_first_hold first */
+}
+
+/* Append the frame's tight crop, in output pixels of the scan as sent
+ * (origin and size from <out>.txt), to <out>.txt. Rows count in the
+ * RGB-aligned image (ftraw.py, load_corrected): row r is green row
+ * r + k of the scan, k = 12 / bin lines dropped at each end. */
+static void write_crop(const char *out, const ft_job_frame *fr, long off)
+{
+    char meta[300];
+    long xs = meta_long(out, "x"), ys = meta_long(out, "y");
+    long pxs = meta_long(out, "px"), ls = meta_long(out, "lines");
+    long cx, cy, cw, ch, k;
+    int bin = ft_bin_for_ppi(fr->ppi);
+    double px_mm = fr->ppi / 25.4;
+    FILE *m;
+
+    snprintf(meta, sizeof meta, "%s.txt", out);
+    k = bin >= 1 ? 12 / bin : 0;
+    ls -= 2 * k;                        /* aligned image height */
+    if (xs < 0 || ys < 0 || pxs < 1 || ls < 1 || bin < 1) {
+        fprintf(stderr, "warning: %s lacks the scan geometry; crop not "
+                        "recorded\n", meta);
+        return;
+    }
+    /* output pixel j covers CCD pixels (x + j) * bin + FT_CCD_FIRST ... */
+    cx = round_l((ft_mm_to_ccd(fr->x0, fr->ppi * bin) - FT_CCD_FIRST) / bin)
+         - xs;
+    cy = round_l(fr->y0 * px_mm) - ys - k;
+    cw = round_l(fr->width * px_mm);
+    ch = round_l(fr->len * px_mm);
+    if (cx < 0) {
+        cw += cx;
+        cx = 0;
+    }
+    if (cy < 0) {
+        ch += cy;
+        cy = 0;
+    }
+    if (cw > pxs - cx)
+        cw = pxs - cx;
+    if (ch > ls - cy)
+        ch = ls - cy;
+    m = fopen(meta, "a");
+    if (m) {
+        fprintf(m, "crop_x=%ld\ncrop_y=%ld\ncrop_w=%ld\ncrop_h=%ld\n"
+                   "tilt=%.3f\nstraighten=%d\nfocus_offset=%ld\n",
+                cx, cy, cw, ch, fr->tilt_deg, fr->straighten, off);
+        if (fclose(m) != 0)
+            m = NULL;
+    }
+    if (!m)
+        fprintf(stderr, "warning: cannot append the crop to %s\n", meta);
+}
+
+/* scan --job <file> [-h s]: scan every included frame not yet done.
+ * The job is validated and every frame's scan window checked (crop_check)
+ * before the scanner does anything; refused frames are listed, skipped,
+ * left not done, and make the exit status non-zero. Per-frame focus: a
+ * bracket on the frame's centre band first, centred on its focus_offset
+ * (the strip's when 0); without a usable peak that centre is used. A scan
+ * failure or Ctrl+C saves the job and stops; finished frames are marked
+ * done, so a re-run resumes. */
+static int cmd_scanjob(int argc, char **argv)
+{
+    static ft_job j;
+    const ft_holder *h;
+    const char *path, *dot, *sep;
+    char jobbase[240];                  /* + _frameNN.raw.faul < 260 */
+    ft_err e;
+    FILE *f;
+    char ref[FT_MAX_FRAMES];
+    int i, nscan = 0, nref = 0, ntodo = 0, left;
+
+    if (argc < 1) {
+        fprintf(stderr, "scan --job <file.job> [-h s]\n");
+        return 2;
+    }
+    path = argv[0];
+    for (i = 1; i < argc; i += 2) {
+        if (strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
+            if (parse_hold(argv[i + 1], &g_first_hold))
+                return 2;
+        } else {
+            fprintf(stderr, "scan --job <file.job> [-h s]\n");
+            return 2;
+        }
+    }
+    /* outputs are <jobbase>_frameNN.raw: the job path without its
+     * extension, so scans of different jobs never overwrite each other */
+    dot = strrchr(path, '.');
+    sep = strrchr(path, '/');
+    if (!sep || (strrchr(path, '\\') && strrchr(path, '\\') > sep))
+        sep = strrchr(path, '\\');
+    if (!dot || (sep && dot < sep) || dot == (sep ? sep + 1 : path))
+        dot = path + strlen(path);
+    if ((size_t)(dot - path) + sizeof "_frame00.raw" > sizeof jobbase) {
+        fprintf(stderr, "scan --job: job path too long\n");
+        return 2;
+    }
+    memcpy(jobbase, path, (size_t)(dot - path));
+    jobbase[dot - path] = 0;
+    f = fopen(path, "r");
+    if (!f) {
+        perror(path);
+        return 1;
+    }
+    if (ft_job_read(&j, f, &e)) {
+        fclose(f);
+        fprintf(stderr, "%s: %s\n", path, e.msg);
+        return 1;
+    }
+    fclose(f);
+    if (ft_job_validate(&j, &g_lens, &e)) {
+        fprintf(stderr, "%s: %s\n", path, e.msg);
+        return 1;
+    }
+    h = ft_holder_find(j.holder);
+    if (!h)
+        return 1;                       /* validate checked it */
+    /* every window through crop_scan's checks before any scanner action */
+    memset(ref, 0, sizeof ref);
+    for (i = 0; i < j.nframes; i++) {
+        const ft_job_frame *fr = &j.f[i];
+        struct crop_req q;
+        long ccd, optic;
+        if (!fr->include || fr->done)
+            continue;
+        job_window(fr, h, j.focus == FT_FOCUS_PER_FRAME
+                              ? frame_focus_base(&j, fr) : j.focus_offset, &q);
+        if (crop_check(&q, &ccd, &optic)) {
+            printf("frame %d: REFUSED (reason above); it will be skipped\n",
+                   fr->index);
+            ref[i] = 1;
+            nref++;
+        } else {
+            ntodo++;
+        }
+    }
+    printf("%s: %d frame(s) to scan%s", path, ntodo,
+           nref ? ", refused:" : "\n");
+    for (i = 0; nref && i < j.nframes; i++)
+        if (ref[i])
+            printf(" %d", j.f[i].index);
+    if (nref)
+        printf("\n");
+
+    g_lamp = 255;                       /* the lamp level persists: set it */
+    for (i = 0; i < j.nframes && !g_abort; i++) {
+        ft_job_frame *fr = &j.f[i];
+        struct crop_req q;
+        char out[300];
+        long off = j.focus_offset;
+        int rc;
+
+        if (!fr->include || fr->done || ref[i])
+            continue;
+        if (j.focus == FT_FOCUS_PER_FRAME) {
+            long base = frame_focus_base(&j, fr);
+            double lo, hi;
+            printf("\n=== frame %d: focus\n", fr->index);
+            if (focus_span(fr->ppi, fr->x0, fr->x0 + fr->width, &lo, &hi)) {
+                printf("frame %d: outside the area a focus crop can scan\n",
+                       fr->index);
+                rc = FB_NO_PEAK;
+            } else {
+                rc = focus_bracket(fr->ppi, (lo + hi) / 2, fr->y0 + fr->len / 2,
+                                   hi - lo, base, 2000, FOCUS_N,
+                                   FB_FRAME_SAMPLES, &off);
+            }
+            if (rc < 0) {
+                save_job(path, &j);
+                printf("%s; stopped (finished frames are marked done in "
+                       "%s)\n", g_abort ? "interrupted" : "focus crop failed",
+                       path);
+                return 1;
+            }
+            if (rc == FB_NO_PEAK) {
+                printf("WARNING: frame %d: no usable focus peak; using "
+                       "offset %ld\n", fr->index, base);
+                off = base;
+            } else {
+                fr->focus_offset = off;
+            }
+        }
+        job_window(fr, h, off, &q);
+        snprintf(out, sizeof out, "%s_frame%02d.raw", jobbase, fr->index);
+        q.out = out;
+        printf("\n=== frame %d: %s, %g ppi, focus offset %ld\n", fr->index,
+               type_name(fr->type), fr->ppi, off);
+        rc = crop_scan(&q);
+        if (rc == CROP_REFUSED) {
+            printf("frame %d: REFUSED (reason above); not scanned, left "
+                   "not done\n", fr->index);
+            ref[i] = 1;
+            nref++;
+            continue;
+        }
+        if (rc) {
+            save_job(path, &j);
+            printf("frame %d: %s; stopped (finished frames are marked done "
+                   "in %s)\n", fr->index,
+                   g_abort ? "interrupted" : "scan failed", path);
             return 1;
         }
-        if (!pos_ok(g_ccd, g_optic))
+        nscan++;
+        write_crop(out, fr, off);
+        fr->done = 1;
+        if (save_job(path, &j))
             return 1;
     }
-    memcpy(CROP_SCAN, SCAN_2000, 84);
-    put_be32(CROP_SCAN, POS_OFF, (long)(ppi * 10000 + 0.5));
-    {
-        /* mm across are measured at the 6000 scale (CCD pixel 144 + px *
-         * 25.4 / 6000); other scales magnify about the optical axis */
-        double scale = ppi * bin;
-        double ccd = CCD_AXIS + (x / 25.4 * 6000.0 + 144 - CCD_AXIS) *
-                     scale / 6000.0;
-        if (ccd < 144 ||
-            ccd + w / 25.4 * scale > 144 + CCD_PIXELS) {
-            fprintf(stderr, "crop: window runs off the CCD at this scale\n");
+    for (i = left = 0; i < j.nframes; i++)
+        left += j.f[i].include && !j.f[i].done && !ref[i];
+    if (g_abort && left) {
+        save_job(path, &j);
+        printf("interrupted; finished frames are marked done in %s\n", path);
+        return 1;
+    }
+    if (nref) {
+        printf("\n%d frame(s) scanned; REFUSED:", nscan);
+        for (i = 0; i < j.nframes; i++)
+            if (ref[i])
+                printf(" %d", j.f[i].index);
+        printf(" (fix them in %s and run again)\n", path);
+        return 1;
+    }
+    printf(nscan ? "\nall frames scanned\n" : "\nnothing to scan (every "
+           "included frame is done)\n");
+    return 0;
+}
+
+#define CAL_SCALES  8
+#define CAL_MIN     6       /* usable scales needed for a fit */
+#define CAL_RMS_MAX 600.0   /* CCD steps */
+#define CAL_LENS_RMS_MAX 300.0
+
+/* in-focus CCD/lens at magnification M on curve l (ft_focus.h model) */
+static void lens_at(const ft_lens *l, double M, double *c, double *o)
+{
+    double m = l->p * M;
+    double u = l->fl * (1 + 1 / m), v = l->fl * (1 + m);
+    *o = l->film - u;
+    *c = *o + l->w - v;
+}
+
+/* calibrate-focus <x> <y> <w> [-h s]: fit this scanner's focus curve on a
+ * textured window (the 1 mm band at y across x..x+w mm, clipped to the
+ * CCD reach per scale). At eight optical scales, the CCD is bracketed
+ * with the lens on the current curve: the first usable scale gets a
+ * coarse bracket (5 crops, 3000 steps, moving up to +-FT_BRACKET_MAX),
+ * then every scale a fine one (9 crops, 1000 steps) around the coarse
+ * peak or the previous scale's. The magnification at the peak is exact
+ * for the current curve (the CCD moving by d shortens v by d); thin-lens
+ * least squares -> focus.txt in the current directory. focus.txt is only
+ * written with >= CAL_MIN usable scales, rms <= CAL_RMS_MAX CCD and
+ * CAL_LENS_RMS_MAX lens, every point within FT_FOCUS_MARGIN of the fit,
+ * and every measured scale inside FlexColor's positions. */
+static int cmd_calibrate_focus(int argc, char **argv)
+{
+    static const double PPI[CAL_SCALES] = { 3800, 4000, 1075, 2400, 2700,
+                                            2850, 2000, 3150 };
+    double x, y, w, M[CAL_SCALES], S[CAL_SCALES], rc, rl;
+    long C[CAL_SCALES], L[CAL_SCALES], prev = 0;
+    ft_lens fit = g_lens;
+    char *e1, *e2, *e3;
+    FILE *fo;
+    int i, n = 0, wr, have_prev = 0;
+
+    if (argc < 3) {
+        fprintf(stderr, "calibrate-focus <x_mm> <y_mm> <w_mm> [-h s]  (a "
+                        "textured part of a frame, e.g. 13 130.4 7.6)\n");
+        return 2;
+    }
+    x = strtod(argv[0], &e1);
+    y = strtod(argv[1], &e2);
+    w = strtod(argv[2], &e3);
+    if (*e1 || *e2 || *e3 || e1 == argv[0] || e2 == argv[1] ||
+        e3 == argv[2] || !isfinite(x) || !isfinite(y) || !(w > 0) ||
+        !isfinite(w)) {
+        fprintf(stderr, "calibrate-focus: x y w must be numbers, w > 0\n");
+        return 2;
+    }
+    for (i = 3; i < argc; i += 2) {
+        if (strcmp(argv[i], "-h") == 0 && i + 1 < argc) {
+            if (parse_hold(argv[i + 1], &g_first_hold))
+                return 2;
+        } else {
+            fprintf(stderr, "calibrate-focus: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+    g_lamp = 255;                       /* the lamp level persists: set it */
+    printf("calibrate-focus: %d scales, ~%d crops (~%d min)\n", CAL_SCALES,
+           5 + CAL_SCALES * 9, ((5 + CAL_SCALES * 9) * CROP_S + 59) / 60);
+    for (i = 0; i < CAL_SCALES && !g_abort; i++) {
+        double scale = PPI[i] * ft_bin_for_ppi(PPI[i]), v, lo, hi;
+        long ccd, optic, best = 0, centre = prev;
+        int r;
+        printf("\n=== scale %.0f (%g ppi)\n", scale, PPI[i]);
+        if (ft_optics_for(&g_lens, scale, &ccd, &optic)) {
+            printf("WARNING: no focus pair for scale %.0f; skipped\n", scale);
+            continue;
+        }
+        if (focus_span(PPI[i], x, x + w, &lo, &hi)) {
+            printf("WARNING: %.1f..%.1f mm is outside what a crop at scale "
+                   "%.0f can scan; skipped\n", x, x + w, scale);
+            continue;
+        }
+        r = 0;
+        if (!have_prev) {
+            printf("coarse bracket\n");
+            r = focus_bracket(PPI[i], (lo + hi) / 2, y, hi - lo, 0, 3000, 5,
+                              FB_FRAME_SAMPLES, &centre);
+            if (r == FB_NO_PEAK) {
+                printf("WARNING: no usable coarse peak at scale %.0f; "
+                       "skipped\n", scale);
+                continue;
+            }
+            if (r == 0)
+                printf("fine bracket around %+ld\n", centre);
+        }
+        if (r == 0)
+            r = focus_bracket(PPI[i], (lo + hi) / 2, y, hi - lo, centre,
+                              1000, 9, FB_SAMPLES, &best);
+        if (r < 0) {
+            printf("%s; focus.txt not written\n",
+                   g_abort ? "interrupted" : "focus crop failed");
             return 1;
         }
-        put_be32(CROP_SCAN, F_X, (long)((ccd - 144) / bin + 0.5));
+        if (r == FB_NO_PEAK) {
+            printf("WARNING: no usable peak at scale %.0f; skipped\n", scale);
+            continue;
+        }
+        v = g_lens.fl * (1 + g_lens.p * scale);
+        S[n] = scale;
+        M[n] = ((v - best) / g_lens.fl - 1) / g_lens.p;
+        C[n] = ccd + best;
+        L[n] = optic;
+        printf("peak: CCD %ld (curve %+ld), lens %ld, magnification %.0f\n",
+               C[n], best, L[n], M[n]);
+        prev = best;
+        have_prev = 1;
+        n++;
     }
-    put_be32(CROP_SCAN, F_Y, (long)(y / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_PX, (long)(w / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_LINES, (long)(h / 25.4 * ppi + 0.5));
-    put_be32(CROP_SCAN, F_CCD, g_ccd);
-    put_be32(CROP_SCAN, F_OPTIC, g_optic);
-    CROP_SCAN[F_BIN] = (BYTE)bin;
-    CROP_SCAN[55] = (BYTE)(12 / bin);
-    memcpy(CROP_END, CROP_SCAN, 84);
-    memset(CROP_END + 8, 0, 53 - 8);
-    printf("crop descriptor:");
-    for (i = 0; i < 84; i++) printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
-    printf("\n");
-    return cmd_scan(&crop, -1, keep, hold, out);
+    if (g_abort) {
+        printf("interrupted; focus.txt not written\n");
+        return 1;
+    }
+    if (n < CAL_MIN) {
+        fprintf(stderr, "calibrate-focus: %d usable scales (need %d); "
+                        "focus.txt not written\n", n, CAL_MIN);
+        return 1;
+    }
+    if (ft_lens_fit(M, C, L, n, &fit, &rc, &rl)) {
+        fprintf(stderr, "calibrate-focus: fit failed; focus.txt not written\n");
+        return 1;
+    }
+    printf("\nfit (%d scales): film %.0f w %.0f fl %.0f p %.4e; rms %.0f CCD "
+           "/ %.0f lens\n", n, fit.film, fit.w, fit.fl, fit.p, rc, rl);
+    if (!(rc <= CAL_RMS_MAX) || !(rl <= CAL_LENS_RMS_MAX)) {
+        fprintf(stderr, "calibrate-focus: residual over %.0f CCD / %.0f lens "
+                        "steps; focus.txt not written\n", CAL_RMS_MAX,
+                CAL_LENS_RMS_MAX);
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        long pc, po;
+        double fc, foo;
+        lens_at(&fit, M[i], &fc, &foo);
+        printf("  scale %.0f: measured CCD %ld lens %ld, fit %.0f / %.0f\n",
+               S[i], C[i], L[i], fc, foo);
+        if (!(fabs(fc - C[i]) <= FT_FOCUS_MARGIN)) {
+            fprintf(stderr, "calibrate-focus: scale %.0f is %.0f CCD steps "
+                            "off the fit (> %ld); focus.txt not written\n",
+                    S[i], fc - C[i], FT_FOCUS_MARGIN);
+            return 1;
+        }
+        if (ft_optics_for(&fit, S[i], &pc, &po) || !ft_positions_ok(pc, po)) {
+            fprintf(stderr, "calibrate-focus: the fitted curve puts scale "
+                            "%.0f outside FlexColor's positions; focus.txt "
+                            "not written\n", S[i]);
+            return 1;
+        }
+    }
+    fo = fopen("focus.txt", "w");
+    wr = !fo || ft_lens_write(&fit, fo) != 0;
+    if (fo)
+        wr |= fclose(fo) != 0;
+    if (wr) {
+        fprintf(stderr, "cannot write focus.txt\n");
+        return 1;
+    }
+    printf("wrote focus.txt (current directory)\n");
+    return 0;
 }
 
 static int scan_args(int argc, char **argv)
@@ -1363,6 +2653,8 @@ static int scan_args(int argc, char **argv)
     const char *out = "scan.raw";
     char name[32];
 
+    if (argc >= 1 && strcmp(argv[0], "--job") == 0)
+        return cmd_scanjob(argc - 1, argv + 1);
     for (i = 0; i < argc; i++) {
         const char *a = argv[i];
         if (a[0] == '-' && a[1] && !a[2] && i + 1 < argc) {
@@ -1371,7 +2663,7 @@ static int scan_args(int argc, char **argv)
             case 'n': keep = atol(v); break;
             case 'y': y = atol(v); break;
             case 'f': frame = atoi(v); break;
-            case 'h': hold = (DWORD)atol(v) * 1000; break;
+            case 'h': if (parse_hold(v, &hold)) return 2; break;
             case 'o': out = v; break;
             case 'p': if (parse_pos(v)) return 2; break;
             case 'l': if (parse_lamp(v)) return 2; break;
@@ -1413,6 +2705,7 @@ int main(int argc, char **argv)
     const char *cmd;
     int rc = 0;
 
+    load_lens();
     if (argc < 2) {
         fprintf(stderr,
             "usage: ftpoc <command> [args]\n"
@@ -1430,17 +2723,35 @@ int main(int argc, char **argv)
             "                     -n stop after n lines (default: the whole window)\n"
             "                     -y start line along the strip (holder-clamped)\n"
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
-            "                     -h hold before calibration, s (default 10; 35 cold)\n"
+            "                     -h hold before calibration, 0..120 s (default 10; 35 cold)\n"
             "                     -p <ccd>,<lens> positions @56/@60 (clamped to\n"
             "                        FlexColor's values, CCD below lens)\n"
             "                     -l <0..255> lamp level @76 (scans send 0)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
-            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-o file]\n"
+            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]\n"
+            "       [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
+            "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no] [-h s] [-o strip]\n"
+            "                     preview (lamp 255), detect frames, 3-point focus\n"
+            "                     check -> strip.job (edit it) + strip.png;\n"
+            "                     fb.raw* are scratch focus crops\n"
+            "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
+            "  scan --job strip.job [-h s]  scan the job's included frames\n"
+            "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
+            "                     crop, named after the job file)\n"
+            "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
+            "  calibrate-focus <x> <y> <w> [-h s]  fit this scanner's focus curve\n"
+            "                     on a textured window (mm) -> focus.txt\n"
+            "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
-            "CLOSE FlexColor first. Motion is slow and clamped; Ctrl+C aborts.\n");
+            "CLOSE FlexColor first. Motion is slow and clamped. The first scan of a\n"
+            "run holds at least 10 s, except that frames, scan --job and\n"
+            "calibrate-focus -h set that first hold (0..120 s). Ctrl+C: scans (scan,\n"
+            "crop, frames, scan --job, calibrate-focus) stop at the next line read\n"
+            "and send END; park and goto finish their current move (Ctrl+C is held\n"
+            "until then); move stops before its next step. Nothing new starts.\n");
         return 2;
     }
     cmd = argv[1];
@@ -1454,6 +2765,14 @@ int main(int argc, char **argv)
     } else {
         /* every other command needs a live device */
         g_dev = open_scanner();
+        /* commands that scan or move: Ctrl+C stops at the next safe point
+         * (end handshake sent, no new scan or move) instead of killing
+         * the process mid-scan */
+        if (strcmp(cmd, "scan") == 0 || strcmp(cmd, "crop") == 0 ||
+            strcmp(cmd, "frames") == 0 || strcmp(cmd, "calibrate-focus") == 0 ||
+            strcmp(cmd, "park") == 0 || strcmp(cmd, "goto") == 0 ||
+            strcmp(cmd, "move") == 0)
+            SetConsoleCtrlHandler(on_ctrl, TRUE);
 
         if (0) { }
         else if (strcmp(cmd, "poll") == 0) {
@@ -1480,6 +2799,10 @@ int main(int argc, char **argv)
                           argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
         } else if (strcmp(cmd, "crop") == 0) {
             rc = cmd_crop(argc - 2, argv + 2);
+        } else if (strcmp(cmd, "frames") == 0) {
+            rc = cmd_frames(argc - 2, argv + 2);
+        } else if (strcmp(cmd, "calibrate-focus") == 0) {
+            rc = cmd_calibrate_focus(argc - 2, argv + 2);
         } else if (strcmp(cmd, "scan") == 0) {
             rc = scan_args(argc - 2, argv + 2);
         } else if (strcmp(cmd, "upload") == 0 && argc > 2) {

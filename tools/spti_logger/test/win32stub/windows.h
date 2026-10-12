@@ -27,7 +27,12 @@ typedef int (*FARPROC)(void);
 typedef unsigned long SIZE_T;
 typedef unsigned char BYTE;
 typedef void *LPSECURITY_ATTRIBUTES;
-typedef void *LPOVERLAPPED;
+typedef struct _OVERLAPPED {
+    ULONG_PTR Internal, InternalHigh;
+    DWORD Offset, OffsetHigh;
+    HANDLE hEvent;
+} OVERLAPPED;
+typedef struct _OVERLAPPED *LPOVERLAPPED;
 typedef unsigned long *PULONG;
 typedef long LONG;
 
@@ -149,5 +154,29 @@ DWORD ResumeThread(HANDLE hThread);
 BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode);
 BOOL CloseHandle(HANDLE hObject);
 DWORD GetLastError(void);
+
+/* --- names used by tools/poc/ftpoc.c --- */
+#define GENERIC_READ         0x80000000UL
+#define GENERIC_WRITE        0x40000000UL
+#define FILE_SHARE_READ      0x1
+#define FILE_SHARE_WRITE     0x2
+#define OPEN_EXISTING        3
+#define FILE_FLAG_OVERLAPPED 0x40000000UL
+#define CTRL_C_EVENT         0
+#define CTRL_BREAK_EVENT     1
+#define ERROR_MORE_DATA      234L
+HANDLE WINAPI CreateFileA(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD,
+                          DWORD, HANDLE);
+BOOL WINAPI DeviceIoControl(HANDLE, DWORD, LPVOID, DWORD, LPVOID, DWORD,
+                            LPDWORD, LPOVERLAPPED);
+BOOL WINAPI GetOverlappedResult(HANDLE, LPOVERLAPPED, LPDWORD, BOOL);
+BOOL WINAPI ResetEvent(HANDLE);
+BOOL WINAPI CancelIo(HANDLE);
+void WINAPI Sleep(DWORD);
+HANDLE WINAPI CreateEventA(LPSECURITY_ATTRIBUTES, BOOL, BOOL, LPCSTR);
+typedef BOOL (WINAPI *PHANDLER_ROUTINE)(DWORD);
+BOOL WINAPI SetConsoleCtrlHandler(PHANDLER_ROUTINE, BOOL);
+#define MOVEFILE_REPLACE_EXISTING 0x1
+BOOL WINAPI MoveFileExA(LPCSTR, LPCSTR, DWORD);
 
 #endif /* FT_WIN32STUB_WINDOWS_H */
