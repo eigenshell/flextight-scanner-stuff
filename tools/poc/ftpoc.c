@@ -2252,18 +2252,22 @@ static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
 }
 
 /* Append the frame's tight crop, in output pixels of the scan as sent
- * (origin and size from <out>.txt), to <out>.txt. */
+ * (origin and size from <out>.txt), to <out>.txt. Rows count in the
+ * RGB-aligned image (ftraw.py, load_corrected): row r is green row
+ * r + k of the scan, k = 12 / bin lines dropped at each end. */
 static void write_crop(const char *out, const ft_job_frame *fr, long off)
 {
     char meta[300];
     long xs = meta_long(out, "x"), ys = meta_long(out, "y");
     long pxs = meta_long(out, "px"), ls = meta_long(out, "lines");
-    long cx, cy, cw, ch;
+    long cx, cy, cw, ch, k;
     int bin = ft_bin_for_ppi(fr->ppi);
     double px_mm = fr->ppi / 25.4;
     FILE *m;
 
     snprintf(meta, sizeof meta, "%s.txt", out);
+    k = bin >= 1 ? 12 / bin : 0;
+    ls -= 2 * k;                        /* aligned image height */
     if (xs < 0 || ys < 0 || pxs < 1 || ls < 1 || bin < 1) {
         fprintf(stderr, "warning: %s lacks the scan geometry; crop not "
                         "recorded\n", meta);
@@ -2272,7 +2276,7 @@ static void write_crop(const char *out, const ft_job_frame *fr, long off)
     /* output pixel j covers CCD pixels (x + j) * bin + FT_CCD_FIRST ... */
     cx = round_l((ft_mm_to_ccd(fr->x0, fr->ppi * bin) - FT_CCD_FIRST) / bin)
          - xs;
-    cy = round_l(fr->y0 * px_mm) - ys;
+    cy = round_l(fr->y0 * px_mm) - ys - k;
     cw = round_l(fr->width * px_mm);
     ch = round_l(fr->len * px_mm);
     if (cx < 0) {

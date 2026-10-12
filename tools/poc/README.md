@@ -115,7 +115,9 @@ extension (`neg.job` -> `neg_frame01.raw`, `neg_frame02.raw`, ...), so
 scans of different jobs never overwrite each other (+ `.cal`, `.faul`,
 `.txt`); the tight crop is appended to the matching `.raw.txt`
 (`crop_x/y/w/h` in output pixels of the scan as sent,
-plus `tilt`, `straighten`, `focus_offset`). The job file is rewritten
+plus `tilt`, `straighten`, `focus_offset`). `crop_y`/`crop_h` count rows
+of the RGB-aligned image (as `ftraw.py` writes it): row r is the scan's
+green row r + k, k = 12 / bin lines dropped at each end. The job file is rewritten
 after every frame (via `strip.job.tmp`, renamed over it), with finished
 frames marked `done = yes`, so a run stopped by Ctrl+C or a failed scan
 resumes where it left off.
