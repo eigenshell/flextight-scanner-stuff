@@ -38,7 +38,7 @@ typedef struct {
 
 int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
               ft_film film, const ft_holder *h, ft_layout *L, ft_err *e);
-void ft_layout_to_job(const ft_layout *L, const char *holder, ft_film film,
+void ft_layout_to_job(const ft_layout *L, const ft_holder *h, ft_film film,
                       double ppi, int sprockets, ft_job *j);
 
 #endif

@@ -2014,6 +2014,33 @@ static int focus_check(const float *t, int lines, const ft_axes *ax,
     return 0;
 }
 
+/* Warn (per included frame) about anything ft_job_validate would refuse
+ * in scan --job; the job is written regardless, to be fixed by hand. */
+static void warn_job(const ft_job *j, const char *path)
+{
+    static ft_job one;
+    ft_err e, all;
+    int i, n = 0;
+
+    if (ft_job_validate(j, &g_lens, &all) == 0)
+        return;
+    printf("WARNING: scan --job will refuse %s as written (fix it there):\n",
+           path);
+    for (i = 0; i < j->nframes; i++) {
+        if (!j->f[i].include)
+            continue;
+        one = *j;
+        one.nframes = 1;
+        one.f[0] = j->f[i];
+        if (ft_job_validate(&one, &g_lens, &e)) {
+            printf("  %s\n", e.msg);
+            n++;
+        }
+    }
+    if (!n)
+        printf("  %s\n", all.msg);
+}
+
 static int cmd_frames(int argc, char **argv)
 {
     const char *base = "strip";
@@ -2101,13 +2128,14 @@ static int cmd_frames(int argc, char **argv)
     if (L.nblank_end)
         printf("note: %d blank frame(s) of unexposed film at the strip ends\n",
                L.nblank_end);
-    ft_layout_to_job(&L, h->name, film, ppi, sprockets, &j);
+    ft_layout_to_job(&L, h, film, ppi, sprockets, &j);
 
     focus_failed = focus_check(t, lines, &ax, ppi, &j) != 0;
     if (focus_failed) {
         j.focus = FT_FOCUS_SHIFTED;
         j.focus_offset = 0;
     }
+    warn_job(&j, path);
 
     f = fopen(path, "w");
     rc = !f;

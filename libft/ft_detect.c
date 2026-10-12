@@ -968,25 +968,40 @@ out:
     return rc;
 }
 
-void ft_layout_to_job(const ft_layout *L, const char *holder, ft_film film,
+static double clampd(double v, double lo, double hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+/* Windows are clamped to the holder's crop limits: the preview reaches
+ * past them (across 0.92..33.14 mm, along ~232 mm), so sprockets-in
+ * windows and frames cut by the strip end would otherwise fail
+ * ft_job_validate. */
+void ft_layout_to_job(const ft_layout *L, const ft_holder *h, ft_film film,
                       double ppi, int sprockets, ft_job *j)
 {
     int i;
     memset(j, 0, sizeof *j);
-    snprintf(j->holder, sizeof j->holder, "%s", holder);
+    snprintf(j->holder, sizeof j->holder, "%s", h->name);
     j->film = film;
     j->focus = FT_FOCUS_SHIFTED;
     for (i = 0; i < L->nframes && i < FT_MAX_FRAMES; i++) {
         const ft_det_frame *d = &L->f[i];
         ft_job_frame *f = &j->f[j->nframes++];
+        double x0 = sprockets ? L->holes_x0 : d->x0;
+        double x1 = sprockets ? L->holes_x1 : d->x1;
+        double y0 = clampd(d->y0, 0, h->scan_len_mm);
+        double y1 = clampd(d->y1, 0, h->scan_len_mm);
+        x0 = clampd(x0, 0, h->scan_width_mm);
+        x1 = clampd(x1, 0, h->scan_width_mm);
         f->index = d->index;
         f->type = d->type;
         f->include = 1;
         f->ppi = ppi;
-        f->y0 = d->y0;
-        f->len = d->y1 - d->y0;
-        f->x0 = sprockets ? L->holes_x0 : d->x0;
-        f->width = (sprockets ? L->holes_x1 : d->x1) - f->x0;
+        f->y0 = y0;
+        f->len = y1 - y0;
+        f->x0 = x0;
+        f->width = x1 - x0;
         f->tilt_deg = d->tilt_deg;
         f->sprockets = sprockets;
         f->confidence_low = d->confidence_low;

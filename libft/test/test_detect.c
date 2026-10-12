@@ -3,6 +3,7 @@
 #include <string.h>
 #include "ft_detect.h"
 #include "ft_holder.h"
+#include "ft_job.h"
 #include "test/ftest.h"
 #include "test/synth.h"
 
@@ -16,7 +17,7 @@ static int run(const synth_spec *s)
     int rc;
     ax.y_mm0 = 0;
     ax.y_mm_per_line = s->y_mm_per_line;
-    ax.x_mm0 = 0;
+    ax.x_mm0 = s->x_mm0;
     ax.x_mm_per_px = s->x_mm_per_px;
     CHECK(t != NULL);
     rc = ft_detect(t, s->lines, s->px, &ax, s->film, ft_holder_find("24x217"),
@@ -88,14 +89,54 @@ int main(void)
     /* job: sprockets widen the window across to the hole rows */
     {
         ft_job j;
-        ft_layout_to_job(&L, "24x217", FT_FILM_NEGATIVE, 2000, 1, &j);
+        ft_layout_to_job(&L, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 1, &j);
         CHECK(j.nframes == 6 && j.f[0].sprockets && j.f[0].include);
         CHECK_NEAR(j.f[0].x0, L.holes_x0, 1e-9);
         CHECK_NEAR(j.f[0].width, L.holes_x1 - L.holes_x0, 1e-9);
         CHECK_NEAR(j.f[0].len, L.f[0].y1 - L.f[0].y0, 1e-9);
-        ft_layout_to_job(&L, "24x217", FT_FILM_NEGATIVE, 2000, 0, &j);
+        ft_layout_to_job(&L, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 0, &j);
         CHECK_NEAR(j.f[0].x0, L.f[0].x0, 1e-9);
         CHECK(j.focus == FT_FOCUS_SHIFTED && j.f[0].ppi == 2000);
+    }
+
+    /* real preview axes (x 0.92..33.14 mm) with the film shifted so the
+     * far hole row ends at 32.56 mm: the sprockets-in window is clamped
+     * to the holder's 32 mm crop width and the job validates */
+    {
+        const ft_holder *h = ft_holder_find("24x217");
+        ft_job j;
+        ft_err e;
+        ff6(&s, FT_FILM_NEGATIVE);
+        s.x_mm0 = 0.92;
+        s.film_x0 = -0.44;
+        s.film_x1 = 34.56;
+        s.img_x0 = 5.06;
+        s.img_x1 = 29.06;
+        CHECK(run(&s) == 0);
+        expect_types("FFFFFF");
+        CHECK(L.has_holes);
+        CHECK_NEAR(L.holes_x1, 32.56, 0.3);
+        CHECK(L.holes_x1 > h->scan_width_mm);
+        ft_layout_to_job(&L, h, FT_FILM_NEGATIVE, 2000, 1, &j);
+        for (i = 0; i < j.nframes; i++) {
+            CHECK_NEAR(j.f[i].x0, L.holes_x0, 1e-9);
+            CHECK_NEAR(j.f[i].x0 + j.f[i].width, h->scan_width_mm, 1e-9);
+        }
+        CHECK(ft_job_validate(&j, &ft_lens_default, &e) == 0);
+
+        /* last frame cut by the strip end past 231 mm: clamped along */
+        synth_default(&s, FT_FILM_NEGATIVE);
+        s.x_mm0 = 0.92;
+        for (i = 0; i < 6; i++)
+            synth_add(&s, 6 + 38.0 * i, 36, 0);    /* last: 196..232 */
+        CHECK(run(&s) == 0);
+        CHECK(L.nframes == 6);
+        CHECK(L.f[5].y1 > h->scan_len_mm);
+        ft_layout_to_job(&L, h, FT_FILM_NEGATIVE, 2000, 0, &j);
+        CHECK_NEAR(j.f[5].y0, L.f[5].y0, 1e-9);
+        CHECK_NEAR(j.f[5].y0 + j.f[5].len, h->scan_len_mm, 1e-9);
+        CHECK_NEAR(j.f[0].len, L.f[0].y1 - L.f[0].y0, 1e-9);
+        CHECK(ft_job_validate(&j, &ft_lens_default, &e) == 0);
     }
 
     /* twelve half frames */

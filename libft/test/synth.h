@@ -8,7 +8,8 @@
 
 typedef struct {
     int px, lines;
-    double y_mm_per_line, x_mm_per_px;     /* x_mm0 = 0 */
+    double y_mm_per_line, x_mm_per_px;
+    double x_mm0;                          /* mm at pixel 0 (default 0) */
     ft_film film;
     double film_y0, film_y1;               /* film along, mm (holder metal outside) */
     double film_x0, film_x1;               /* film edges across, mm */

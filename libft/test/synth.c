@@ -133,7 +133,7 @@ float *synth_preview(const synth_spec *s)
     const float *base = s->base;
     float *t = malloc((size_t)s->lines * s->px * 3 * sizeof *t);
     double tn = tan(s->tilt_deg * PI / 180), xc = 0.5 * (s->img_x0 + s->img_x1);
-    double sy[64], sx[64], xmax = s->px * s->x_mm_per_px;
+    double sy[64], sx[64], xmax = s->x_mm0 + s->px * s->x_mm_per_px;
     double period = s->lines * s->y_mm_per_line;
     unsigned rng = s->seed * 2654435761u + 1, g = s->seed * 40503u + 7;
     int l, c, k, i, nsp = s->nspeck < 64 ? s->nspeck : 64;
@@ -141,7 +141,7 @@ float *synth_preview(const synth_spec *s)
     if (!t)
         return NULL;
     for (i = 0; i < nsp; i++) {                       /* speck positions */
-        double x0 = s->film_x0 > 0 ? s->film_x0 : 0;
+        double x0 = s->film_x0 > s->x_mm0 ? s->film_x0 : s->x_mm0;
         double x1 = s->film_x1 < xmax ? s->film_x1 : xmax;
         g = g * 1103515245u + 12345u;
         sy[i] = s->film_y0 + (s->film_y1 - s->film_y0) * ((g >> 8) & 0xffff) / 65536.0;
@@ -150,7 +150,7 @@ float *synth_preview(const synth_spec *s)
     }
     for (l = 0; l < s->lines; l++)
         for (c = 0; c < s->px; c++) {
-            double y = l * s->y_mm_per_line, x = c * s->x_mm_per_px;
+            double y = l * s->y_mm_per_line, x = s->x_mm0 + c * s->x_mm_per_px;
             double yf = y - (x - xc) * tn;            /* tilted strip */
             double gain = 1 + s->drift * sin(2 * PI * y / period);
             float *p = t + ((size_t)l * s->px + c) * 3;
