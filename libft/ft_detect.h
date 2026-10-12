@@ -33,7 +33,7 @@ typedef struct {
     int nblank;                    /* blank frames dropped (between frames) */
     int nblank_end;                /* frame-sized unexposed film at the strip
                                       ends: blank frames or leader */
-    int fallback;                  /* fixed grid used (no edge found) */
+    int fallback;                  /* holder grid used on some stretch */
 } ft_layout;
 
 int ft_detect(const float *t, int lines, int px, const ft_axes *ax,

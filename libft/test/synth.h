@@ -31,6 +31,9 @@ typedef struct {
     int nspeck;                            /* open-beam specks on the film */
     double speck_r;                        /* their radius, mm */
     int open_outside;                      /* holder outside the film is open */
+    double metal, metal_noise;             /* holder metal level (0: 0.0005), sigma */
+    double cut_mm;                         /* strip start cut diagonally: open
+                                              beam over this much along */
     int nleak;                             /* light leaks: dense rectangles */
     struct { double y0, y1, x0, x1; } leak[4];
 } synth_spec;
