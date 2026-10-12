@@ -8,6 +8,9 @@
 #define FT_H
 
 typedef struct { char msg[200]; } ft_err;
+#ifdef __GNUC__
+__attribute__((format(printf, 2, 3)))
+#endif
 int ft_fail(ft_err *e, const char *fmt, ...);
 
 typedef enum { FT_FILM_NEGATIVE, FT_FILM_SLIDE } ft_film;

@@ -5,7 +5,8 @@
 /* Holder geometry, all mm. scan_* are the limits crop windows must stay
  * in; grid_* is the fixed frame grid used when detection finds no edge
  * (FlexColor's 3f autoframe: first frame 50 lines, pitch 943 lines,
- * 992-line frames at 630 ppi). */
+ * 992-line frames at 630 ppi). The last grid frame overshoots scan_len_mm
+ * (FlexColor does the same); callers clip grid frames to the film extent. */
 typedef struct {
     const char *name;
     double scan_len_mm, scan_width_mm;

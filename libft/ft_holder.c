@@ -9,6 +9,8 @@ static const ft_holder HOLDERS[] = {
 const ft_holder *ft_holder_find(const char *name)
 {
     size_t i;
+    if (!name)
+        return NULL;
     for (i = 0; i < sizeof HOLDERS / sizeof HOLDERS[0]; i++)
         if (strcmp(HOLDERS[i].name, name) == 0)
             return &HOLDERS[i];

@@ -11,7 +11,7 @@ libft.a: $(OBJ)
 %.o: %.c *.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-test/%: test/%.c libft.a
+test/%: test/%.c test/ftest.h libft.a
 	$(CC) $(CFLAGS) -I. -o $@ $< libft.a -lm
 
 test: $(TESTS)
