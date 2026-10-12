@@ -36,7 +36,8 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                      -y  start line along the strip (holder-clamped);
                          e.g. `scan 1000 -y 4600` = one frame earlier
                      -f  3f frame 1-6; 0 = whole strip -> frame1..6.raw
-                     -h  hold before calibration (default 10 s; 35 cold)
+                     -h  hold before calibration (default 10 s; 35 cold;
+                         the first scan of a run holds at least 10 s)
                      -p  <ccd>,<lens> positions (@56/@60): they set
                          magnification and focus; there is no exposure field
                      -l  <0..255> lamp level (@76): 0 keeps the current
@@ -65,25 +66,40 @@ ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
 
 ```
 ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no] [-h s] [-o strip]
-ftpoc scan --job strip.job
-ftpoc calibrate-focus <x_mm> <y_mm> <w_mm>
+ftpoc scan --job strip.job [-h s]
+ftpoc calibrate-focus <x_mm> <y_mm> <w_mm> [-h s]
 ```
 
 `frames` scans a preview, finds every frame (full, half, panorama,
-partial; blank frames dropped), checks focus at the first, middle and
-last frame, and writes `strip.job` plus `strip.png` (numbered boxes; dim yellow
-= excluded, orange = low confidence). Edit `strip.job` — `include`,
+partial; blank frames dropped and counted, unexposed film at the strip
+ends reported apart), checks focus at the first, middle and last frame,
+and writes `strip.job` plus `strip.png` (numbered boxes; dim yellow =
+excluded, orange = low confidence). Edit `strip.job` — `include`,
 `ppi`, `sprockets`, `straighten`, `window` per frame — then run
-`scan --job`. The job is validated before anything is scanned. Each
-frame is scanned slightly wider than its window (tilt + 0.3 mm, clipped
-to the holder and to what the CCD reaches at that ppi) into
-`frameNN.raw` (+ `.cal`, `.faul`, `.txt`); the tight crop is appended to
-`frameNN.raw.txt` (`crop_x/y/w/h`, output pixels, plus `tilt`,
-`straighten`, `focus_offset`). A frame the crop checks refuse is
-reported and left `done = no`; the others are still scanned and the run
-exits non-zero. A run can be stopped with Ctrl+C (the end handshake is
-still sent, no new scan starts) and resumed: finished frames are marked
-`done = yes`. A failed scan also saves the job and stops.
+`scan --job`.
+
+`scan --job` validates the job and runs every remaining frame's scan
+window through the crop checks before the scanner does anything; a
+refused frame is listed then, skipped, left `done = no`, and makes the
+exit status non-zero (the other frames are still scanned). Each frame
+is scanned slightly wider than its window (tilt + 0.3 mm, clipped to the
+holder and to what the CCD reaches at that ppi) into `frameNN.raw`
+(+ `.cal`, `.faul`, `.txt`); the tight crop is appended to
+`frameNN.raw.txt` (`crop_x/y/w/h` in output pixels of the scan as sent,
+plus `tilt`, `straighten`, `focus_offset`). The job file is rewritten
+after every frame (via `strip.job.tmp`, renamed over it), with finished
+frames marked `done = yes`, so a run stopped by Ctrl+C or a failed scan
+resumes where it left off.
+
+Hold: the first scan of every run holds at least 10 s before its
+calibration whatever was asked; `-h` on `scan --job` and
+`calibrate-focus` sets that first hold (0..120 s, e.g. `-h 35` after a
+cold power-up). Later scans hold 3 s.
+
+Ctrl+C (`scan`, `crop`, `frames`, `scan --job`, `calibrate-focus`,
+`park`, `goto`, `move`) stops at the next safe point: the line flood
+ends, the end handshake is still sent, and no new scan or move starts.
+Other commands are stopped by Ctrl+C at once, as before.
 
 Focus: the curve comes from `focus.txt` in the current directory
 (written there by `calibrate-focus` on a textured window) or the
@@ -95,15 +111,20 @@ with no usable peak is scanned at that centre, with a warning. Focus
 crops go to the scratch files `fb.raw`, `fb.raw.cal`, `fb.raw.faul`
 and `fb.raw.txt`, overwritten by each crop.
 
-`calibrate-focus` brackets the CCD (9 crops, 1500 steps) at eight
+`calibrate-focus` brackets the CCD, lens on the current curve, at eight
 optical scales (3800..6300) on a 1 mm band at `y` across `x..x+w`
-(clipped to the CCD's reach), skips scales without a usable peak, and
-fits the thin-lens curve. It writes `focus.txt` only with at least six
-usable scales, an rms residual of at most 600 CCD steps, and a curve
-that keeps every measured scale inside FlexColor's positions. Each
-bracket stays within ±6000 steps of the current curve, so a scanner far
-off the built-in curve may need a few runs (each run brackets around
-the curve in `focus.txt`).
+(clipped to the CCD's reach): the first usable scale gets a coarse
+bracket (5 crops, 3000 steps, moving up to ±12000 if the peak is at an
+edge), then each scale a fine one (9 crops, 1000 steps) around the
+coarse peak or the previous scale's. Scales without a usable peak are
+skipped. The magnification at each peak follows from the current curve
+(moving the CCD by d shortens the image distance by d), and the
+thin-lens curve is fitted to the peaks. It writes `focus.txt` only with
+at least six usable scales, rms residuals of at most 600 CCD and 300
+lens steps, every point within ±1200 CCD steps of the fit, and a curve
+that keeps every measured scale inside FlexColor's positions. Brackets
+never leave ±12000 steps of the current curve; a peak further off is
+skipped like any other unusable scale.
 
 ## Device selection
 
