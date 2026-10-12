@@ -427,6 +427,49 @@ int main(void)
         CHECK_NEAR(L.f[i].y1, 40 + 38.0 * i, 0.3);
     }
 
+    /* hardware 2026-10-12, slides: two loose pieces with open holder
+     * before and between them. Open holder is no film: never a frame,
+     * never a blank frame, and it separates the pieces. */
+    synth_default(&s, FT_FILM_SLIDE);
+    s.film_y0 = 2.2;
+    s.film_y1 = 227.3;
+    s.nopen = 2;
+    s.open[0].y0 = 2.2;   s.open[0].y1 = 27.6;
+    s.open[1].y0 = 102.3; s.open[1].y1 = 107.5;
+    synth_add(&s, 28.5, 36, 0);
+    synth_add(&s, 66.5, 35.5, 0);
+    for (i = 0; i < 4; i++)
+        synth_add(&s, 108.5 + 38.0 * i, 36, 0);  /* last cut at 227.3 */
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFp");
+    CHECK(!L.fallback && nlow() == 0);
+    CHECK(L.nblank == 0 && L.nblank_end == 0);
+    CHECK_NEAR(L.f[0].y0, 28.5, 0.3);
+    CHECK_NEAR(L.f[1].y1, 102, 0.3);
+    CHECK_NEAR(L.f[2].y0, 108.5, 0.3);
+
+    /* hardware 2026-10-12, slides: dark (Dmax-like) content against half
+     * of both edges of two gaps running, deeper than the edge window, so
+     * no edge is trusted. Gap lines across the whole band still mark
+     * frame ends when they cut off a frame-sized piece: no grid. */
+    ff6(&s, FT_FILM_SLIDE);
+    s.npatch = 4;
+    s.patch[0].y0 = 74.5;  s.patch[0].y1 = 78;    /* frame 2 end */
+    s.patch[1].y0 = 80;    s.patch[1].y1 = 83.5;  /* frame 3 start */
+    s.patch[2].y0 = 112.5; s.patch[2].y1 = 116;   /* frame 3 end */
+    s.patch[3].y0 = 118;   s.patch[3].y1 = 121.5; /* frame 4 start */
+    for (i = 0; i < 4; i++) {
+        s.patch[i].x0 = i % 2 ? 4.1 : 16;
+        s.patch[i].x1 = i % 2 ? 16 : 28.1;
+    }
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK(!L.fallback && nlow() == 0);
+    for (i = 0; i < 6; i++) {
+        CHECK_NEAR(L.f[i].y0, 4 + 38.0 * i, 0.3);
+        CHECK_NEAR(L.f[i].y1, 40 + 38.0 * i, 0.3);
+    }
+
     /* bad arguments */
     {
         ft_axes ax = { 0, 25.4 / 525, 0, 0 };

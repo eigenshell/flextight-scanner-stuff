@@ -58,6 +58,10 @@
  * 2026-10-12), never frame. Dust specks cover ~1 % of the band. */
 #define END_CUT_MM  10.0
 #define CUT_OPEN    0.05
+/* A line whose image band is at least this much open beam has no film on
+ * it (open holder between loose pieces, hardware 2026-10-12): it counts as
+ * a gap line, never as a frame or a blank frame. */
+#define NOFILM_OPEN 0.50
 #define BLANK_MM    12.0
 #define FALLBACK_MM 45.0
 /* A run longer than this without a trusted edge inside is gridded and
@@ -78,6 +82,7 @@ enum { S_EXP = 0, S_BASE = 1, S_SKIP = 2 };
 typedef struct {
     int a, b;                          /* gap lines [a, b), deskewed */
     int lead_ok, trail_ok, ok;
+    int nofilm;                        /* open holder in it: not blank film */
     double lead_pos, trail_pos;        /* edge line at the image centre */
     double lead_slope, trail_slope;    /* residual, mm along per mm across */
 } gap_t;
@@ -95,6 +100,7 @@ typedef struct {
     int *off;                          /* deskew offset per column, lines */
     double tn;                         /* tan(strip tilt) */
     double *g;                         /* gap score per deskewed line */
+    unsigned char *nofilm;             /* per line: band mostly open beam */
     gap_t *gaps;
     int ng;
 } det_t;
@@ -115,6 +121,15 @@ static int is_dark(const float *p)
 }
 
 /* state at deskewed line l, column c */
+/* open-beam share of line l across the image band */
+static double band_open(const det_t *d, int l)
+{
+    int c, n = 0;
+    for (c = d->b0; c < d->b1; c++)
+        n += is_open(pix(d->t, d->px, l, c));
+    return d->b1 > d->b0 ? (double)n / (d->b1 - d->b0) : 0;
+}
+
 static int S(const det_t *d, int l, int c)
 {
     int ll = l + d->off[c];
@@ -606,7 +621,7 @@ out:
 /* deskew offsets, gap score, gap runs and their edges; returns # trusted */
 static int analyse(det_t *d)
 {
-    int c, l, i, nok = 0, s = -1, minl = (int)ceil(MIN_GAP_MM / d->ym);
+    int c, l, i, k, nok = 0, s = -1, minl = (int)ceil(MIN_GAP_MM / d->ym);
     double xc = 0.5 * (d->ic0 + d->ic1);
 
     for (c = 0; c < d->px; c++)
@@ -618,7 +633,8 @@ static int analyse(det_t *d)
             nb += v == S_BASE;
             ne += v == S_EXP;
         }
-        d->g[l] = nb + ne >= 0.5 * (d->ic1 - d->ic0) ? (double)nb / (nb + ne) : -1;
+        d->g[l] = d->nofilm[l] ? 1 :
+                  nb + ne >= 0.5 * (d->ic1 - d->ic0) ? (double)nb / (nb + ne) : -1;
     }
     d->ng = 0;
     for (l = d->f0; l <= d->f1; l++) {
@@ -631,6 +647,8 @@ static int analyse(det_t *d)
                 memset(q, 0, sizeof *q);
                 q->a = s;
                 q->b = l;
+                for (k = s; k < l && !q->nofilm; k++)
+                    q->nofilm = d->nofilm[k];
             }
             s = -1;
         }
@@ -645,6 +663,12 @@ static int analyse(det_t *d)
         nok += q->ok;
     }
     return nok;
+}
+
+/* a full or half frame's length */
+static int frame_sized(double len)
+{
+    return (len >= 15.5 && len <= 21.0) || (len >= 33.0 && len <= 39.5);
 }
 
 static void classify(double len, int at_end, ft_frame_type *type, int *low,
@@ -728,15 +752,6 @@ static void grid_run(const det_t *d, ft_layout *L, const ft_holder *h,
         f->tilt_deg = atan(d->tn) * 180 / PI;
         f->confidence_low = 1;
     }
-}
-
-/* open-beam share of line l across the image band */
-static double band_open(const det_t *d, int l)
-{
-    int c, n = 0;
-    for (c = d->b0; c < d->b1; c++)
-        n += is_open(pix(d->t, d->px, l, c));
-    return d->b1 > d->b0 ? (double)n / (d->b1 - d->b0) : 0;
 }
 
 static void add_run(const det_t *d, ft_layout *L, const ft_holder *h,
@@ -855,9 +870,11 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
     d->st = calloc((size_t)lines * px, 1);
     d->off = calloc(px, sizeof *d->off);
     d->g = calloc(lines, sizeof *d->g);
+    d->nofilm = calloc(lines, 1);
     d->gaps = calloc(lines / 2 + 1, sizeof *d->gaps);
     base_l = malloc((size_t)lines * 3 * sizeof *base_l);
-    if (!col || !d->st || !d->off || !d->g || !d->gaps || !base_l) {
+    if (!col || !d->st || !d->off || !d->g || !d->nofilm || !d->gaps ||
+        !base_l) {
         ft_fail(e, "detect: out of memory");
         goto out;
     }
@@ -912,6 +929,9 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
         L->holes_x0 = ax->x_mm0 + d->hl0 * d->xm;
         L->holes_x1 = ax->x_mm0 + d->hr1 * d->xm;
     }
+
+    for (l = d->f0; l < d->f1; l++)
+        d->nofilm[l] = band_open(d, l) >= NOFILM_OPEN;
 
     /* 3. base level */
     if (!(halo = open_halo(d)) ||
@@ -1016,8 +1036,11 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
         const gap_t *before = NULL;
         for (i = 0; i <= d->ng; i++) {
             const gap_t *q = i < d->ng ? &d->gaps[i] : NULL;
-            if (q && !q->ok)
-                continue;               /* untrusted gaps stay in the run */
+            /* untrusted gaps stay in the run, unless they end a
+             * frame-sized piece: gap lines across the band mark a frame
+             * end even when dark content hides the edge itself */
+            if (q && !q->ok && !frame_sized((q->a - s) * d->ym))
+                continue;
             if ((q ? q->a : d->f1) > s)
                 add_run(d, L, h, ax, s, q ? q->a : d->f1, before, q);
             if (q) {
@@ -1030,7 +1053,7 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
      * be leader, so they are counted apart */
     for (i = 0; i < d->ng; i++) {
         const gap_t *q = &d->gaps[i];
-        if (q->ok && (q->b - q->a) * d->ym > BLANK_MM) {
+        if (q->ok && !q->nofilm && (q->b - q->a) * d->ym > BLANK_MM) {
             if (q->a > d->f0 && q->b < d->f1)
                 L->nblank += blanks(L, ax, d->ym, q);
             else
@@ -1045,6 +1068,7 @@ out:
     free(d->st);
     free(d->off);
     free(d->g);
+    free(d->nofilm);
     free(d->gaps);
     return rc;
 }
