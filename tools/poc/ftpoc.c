@@ -1216,6 +1216,134 @@ static int cmd_upload(const char *file)
     return 0;
 }
 
+/* ------------------------------------------------------- files and images */
+
+/* Whole file into a malloc'd buffer (NULL on any error; *size set). */
+static void *load_file(const char *path, long *size)
+{
+    FILE *f = fopen(path, "rb");
+    void *buf = NULL;
+    long n;
+    *size = 0;
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) >= 0 &&
+        fseek(f, 0, SEEK_SET) == 0) {
+        buf = malloc(n > 0 ? (size_t)n : 1);
+        if (buf && fread(buf, 1, (size_t)n, f) != (size_t)n) {
+            free(buf);
+            buf = NULL;
+        }
+        if (buf)
+            *size = n;
+    }
+    fclose(f);
+    return buf;
+}
+
+/* key=value from a scan's .txt; -1 if absent */
+static long meta_long(const char *scan, const char *key)
+{
+    char path[300], line[128];
+    size_t n = strlen(key);
+    long v = -1;
+    FILE *f;
+    if (snprintf(path, sizeof path, "%s.txt", scan) >= (int)sizeof path)
+        return -1;
+    f = fopen(path, "r");
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof line, f))
+        if (strncmp(line, key, n) == 0 && line[n] == '=')
+            v = atol(line + n + 1);
+    fclose(f);
+    return v;
+}
+
+/* Load <scan>, <scan>.cal (and .faul when x >= 0: x = the scan's first
+ * output pixel) as a flat-fielded, aligned image: returns lines*px*3
+ * floats (caller frees), *lines_out set; NULL on failure. */
+static float *load_corrected(const char *scan, int px, int bin, int x,
+                             int *lines_out)
+{
+    char path[300];
+    long nraw = 0, ncal = 0, nfaul = 0, lines, cl;
+    unsigned short *raw = NULL, *cal = NULL;
+    float *dark = NULL, *white = NULL, *t = NULL;
+    ft_err e;
+
+    if (px < 1 || px > 20000 || bin < 1 || bin > 12) {
+        fprintf(stderr, "%s: bad geometry (px %d, bin %d)\n", scan, px, bin);
+        return NULL;
+    }
+    if (snprintf(path, sizeof path, "%s.cal", scan) >= (int)sizeof path) {
+        fprintf(stderr, "%s: name too long\n", scan);
+        return NULL;
+    }
+    raw = load_file(scan, &nraw);
+    cal = load_file(path, &ncal);
+    dark = malloc((size_t)px * 3 * sizeof *dark);
+    white = malloc((size_t)px * 3 * sizeof *white);
+    lines = nraw / ((long)px * 6);
+    cl = ncal / ((long)px * 6);
+    if (!raw || !cal || !dark || !white || lines < 1 || cl < 1 ||
+        lines > 1000000) {
+        fprintf(stderr, "%s: cannot load scan data\n", scan);
+        goto out;
+    }
+    if (ft_split_cal(cal, (int)cl, px, dark, white, &e)) {
+        fprintf(stderr, "%s: %s\n", scan, e.msg);
+        goto out;
+    }
+    t = malloc((size_t)lines * px * 3 * sizeof *t);
+    if (!t) {
+        fprintf(stderr, "%s: out of memory\n", scan);
+        goto out;
+    }
+    ft_flatfield(raw, (int)lines, px, dark, white, t);
+    if (x >= 0) {
+        char *faul;
+        snprintf(path, sizeof path, "%s.faul", scan);
+        faul = load_file(path, &nfaul);
+        if (faul) {
+            int pixs[3][FT_FAUL_MAX], cnt[3];
+            ft_faul_parse(faul, (size_t)nfaul, pixs, cnt);
+            free(faul);
+            if (ft_faul_fix(t, (int)lines, px, pixs, cnt, x, bin)) {
+                fprintf(stderr, "%s: defective pixel fix failed\n", scan);
+                free(t);
+                t = NULL;
+                goto out;
+            }
+        } else {
+            printf("note: no %s; defective pixels left as they are\n", path);
+        }
+    }
+    *lines_out = ft_align_rgb(t, (int)lines, px, 12 / bin);
+out:
+    free(raw);
+    free(cal);
+    free(dark);
+    free(white);
+    return t;
+}
+
+/* sharpness of the green channel of a lines x px RGB image; NaN when out
+ * of memory (ft_peak refuses non-finite values) */
+static double green_sharpness(const float *t, int lines, int px)
+{
+    size_t i, n = (size_t)lines * px;
+    float *gch = malloc((n ? n : 1) * sizeof *gch);
+    double s;
+    if (!gch)
+        return NAN;
+    for (i = 0; i < n; i++)
+        gch[i] = t[i * 3 + 1];
+    s = ft_sharpness(gch, px, lines);
+    free(gch);
+    return s;
+}
+
 /* ------------------------------------------------------------------- driver */
 
 /* Synthesized crop at any resolution: the 2000 ppi crop descriptor with
@@ -1374,6 +1502,378 @@ static int cmd_crop(int argc, char **argv)
     return crop_scan(&r);
 }
 
+/* ------------------------------------------------------------ focus, frames */
+
+/* Focus bracket on a 1 mm band centred at (xc, yc), w mm across, at ppi:
+ * n (3..9) crops with the CCD at curve + centre + (i - n/2) * step, lens
+ * on the curve. On a peak at an end the bracket moves there, up to twice;
+ * no offset ever leaves +-FT_BRACKET_MAX. Returns 0 with *best = peak
+ * offset from the curve; -1 on failure. */
+static int focus_bracket(double ppi, double xc, double yc, double w,
+                         long centre, long step, int n, long *best)
+{
+    int tries, i, bin = ft_bin_for_ppi(ppi);
+    if (n < 3 || n > 9 || step <= 0 || bin < 1) {
+        fprintf(stderr, "focus: bad bracket (n %d, step %ld, ppi %g)\n", n,
+                step, ppi);
+        return -1;
+    }
+    for (tries = 0; tries < 3; tries++) {
+        long off[9];
+        double sh[9], pk;
+        int r;
+        for (i = 0; i < n; i++) {
+            struct crop_req q;
+            int lines = 0, px;
+            float *t;
+            off[i] = centre + (i - n / 2) * step;
+            if (labs(off[i]) > FT_BRACKET_MAX) {
+                fprintf(stderr, "focus: offset %ld beyond +-%ld\n", off[i],
+                        FT_BRACKET_MAX);
+                return -1;
+            }
+            memset(&q, 0, sizeof q);
+            q.ppi = ppi;
+            q.x = xc - w / 2;
+            q.y = yc - 0.5;
+            q.w = w;
+            q.h = 1.0;
+            q.ccd = q.optic = -1;
+            q.ccd_offset = off[i];
+            q.hold = 3000;
+            q.out = "fb.raw";
+            if (crop_scan(&q))
+                return -1;
+            px = (int)meta_long("fb.raw", "px");
+            t = load_corrected("fb.raw", px, bin, -1, &lines);
+            if (!t)
+                return -1;
+            sh[i] = green_sharpness(t, lines, px);
+            free(t);
+            printf("  focus %+6ld: sharpness %.4f\n", off[i], sh[i]);
+        }
+        r = ft_peak(off, sh, n, &pk);
+        if (r < 0) {
+            fprintf(stderr, "focus: no usable sharpness peak\n");
+            return -1;
+        }
+        *best = (long)(pk < 0 ? pk - 0.5 : pk + 0.5);
+        if (r == 0)
+            return 0;
+        centre = *best;               /* still rising: move the bracket */
+    }
+    printf("  focus: peak still at the bracket end; using %+ld\n", *best);
+    return 0;
+}
+
+/* 3x5 digits, rows top to bottom, 3 bits each (MSB = left) */
+static const unsigned char DIGITS[10][5] = {
+    {7,5,5,5,7},{2,6,2,2,7},{7,1,7,4,7},{7,1,7,1,7},{5,5,7,1,1},
+    {7,4,7,1,7},{7,4,7,5,7},{7,1,1,1,1},{7,5,7,5,7},{7,5,7,1,7},
+};
+
+static void put_px(unsigned char *img, int w, int h, long x, long y,
+                   unsigned char r, unsigned char g, unsigned char b)
+{
+    size_t o;
+    if (x < 0 || y < 0 || x >= w || y >= h)
+        return;
+    o = ((size_t)y * w + (size_t)x) * 3;
+    img[o] = r;
+    img[o + 1] = g;
+    img[o + 2] = b;
+}
+
+static void draw_number(unsigned char *img, int w, int h, long x, long y, int v)
+{
+    char s[16];
+    int i, r, c, k, scale = 4;
+    snprintf(s, sizeof s, "%d", v);
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            continue;
+        for (r = 0; r < 5; r++)
+            for (c = 0; c < 3; c++)
+                if (DIGITS[s[i] - '0'][r] & (4 >> c))
+                    for (k = 0; k < scale * scale; k++)
+                        put_px(img, w, h, x + (i * 4 + c) * scale + k % scale,
+                               y + r * scale + k / scale, 255, 255, 0);
+    }
+}
+
+/* mm -> pixel index, clamped to -1..n+1 (NaN -> -1) so a bad window
+ * cannot run away; callers treat <0 and >n as outside */
+static long mm_to_idx(double mm, double mm0, double per, int n)
+{
+    double v = (mm - mm0) / per;
+    if (!(v >= 0))
+        return -1;
+    if (v > n)
+        return (long)n + 1;
+    return (long)v;
+}
+
+/* strip horizontal: image x = preview line, image y = preview column.
+ * Included frames yellow (dimmer when excluded), low confidence orange. */
+static int write_strip_png(const char *path, const float *t, int lines, int px,
+                           const ft_axes *ax, const ft_job *j)
+{
+    unsigned char *img;
+    long l, c;
+    int i, k, rc;
+    ft_err e;
+    if (lines < 1 || px < 1)
+        return -1;
+    img = malloc((size_t)lines * px * 3);
+    if (!img) {
+        fprintf(stderr, "%s: out of memory\n", path);
+        return -1;
+    }
+    for (l = 0; l < lines; l++)
+        for (c = 0; c < px; c++)
+            for (k = 0; k < 3; k++) {
+                double v = t[((size_t)l * px + c) * 3 + k];
+                v = v > 0 ? pow(v < 1 ? v : 1, 1 / 2.2) : 0;
+                img[((size_t)c * lines + l) * 3 + k] = (unsigned char)(v * 255 + 0.5);
+            }
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        long x0 = mm_to_idx(f->y0, ax->y_mm0, ax->y_mm_per_line, lines);
+        long x1 = mm_to_idx(f->y0 + f->len, ax->y_mm0, ax->y_mm_per_line, lines);
+        long y0 = mm_to_idx(f->x0, ax->x_mm0, ax->x_mm_per_px, px);
+        long y1 = mm_to_idx(f->x0 + f->width, ax->x_mm0, ax->x_mm_per_px, px);
+        unsigned char r = f->include ? 255 : 128, g = f->confidence_low ? 64 : 255;
+        for (l = x0; l <= x1; l++) {
+            put_px(img, lines, px, l, y0, r, g, 0);
+            put_px(img, lines, px, l, y1, r, g, 0);
+        }
+        for (c = y0; c <= y1; c++) {
+            put_px(img, lines, px, x0, c, r, g, 0);
+            put_px(img, lines, px, x1, c, r, g, 0);
+        }
+        draw_number(img, lines, px, x0 + 6, y0 + 6, f->index);
+    }
+    rc = ft_png_write_rgb8(path, img, lines, px, &e);
+    if (rc)
+        fprintf(stderr, "%s\n", e.msg);
+    free(img);
+    return rc;
+}
+
+static const char *type_name(ft_frame_type t)
+{
+    static const char *const names[] = { "full", "half", "panorama", "partial" };
+    return (unsigned)t < sizeof names / sizeof names[0] ? names[t] : "?";
+}
+
+static void print_job(const ft_job *j)
+{
+    int i;
+    printf("\n frame  type      y0     len    x0   width  tilt  ppi   conf\n");
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        printf(" %3d%s  %-8s %6.1f %6.1f %5.1f %6.1f %5.2f %5g  %s\n",
+               f->index, f->include ? " " : "-", type_name(f->type), f->y0,
+               f->len, f->x0, f->width, f->tilt_deg, f->ppi,
+               f->confidence_low ? "LOW" : "ok");
+    }
+    printf(" focus: %s, offset %ld CCD steps\n",
+           j->focus == FT_FOCUS_PER_FRAME ? "per frame" : "shifted curve",
+           j->focus_offset);
+}
+
+/* most textured 1 mm band of a frame, by preview sharpness: centre (mm
+ * along) returned, *score = its sharpness (0 if no band fits) */
+static double textured_band(const float *t, int lines, int px,
+                            const ft_axes *ax, const ft_job_frame *f,
+                            double *score)
+{
+    double best_y = f->y0 + f->len / 2;
+    int k;
+    *score = 0;
+    for (k = 1; k <= 9; k++) {
+        double yc = f->y0 + 2 + (f->len - 4) * k / 10.0;
+        long l0 = mm_to_idx(yc - 0.5, ax->y_mm0, ax->y_mm_per_line, lines);
+        long l1 = mm_to_idx(yc + 0.5, ax->y_mm0, ax->y_mm_per_line, lines);
+        long c0 = mm_to_idx(f->x0, ax->x_mm0, ax->x_mm_per_px, px);
+        long c1 = mm_to_idx(f->x0 + f->width, ax->x_mm0, ax->x_mm_per_px, px);
+        double s;
+        float *band;
+        long l, c;
+        if (l0 < 0 || l1 > lines || c0 < 0 || c1 > px || l1 - l0 < 3 ||
+            c1 - c0 < 3)
+            continue;
+        band = malloc((size_t)(l1 - l0) * (c1 - c0) * sizeof *band);
+        if (!band)
+            continue;
+        for (l = l0; l < l1; l++)
+            for (c = c0; c < c1; c++)
+                band[(size_t)(l - l0) * (c1 - c0) + (c - c0)] =
+                    t[((size_t)l * px + c) * 3 + 1];
+        s = ft_sharpness(band, (int)(c1 - c0), (int)(l1 - l0));
+        free(band);
+        if (s > *score) {
+            *score = s;
+            best_y = yc;
+        }
+    }
+    return best_y;
+}
+
+#define TEXTURE_MIN 0.01    /* preview sharpness below this: featureless */
+
+/* preview axes: k = 1 line dropped by the RGB alignment; across from
+ * output pixel 2 (SCAN_WIN @14), bin 12, at the preview's 6300 scale */
+static void preview_axes(ft_axes *ax)
+{
+    ax->y_mm_per_line = 25.4 / 525;
+    ax->y_mm0 = 1 * ax->y_mm_per_line;
+    ax->x_mm0 = ft_ccd_to_mm(ft_out_to_ccd(2, 0, 12) + 5.5, 6300);
+    ax->x_mm_per_px = ft_ccd_to_mm(ft_out_to_ccd(2, 1, 12) + 5.5, 6300) -
+                      ax->x_mm0;
+}
+
+static int cmd_frames(int argc, char **argv)
+{
+    const char *base = "strip";
+    char raw[260], path[260];
+    ft_film film = FT_FILM_NEGATIVE;
+    double ppi = 2000;
+    int sprockets = 0, i, lines = 0, rc;
+    DWORD hold = 10000;
+    const ft_holder *h = ft_holder_find("24x217");
+    static ft_layout L;
+    static ft_job j;
+    ft_axes ax;
+    ft_err e;
+    float *t;
+    FILE *f;
+
+    for (i = 0; i < argc; i += 2) {
+        if (i + 1 >= argc) {
+            fprintf(stderr, "frames: %s needs a value\n", argv[i]);
+            return 2;
+        }
+        if (strcmp(argv[i], "--film") == 0) {
+            if (strcmp(argv[i + 1], "slide") == 0) film = FT_FILM_SLIDE;
+            else if (strcmp(argv[i + 1], "neg") == 0) film = FT_FILM_NEGATIVE;
+            else {
+                fprintf(stderr, "frames: --film neg|slide\n");
+                return 2;
+            }
+        } else if (strcmp(argv[i], "--ppi") == 0) ppi = atof(argv[i + 1]);
+        else if (strcmp(argv[i], "--sprockets") == 0) {
+            if (strcmp(argv[i + 1], "yes") == 0) sprockets = 1;
+            else if (strcmp(argv[i + 1], "no") == 0) sprockets = 0;
+            else {
+                fprintf(stderr, "frames: --sprockets yes|no\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "-h") == 0) hold = (DWORD)atol(argv[i + 1]) * 1000;
+        else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
+        else {
+            fprintf(stderr, "frames: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!ft_ppi_supported(ppi)) {
+        fprintf(stderr, "frames: ppi %g not supported\n", ppi);
+        return 2;
+    }
+    if (!h) {
+        fprintf(stderr, "frames: no 24x217 holder geometry\n");
+        return 1;
+    }
+    if (snprintf(raw, sizeof raw, "%s.raw", base) >= (int)sizeof raw ||
+        snprintf(path, sizeof path, "%s.job", base) >= (int)sizeof path) {
+        fprintf(stderr, "frames: -o name too long\n");
+        return 2;
+    }
+
+    g_lamp = 255;                    /* the lamp level persists: set it */
+    if (cmd_scan(&PRESETS[0], -1, 0, hold, raw))
+        return 1;
+    t = load_corrected(raw, 666, 12, 2, &lines);
+    if (!t)
+        return 1;
+
+    preview_axes(&ax);
+    if (ft_detect(t, lines, 666, &ax, film, h, &L, &e)) {
+        fprintf(stderr, "frames: %s\n", e.msg);
+        free(t);
+        return 1;
+    }
+    if (L.fallback)
+        printf("WARNING: no frame edge found; using the fixed %g mm grid\n",
+               h->grid_pitch_mm);
+    if (L.nblank)
+        printf("note: %d blank frame(s) dropped\n", L.nblank);
+    ft_layout_to_job(&L, h->name, film, ppi, sprockets, &j);
+
+    /* 3-point focus check on the first, middle and last whole frame */
+    {
+        int cand[FT_MAX_FRAMES], nc = 0, pick[3], np = 0, k;
+        long off[3];
+        for (i = 0; i < j.nframes; i++)
+            if (j.f[i].type != FT_FRAME_PARTIAL)
+                cand[nc++] = i;
+        if (nc > 0) {
+            pick[np++] = cand[0];
+            if (nc > 2) pick[np++] = cand[nc / 2];
+            if (nc > 1) pick[np++] = cand[nc - 1];
+        }
+        for (k = 0; k < np; k++) {
+            ft_job_frame *fr = &j.f[pick[k]];
+            double score, yc = textured_band(t, lines, 666, &ax, fr, &score);
+            if (score < TEXTURE_MIN) {
+                printf("frame %d: no texture for focus; skipped\n", fr->index);
+                pick[k--] = pick[--np];
+                continue;
+            }
+            printf("focus check, frame %d at %.1f mm\n", fr->index, yc);
+            if (focus_bracket(ppi, fr->x0 + fr->width / 2, yc, fr->width,
+                              0, 2000, 5, &off[k])) {
+                free(t);
+                return 1;
+            }
+        }
+        if (np == 0) {
+            printf("WARNING: no textured frame; using the focus curve as is\n");
+        } else {
+            long s = 0, mean;
+            for (k = 0; k < np; k++)
+                s += off[k];
+            mean = s / np;
+            while (np < 3)               /* fewer points: repeat the mean */
+                off[np++] = mean;
+            j.focus = ft_focus_decide(off, &j.focus_offset);
+            printf("focus offsets %ld %ld %ld -> %s\n", off[0], off[1], off[2],
+                   j.focus == FT_FOCUS_PER_FRAME ? "per-frame focus"
+                                                 : "shifted curve");
+        }
+    }
+
+    f = fopen(path, "w");
+    rc = !f;
+    if (f) {
+        rc = ft_job_write(&j, f) != 0;
+        rc |= fclose(f) != 0;
+    }
+    if (rc) {
+        fprintf(stderr, "frames: cannot write %s\n", path);
+        free(t);
+        return 1;
+    }
+    snprintf(path, sizeof path, "%s.png", base);
+    rc = write_strip_png(path, t, lines, 666, &ax, &j);
+    free(t);
+    print_job(&j);
+    printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
+           base, base, base);
+    return rc ? 1 : 0;
+}
+
 static int scan_args(int argc, char **argv)
 {
     const struct preset *p = &PRESETS[0];
@@ -1459,6 +1959,9 @@ int main(int argc, char **argv)
             "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
+            "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no] [-h s] [-o strip]\n"
+            "                     preview (lamp 255), detect frames, 3-point focus\n"
+            "                     check -> strip.job (edit it) + strip.png\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped; Ctrl+C aborts.\n");
@@ -1501,6 +2004,8 @@ int main(int argc, char **argv)
                           argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
         } else if (strcmp(cmd, "crop") == 0) {
             rc = cmd_crop(argc - 2, argv + 2);
+        } else if (strcmp(cmd, "frames") == 0) {
+            rc = cmd_frames(argc - 2, argv + 2);
         } else if (strcmp(cmd, "scan") == 0) {
             rc = scan_args(argc - 2, argv + 2);
         } else if (strcmp(cmd, "upload") == 0 && argc > 2) {
