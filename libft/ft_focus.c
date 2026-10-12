@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 #include "ft_focus.h"
 
@@ -28,15 +27,22 @@ int ft_ppi_supported(double ppi)
 
 int ft_optics_for(const ft_lens *l, double scale, long *ccd, long *optic)
 {
-    double m, u, v, lens;
-    if (scale < FT_SCALE_MIN - 1e-6 || scale > FT_SCALE_MAX + 1e-6)
+    double m, u, v, lens, cc;
+    if (!(scale >= FT_SCALE_MIN - 1e-6 && scale <= FT_SCALE_MAX + 1e-6))
+        return -1;
+    if (!isfinite(l->p) || !(l->p > 0) || !isfinite(l->fl) || !(l->fl > 0) ||
+        !isfinite(l->film) || !(l->film > 0) || !isfinite(l->w))
         return -1;
     m = l->p * scale;
     u = l->fl * (1 + 1 / m);
     v = l->fl * (1 + m);
     lens = l->film - u;
+    cc = lens + l->w - v;
+    if (!isfinite(lens) || !isfinite(cc) || lens < 0 || lens > 2e9 ||
+        cc < 0 || cc > 2e9)
+        return -1;
     *optic = (long)(lens + 0.5);
-    *ccd = (long)(lens + l->w - v + 0.5);
+    *ccd = (long)(cc + 0.5);
     return 0;
 }
 
@@ -69,6 +75,9 @@ int ft_peak(const long *x, const double *y, int n, double *peak)
     double x0, x1, x2, y0, y1, y2, num, den;
     if (n < 3)
         return -1;
+    for (i = 0; i < n; i++)
+        if (!isfinite(y[i]))
+            return -1;
     for (i = 1; i < n; i++)
         if (y[i] > y[m])
             m = i;
@@ -106,23 +115,41 @@ int ft_lens_write(const ft_lens *l, FILE *f)
 int ft_lens_read(ft_lens *l, FILE *f, ft_err *e)
 {
     char line[160];
+    ft_lens t = { 0, 0, 0, 0 };
     int ln = 0, seen = 0;
     while (fgets(line, sizeof line, f)) {
         char key[16];
         double v;
+        int used = 0, over = !strchr(line, '\n') && !feof(f);
+        const char *p = line;
         ln++;
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+        if (over) {                      /* drop the rest of a long line */
+            int ch;
+            while ((ch = fgetc(f)) != EOF && ch != '\n')
+                ;
+        }
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '#' || *p == '\0' || *p == '\n' || *p == '\r')
             continue;
-        if (sscanf(line, " %15[a-z] = %lf", key, &v) != 2)
+        if (over)
+            return ft_fail(e, "focus file line %d: too long", ln);
+        if (sscanf(p, "%15[a-z] = %lf %n", key, &v, &used) != 2 ||
+            p[used] != '\0')
             return ft_fail(e, "focus file line %d: expected key = number", ln);
-        if (strcmp(key, "film") == 0)    { l->film = v; seen |= 1; }
-        else if (strcmp(key, "w") == 0)  { l->w = v;    seen |= 2; }
-        else if (strcmp(key, "fl") == 0) { l->fl = v;   seen |= 4; }
-        else if (strcmp(key, "p") == 0)  { l->p = v;    seen |= 8; }
+        if (!isfinite(v))
+            return ft_fail(e, "focus file line %d: value not finite", ln);
+        if (strcmp(key, "film") == 0)    { t.film = v; seen |= 1; }
+        else if (strcmp(key, "w") == 0)  { t.w = v;    seen |= 2; }
+        else if (strcmp(key, "fl") == 0) { t.fl = v;   seen |= 4; }
+        else if (strcmp(key, "p") == 0)  { t.p = v;    seen |= 8; }
         else return ft_fail(e, "focus file line %d: unknown key %s", ln, key);
     }
     if (seen != 15)
         return ft_fail(e, "focus file: needs film, w, fl and p");
+    if (!(t.fl > 0) || !(t.p > 0) || !isfinite(t.film))
+        return ft_fail(e, "focus file: fl and p must be positive");
+    *l = t;
     return 0;
 }
 
@@ -184,12 +211,21 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
 {
     double q[4], lambda = 1e-3, cost;
     double sc = 0, so = 0, c, o;
-    int it, i, j, k, r;
+    int it, i, j, k, r, stepped = 0;
+    ft_lens res_l;
     if (n < 4)
+        return -1;
+    for (i = 0; i < n; i++)
+        if (!isfinite(M[i]) || !(M[i] > 0))
+            return -1;
+    if (!isfinite(l->film) || !isfinite(l->w) || !isfinite(l->fl) ||
+        !isfinite(l->p) || !(l->fl > 0) || !(l->p > 0))
         return -1;
     q[0] = l->film / 1e6; q[1] = l->w / 1e6; q[2] = l->fl / 1e6;
     q[3] = l->p * 1e4;
     cost = fit_cost(q, M, C, L, n);
+    if (!isfinite(cost))
+        return -1;
     for (it = 0; it < 200; it++) {      /* Levenberg-Marquardt */
         double JTJ[4][4] = { { 0 } }, JTr[4] = { 0 }, step[4], qn[4], nc;
         for (i = 0; i < n; i++) {
@@ -214,8 +250,11 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
         }
         for (j = 0; j < 4; j++)
             JTJ[j][j] *= 1 + lambda;
-        if (solve4(JTJ, JTr, step))
+        if (solve4(JTJ, JTr, step)) {
+            if (!stepped)
+                return -1;
             break;
+        }
         for (k = 0; k < 4; k++)
             qn[k] = q[k] - step[k];
         nc = fit_cost(qn, M, C, L, n);
@@ -223,6 +262,7 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
             int done = cost - nc < 1e-12 * cost;
             memcpy(q, qn, sizeof q);
             cost = nc;
+            stepped = 1;
             lambda *= 0.3;
             if (done)
                 break;
@@ -232,13 +272,18 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
                 break;
         }
     }
-    l->film = q[0] * 1e6; l->w = q[1] * 1e6; l->fl = q[2] * 1e6;
-    l->p = q[3] * 1e-4;
+    res_l.film = q[0] * 1e6; res_l.w = q[1] * 1e6; res_l.fl = q[2] * 1e6;
+    res_l.p = q[3] * 1e-4;
+    if (!isfinite(cost) || !isfinite(res_l.film) || !isfinite(res_l.w) ||
+        !isfinite(res_l.fl) || !isfinite(res_l.p) || res_l.fl <= 0 ||
+        res_l.p <= 0 || res_l.film <= res_l.w)
+        return -1;
     for (i = 0; i < n; i++) {
         lens_predict(q, M[i], &c, &o);
         sc += (c - C[i]) * (c - C[i]);
         so += (o - L[i]) * (o - L[i]);
     }
+    *l = res_l;
     *rms_ccd = sqrt(sc / n);
     *rms_lens = sqrt(so / n);
     return 0;
