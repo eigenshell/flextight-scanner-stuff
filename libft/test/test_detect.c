@@ -46,6 +46,22 @@ static void expect_types(const char *want)    /* F H P p per frame */
     }
 }
 
+static int nlow(void)
+{
+    int i, n = 0;
+    for (i = 0; i < L.nframes; i++)
+        n += L.f[i].confidence_low;
+    return n;
+}
+
+static void hf12(synth_spec *s, double pitch)
+{
+    int i;
+    synth_default(s, FT_FILM_NEGATIVE);
+    for (i = 0; i < 12; i++)
+        synth_add(s, 4 + pitch * i, 18, 0);
+}
+
 int main(void)
 {
     synth_spec s;
@@ -171,6 +187,144 @@ int main(void)
     CHECK(run(&s) == 0);
     CHECK(L.fallback && L.nframes == 6);
     CHECK(L.f[0].confidence_low && L.f[5].confidence_low);
+
+    /* --- realistic degradations --- */
+
+    /* soft edges: 0.1 mm blur */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.blur_mm = 0.1;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK(!L.fallback && nlow() == 0);
+    CHECK_NEAR(L.base[0], 0.62, 0.02 * 0.62);
+    for (i = 0; i < 6; i++) {
+        CHECK_NEAR(L.f[i].y0, 4 + 38.0 * i, 0.3);
+        CHECK_NEAR(L.f[i].y1, 40 + 38.0 * i, 0.3);
+    }
+
+    /* base gain drifting +-10 % along the roll */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.drift = 0.10;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK(nlow() == 0);
+
+    /* half frames with 0.5 mm gaps, 3 % grain, 0.1 mm blur */
+    hf12(&s, 18.5);
+    s.grain = 0.03;
+    s.blur_mm = 0.1;
+    CHECK(run(&s) == 0);
+    expect_types("HHHHHHHHHHHH");
+    for (i = 0; i < 12; i++)
+        CHECK_NEAR(L.f[i].y0, 4 + 18.5 * i, 0.3);
+
+    /* same with grain only (no blur to average it away) */
+    hf12(&s, 18.5);
+    s.grain = 0.03;
+    CHECK(run(&s) == 0);
+    expect_types("HHHHHHHHHHHH");
+
+    /* half frames with 0.5 mm gaps on a strip tilted 0.5 degrees */
+    hf12(&s, 18.5);
+    s.tilt_deg = 0.5;
+    CHECK(run(&s) == 0);
+    expect_types("HHHHHHHHHHHH");
+    for (i = 0; i < 12; i++) {
+        CHECK_NEAR(L.f[i].y0, 4 + 18.5 * i, 0.3);
+        CHECK_NEAR(L.f[i].tilt_deg, 0.5, 0.05);
+    }
+
+    /* slide at a realistic Dmax with sensor noise; frame 1 black (blank) */
+    ff6(&s, FT_FILM_SLIDE);
+    s.base[0] = s.base[1] = s.base[2] = 0.0005f;
+    s.noise = 2e-4;
+    s.npatch = 1;
+    s.patch[0].y0 = 4;
+    s.patch[0].y1 = 40;
+    s.patch[0].x0 = 4.1;
+    s.patch[0].x1 = 28.1;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFF");
+    CHECK(!L.fallback && L.nblank == 1);
+    CHECK_NEAR(L.f[0].y0, 42, 0.3);
+
+    /* thin base-like content against both edges of one gap */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.npatch = 2;
+    s.patch[0].y0 = 37.5;
+    s.patch[0].y1 = 40;
+    s.patch[0].x0 = 10;
+    s.patch[0].x1 = 10.4;
+    s.patch[1].y0 = 42;
+    s.patch[1].y1 = 44.5;
+    s.patch[1].x0 = 20;
+    s.patch[1].x1 = 20.4;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK_NEAR(L.f[0].y1, 40, 0.3);
+    CHECK_NEAR(L.f[1].y0, 42, 0.3);
+
+    /* open-beam specks (dust holes) scattered over the strip */
+    ff6(&s, FT_FILM_NEGATIVE);
+    s.nspeck = 40;
+    s.speck_r = 0.15;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK(nlow() == 0);
+
+    /* short strip, holder open beyond the film */
+    synth_default(&s, FT_FILM_NEGATIVE);
+    s.film_y1 = 117;
+    s.open_outside = 1;
+    for (i = 0; i < 3; i++)
+        synth_add(&s, 4 + 38.0 * i, 36, 0);
+    CHECK(run(&s) == 0);
+    expect_types("FFF");
+    CHECK(L.has_holes && !L.fallback);
+    CHECK_NEAR(L.film_y1, 117, 0.1);
+    CHECK_NEAR(L.holes_x0, 0.6, 0.3);
+
+    /* touching frames after a leader: the stretch is gridded and flagged,
+     * never one long unflagged run */
+    synth_default(&s, FT_FILM_NEGATIVE);
+    for (i = 0; i < 6; i++)
+        synth_add(&s, 6 + 37.5 * i, 37.5, 0);
+    CHECK(run(&s) == 0);
+    CHECK(L.nframes == 6 && nlow() == 6);
+    CHECK_NEAR(L.f[0].y0, 6, 0.3);
+    for (i = 0; i < L.nframes; i++)
+        CHECK(L.f[i].y1 - L.f[i].y0 <= 39.5);
+
+    /* hole rows outside the scanned width: global base, tilt from edges */
+    ff6(&s, FT_FILM_SLIDE);
+    s.film_x0 = -6;
+    s.film_x1 = 40;
+    s.tilt_deg = -0.3;
+    CHECK(run(&s) == 0);
+    expect_types("FFFFFF");
+    CHECK(!L.has_holes && nlow() == 0);
+    for (i = 0; i < 6; i++) {
+        CHECK_NEAR(L.f[i].y0, 4 + 38.0 * i, 0.3);
+        CHECK_NEAR(L.f[i].tilt_deg, -0.3, 0.05);
+    }
+
+    /* bad arguments */
+    {
+        ft_axes ax = { 0, 25.4 / 525, 0, 0 };
+        ft_err e;
+        float px1[3 * 64] = { 0 };
+        CHECK(ft_detect(px1, 8, 8, &ax, FT_FILM_NEGATIVE,
+                        ft_holder_find("24x217"), &L, &e) == -1);
+        ax.x_mm_per_px = 0.048;
+        CHECK(ft_detect(NULL, 8, 8, &ax, FT_FILM_NEGATIVE,
+                        ft_holder_find("24x217"), &L, &e) == -1);
+        CHECK(ft_detect(px1, 0, 8, &ax, FT_FILM_NEGATIVE,
+                        ft_holder_find("24x217"), &L, &e) == -1);
+        CHECK(ft_detect(px1, 8, 8, &ax, FT_FILM_NEGATIVE, NULL, &L, &e) == -1);
+        ax.y_mm_per_line = NAN;
+        CHECK(ft_detect(px1, 8, 8, &ax, FT_FILM_NEGATIVE,
+                        ft_holder_find("24x217"), &L, &e) == -1);
+    }
 
     /* empty holder */
     synth_default(&s, FT_FILM_NEGATIVE);

@@ -26,7 +26,8 @@ typedef struct {
     double band_x0, band_x1;       /* between the hole rows */
     double holes_x0, holes_x1;     /* outer extent of the hole rows (scanned part) */
     int has_holes;
-    float base[3];                 /* film base transmittance */
+    float base[3];                 /* film base transmittance (median along) */
+    double tilt_deg;               /* strip tilt (hole rows, else edges) */
     int nframes;
     ft_det_frame f[FT_MAX_FRAMES];
     int nblank;                    /* blank frames dropped */
