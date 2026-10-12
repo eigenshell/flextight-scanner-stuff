@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Session state machine over a transport (SGIOTransport or FakeTransport)."""
 
 from . import protocol

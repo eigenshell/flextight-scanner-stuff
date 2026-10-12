@@ -1,4 +1,5 @@
-"""Constants transcribed from the protocol spec (docs/protocol-spec.md).
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Protocol constants (see tools/poc for the device protocol as proven on hardware).
 
 Enumeration uses fixed SCSI commands whose layouts are standard; vendor CDB
 tables arrive with the spec.

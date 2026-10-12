@@ -2,9 +2,8 @@
 
 Standalone Win32 console tool that talks to the scanner **without
 FlexColor**, through the same `\\.\ScannerN` + 44-byte SRB +
-`DeviceIoControl(0x190012)` transport FlexColor uses (reversed from
-`FlexColor.dll` and validated against 67k+ hooked calls — see
-`docs/protocol.md`, `docs/recon/static-decode.md`).
+`DeviceIoControl(0x190012)` transport FlexColor uses, validated against
+hundreds of thousands of traced calls between FlexColor and our scanner.
 
 ## Why this exists
 
@@ -19,7 +18,7 @@ learn what the spec got wrong — cheaply.
 build.bat            REM cl or i686-w64-mingw32-gcc, see header
 
 ftpoc inquiry        identity; "SCSI Loader" means run `upload` first
-ftpoc poll [n]       ScannerReady polls (status vocabulary in protocol.md)
+ftpoc poll [n]       ScannerReady polls (00 00 idle, 08 00 motor, 04 00 busy)
 ftpoc win            one SetWindow exchange with the idle template, hexdump
 ftpoc park           rest: FlexColor's shutdown descriptor (3600 ppi zoom)
 ftpoc goto <ppi*1e4> CCD + optics to that resolution's zoom, 0..63000000
@@ -85,7 +84,7 @@ descriptor sent that way put the device into a scan it never finished
 
 `SCAN_WIN`/`END_WIN` come from session 5 (pid 412: a full preview and a
 preview stopped halfway — both end with END ×2). The preview sequence
-and its timing are in `docs/protocol.md` "Per-scan sequence".
+and its timing are documented in `cmd_scan` in ftpoc.c.
 Seq 41–278 are *not* preview — they are the Position dialog's
 "CCD & Optic" button (UI timeline), a service calibration that `ftpoc`
 deliberately does not replay.

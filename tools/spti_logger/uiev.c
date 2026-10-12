@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * uiev.c - UI event timeline logger for the FlexColor capture rig.
  *

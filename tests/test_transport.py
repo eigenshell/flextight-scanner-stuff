@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for the SG_IO transport and the script-replay fake."""
 
 import ctypes

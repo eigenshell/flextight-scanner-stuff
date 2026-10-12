@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """CLI tests: in-process main() with monkeypatched env, plus one subprocess smoke."""
 
 import json

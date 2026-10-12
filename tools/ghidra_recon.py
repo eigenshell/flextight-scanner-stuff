@@ -1,6 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Ghidra post-script: executed via PyGhidra run_script against the saved project
-# (analyzeHeadless -postScript does not work on this Ghidra 12.x install — see below
-# and the Reproduction section of docs/recon/static-recon.md):
+# (analyzeHeadless -postScript does not work on this Ghidra 12.x install — see below):
 #   from pyghidra.core import run_script
 #   run_script(None, "tools/ghidra_recon.py", project_location="tools/ghidra_proj",
 #              project_name="fc403", analyze=False, program_name="FlexColor.dll",
@@ -14,7 +14,7 @@
 # (run_script / PyGhidraScript), where script `print` output is redirected to
 # a Java PrintWriter that does not reach the terminal. For that reason the
 # JSON is additionally written to tools/ghidra_out/recon_json.txt next to
-# this script; see docs/recon/static-recon.md.
+# this script.
 import json
 import os
 

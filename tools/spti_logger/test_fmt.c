@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * test_fmt.c - native unit test for ft_fmt_ioctl_record.
  *

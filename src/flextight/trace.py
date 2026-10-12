@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Parser for the spti_logger JSONL trace format.
 
 Record contract (tools/spti_logger/fmt.h): one compact JSON object per
@@ -201,7 +202,7 @@ def guess_cdb(record: TraceRecord, max_offset: int = 32) -> tuple[int, int] | No
     PLACEHOLDER HEURISTIC, quarantined in this function: the layout of the
     IOCTL_SCSISCAN_CMD payload (where inside in_head the CDB bytes sit) is
     not yet known — it will be pinned by real hardware traces
-    (docs/recon/transport.md open question a). Until then this scans
+    (an open transport question). Until then this scans
     record.in_head[0:max_offset] for the first byte that is a known SCSI
     opcode and returns (offset, opcode), or None if no candidate exists.
     Results are hypotheses, not facts; do not build decoding on top of

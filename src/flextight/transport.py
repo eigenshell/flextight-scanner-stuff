@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """SCSI transport layer for talking to the scanner.
 
 Two implementations share a small command interface:

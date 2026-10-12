@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * inject.c - launcher: starts FlexColor.exe suspended, injects ft_hook.dll
  * (next to inject.exe) via remote LoadLibrary, resumes, and stays attached

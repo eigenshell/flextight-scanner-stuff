@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * ftpoc.c — FlexTight II (Precision II) proof-of-concept console tool.
  *
  * Talks to the scanner directly through the Microsoft scsiscan.sys driver,
  * replicating the exact 44-byte SRB + ioctl 0x190012 transport that
  * FlexColor.exe uses (validated against 67k+ hooked DeviceIoControl calls,
- * sessions 2-4 — see docs/protocol.md and docs/recon/static-decode.md).
+ * sessions 2-6).
  *
  * Standalone process: FlexColor must be CLOSED (the driver opens exclusively;
  * CreateFile fails with ERROR_ACCESS_DENIED otherwise — that's the check).

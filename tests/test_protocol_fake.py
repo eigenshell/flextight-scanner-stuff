@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Scanner enumeration over FakeTransport: TDD pins for protocol.py/scanner.py."""
 
 import pytest

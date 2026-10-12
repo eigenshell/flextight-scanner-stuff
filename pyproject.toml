@@ -3,6 +3,8 @@ name = "flextight"
 version = "0.1.0"
 description = "Linux driver and tooling for Imacon/Hasselblad Flextight SCSI scanners"
 requires-python = ">=3.10"
+license = "GPL-2.0-or-later"
+license-files = ["LICENSE"]
 
 [project.scripts]
 flextight = "flextight.cli:main"

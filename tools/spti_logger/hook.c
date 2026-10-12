@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * hook.c - ft_hook.dll: in-process inline hook on kernel32!DeviceIoControl
  * for tracing FlexColor 4.0.3's SCSI traffic (private IOCTL_SCSISCAN_CMD into
@@ -30,8 +31,8 @@
  * Hook design notes / caveats
  * ---------------------------
  * - Classic 5-byte E9 inline hook on the kernel32.dll export. FlexColor.exe
- *   and FlexColor.dll import DeviceIoControl from KERNEL32 (see
- *   docs/recon/transport.md), so this catches every call from any module in
+ *   and FlexColor.dll import DeviceIoControl from KERNEL32, so this
+ *   catches every call from any module in
  *   the process. On Win7+ kernel32!DeviceIoControl is a small thunk into
  *   kernelbase.dll; hooking the kernel32 entry is still correct for callers
  *   that import kernel32, but a module calling kernelbase directly would

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Turn an ftpoc scan (<file>, <file>.cal, <file>.txt) into an image.
 
 Each line the scanner sends is one CCD readout across the film: px pixels,

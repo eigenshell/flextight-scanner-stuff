@@ -1,4 +1,5 @@
 @echo off
+REM SPDX-License-Identifier: GPL-2.0-or-later
 REM Build ft_hook.dll (32-bit!), inject.exe and uiev.exe for the FlexColor
 REM transport trace + UI event timeline.
 REM Requires Visual Studio (cl) in PATH, or mingw-w64 targeting i686:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for flextight.trace — JSONL parser for SPTI ioctl captures.
 
 All fixtures are synthetic; no real trace files exist yet (hardware

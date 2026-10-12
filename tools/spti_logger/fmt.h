@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * fmt.h - platform-neutral JSONL record formatter for the FlexColor
  * DeviceIoControl transport trace.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Hardware acceptance: enumerate a real attached scanner.
 
 Skipped from default runs (pytestmark hardware); run explicitly with:

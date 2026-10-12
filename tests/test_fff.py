@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for flextight.fff — .fff (3F) writer with LibRaw round-trip.
 
 Wire-format constants (TIFF magic, tag numbers, field types, Imacon
 metadata block offsets) are pinned here as literals, per project rule:
 tests must not import the constants they verify. Format authority: TIFF 6.0
 for the generic TIFF structure, LibRaw source for the FFF-specific
-requirements (see docs/recon/fff-format.md).
+requirements.
 """
 
 import io

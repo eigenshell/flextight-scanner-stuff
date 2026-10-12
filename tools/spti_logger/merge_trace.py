@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """merge_trace.py - interleave the ioctl and UI-event timelines.
 
 Both flextrace_ioctl.jsonl (ft_hook.dll) and flextrace_uiev.jsonl (uiev.exe)

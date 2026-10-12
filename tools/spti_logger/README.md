@@ -3,8 +3,7 @@
 In-process inline hook on `kernel32!DeviceIoControl`, injected into
 `FlexColor.exe` at launch, logging every call (including Imacon's private
 `IOCTL_SCSISCAN_CMD` — its numeric value is recovered from the trace) as JSONL.
-Rationale and transport evidence: `docs/recon/transport.md`. Statically
-recovered CDB opcodes (0xD0..0xE3): `docs/recon/static-recon.md`.
+The device protocol it helped document is summarized in `tools/poc/`.
 
 ## Files
 
@@ -113,9 +112,8 @@ install.
 ## Captured traces
 
 First live session (2026-10-11, interactive: preview, TIFF scan, 3F scan,
-settings changes): distilled command vocabulary, SRB layout, and phase map in
-`docs/recon/live-session-trace.md`. The full 73 MB trace stays on the Windows
-box next to the tool; rotate it between sessions.
+settings changes). Traces stay on the Windows box next to the tool (they are
+never committed); rotate them between sessions.
 
 ## Payload sidecar (`flextrace_bufs.bin`)
 

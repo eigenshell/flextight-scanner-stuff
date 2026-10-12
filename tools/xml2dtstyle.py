@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """FlexColor film-profile XML (Apple plist) → darktable .dtstyle translator.
 
 FlexColor ships one ImageSetting plist per film stock (extracted from the
@@ -28,7 +29,7 @@ is cosmetic since darktable re-resolves iop_order at apply time):
   rgbcurve       (v1)  Gradations[0] master     → linked-channel tone curve
   sharpen        (v1)  USM (negative amounts)   → unsharp mask
 
-Pinned ASSUMPTIONS (evidence in docs/recon/film-profiles.md; each is a
+Pinned ASSUMPTIONS (each is a
 one-line change here if disproven by hardware ground truth):
   - Gradations channel 0 is the master (RGB-linked) curve. FlexColor's
     Gradations pop-up lists "RGB, Red, Green, Blue, Cyan, Magenta, Yellow"
@@ -629,7 +630,7 @@ def profile_to_dtstyle(
     description = (
         f"FlexColor film profile {profile.name} "
         f"(translated by flextight tools/xml2dtstyle.py; "
-        f"assumptions: docs/recon/film-profiles.md)"
+        f"see its docstring for assumptions)"
     )
     plugins = build_plugins(profile)
     return style_xml(style_name, description, plugins), plugins

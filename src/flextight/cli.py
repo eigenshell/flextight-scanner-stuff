@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Command-line interface for the Flextight scanner driver.
 
 Transport source is selected globally, before the subcommand:

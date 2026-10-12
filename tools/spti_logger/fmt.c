@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * fmt.c - JSONL record formatter (pure C90, no libc beyond <stddef.h>).
  */

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Correlate flextrace_bufs.bin (payload sidecar) with flextrace_ioctl.jsonl.
 
 Sidecar record: 12-byte header <IIBBH (pid, seq, when, cand, len) + payload.

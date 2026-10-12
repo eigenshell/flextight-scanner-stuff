@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Writer for Flextight .fff (FlexColor "3F") files.
 
 The .fff format is an extended TIFF. Layout and required tags were
 researched against the LibRaw source (the format authority open-source
 tooling uses) and verified by round-tripping through rawpy; see
-docs/recon/fff-format.md for the full findings. In short, LibRaw rejects
+In short, LibRaw rejects
 plain 16-bit RGB TIFFs and accepts a file as FFF only when the IFD carries
 Imacon private tags 46275 (raw RGB payload) and 46274 (metadata block), in
 that order, plus a StripOffsets entry the generic TIFF post-selection
@@ -146,7 +147,7 @@ def write_fff(
 
     Film format is not representable: no tag number for it could be
     confirmed from FlexColor.dll strings or the LibRaw source, so it is
-    deliberately not emitted (see docs/recon/fff-format.md).
+    deliberately not emitted.
     """
     if width < 1 or height < 1:
         raise ValueError(f"width/height must be >= 1, got {width}x{height}")

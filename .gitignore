@@ -42,3 +42,7 @@ MICROCOD*
 *.raw.txt
 *.jsonl
 flextrace_bufs*.bin
+
+# private working notes / recon docs (kept local, not published)
+notes/
+docs/

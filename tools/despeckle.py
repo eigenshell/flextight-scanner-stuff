@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Dust/scratch removal pass for scanned film ("despeckle").
 
 The Flextight Precision II has no infrared channel, so — unlike scanners

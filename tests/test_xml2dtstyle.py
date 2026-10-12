@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Tests for tools/xml2dtstyle — FlexColor film-profile → darktable style.
 
 Wire-format constants (op_params struct fields, blend blob layout, module
 versions) are pinned here as literals decoded with struct.unpack, per
 project rule: tests must not round-trip through the translator's own
 encoder. Format authority: darktable 5.6.2 source, branch darktable-5.6.x
-(commit 20891f6) — see docs/recon/film-profiles.md for the field mapping.
+(commit 20891f6) — field mapping in the tools/xml2dtstyle.py docstring.
 
 Fixture facts (tests/fixtures/*.xml are SYNTHETIC: the FlexColor plist
 key structure with invented values — no Hasselblad profile data is
