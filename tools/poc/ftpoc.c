@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <math.h>
 #include "ft_calib.h"
 #include "ft_detect.h"
@@ -1600,7 +1601,7 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
     long off[FB_SAMPLES];
     double sh[FB_SAMPLES];
     int ns = 0, tries, i, k, m, bin = ft_bin_for_ppi(ppi), dir = 0;
-    long half;
+    long half, refused_lo = LONG_MAX, refused_hi = LONG_MIN;
 
     if (n < 3 || n > max_samples || max_samples > FB_SAMPLES || step <= 0 ||
         bin < 1 ||
@@ -1647,8 +1648,15 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
             q.hold = 3000;
             q.out = "fb.raw";
             rc = crop_scan(&q);
-            if (rc == CROP_REFUSED)
-                return FB_NO_PEAK;
+            if (rc == CROP_REFUSED) {
+                /* outside the safe CCD/lens range: unreachable, not fatal
+                 * (at 3150 ppi the focus sits ~1700 steps above the CCD
+                 * floor, hardware 2026-10-12) */
+                printf("  focus %+6ld: outside the safe range; skipped\n", o);
+                if (o < refused_lo) refused_lo = o;
+                if (o > refused_hi) refused_hi = o;
+                continue;
+            }
             if (rc)
                 return -1;
             px = (int)meta_long("fb.raw", "px");
@@ -1691,6 +1699,13 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
         *best = (long)(pk < 0 ? pk - 0.5 : pk + 0.5);
         if (r == 0)
             return 0;
+        /* maximum against the safe limit: nothing sharper is reachable */
+        if ((m == 0 && refused_lo < off[0]) ||
+            (m == ns - 1 && refused_hi > off[ns - 1])) {
+            printf("  focus: sharpest at the safe limit (%+ld)\n", off[m]);
+            *best = off[m];
+            return 0;
+        }
         /* maximum at an end of everything sampled */
         if (dir != 0 && (m == 0 ? -1 : 1) != dir) {
             printf("  focus: maximum went back to the other end; no usable "
@@ -2127,7 +2142,8 @@ static int cmd_frames(int argc, char **argv)
         return 1;
     }
     if (L.fallback)
-        printf("WARNING: no frame edge found; using the fixed %g mm grid\n",
+        printf("WARNING: no trusted frame edge on part of the strip; "
+               "gridded at %g mm there (frames flagged LOW)\n",
                h->grid_pitch_mm);
     if (L.nblank)
         printf("note: %d blank frame(s) dropped\n", L.nblank);
