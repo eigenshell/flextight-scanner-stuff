@@ -9,10 +9,15 @@ int ft_split_cal(const unsigned short *cal, int lines, int px,
                  float *dark, float *white, ft_err *e)
 {
     long n3 = (long)px * 3, i;
-    double *lm = malloc(lines * sizeof *lm);
-    double *sd = calloc(n3, sizeof *sd), *sw = calloc(n3, sizeof *sw);
+    double *lm, *sd, *sw;
     double lo, hi, band;
     int l, nd = 0, nw = 0, rc = 0;
+
+    if (lines < 1 || px < 1)
+        return ft_fail(e, "calibration: bad dimensions");
+    lm = malloc(lines * sizeof *lm);
+    sd = calloc(n3, sizeof *sd);
+    sw = calloc(n3, sizeof *sw);
 
     if (!lm || !sd || !sw) {
         rc = ft_fail(e, "calibration: out of memory");
@@ -100,13 +105,16 @@ int ft_faul_parse(const char *text, size_t n, int pix[3][FT_FAUL_MAX],
     return count[0] + count[1] + count[2];
 }
 
-void ft_faul_fix(float *t, int lines, int px, int pix[3][FT_FAUL_MAX],
+int ft_faul_fix(float *t, int lines, int px, int pix[3][FT_FAUL_MAX],
                  const int count[3], int x, int bin)
 {
-    unsigned char *bad = malloc(px);
+    unsigned char *bad;
     int ch, i, j, l;
+    if (bin < 1 || px < 1)
+        return -1;
+    bad = malloc(px);
     if (!bad)
-        return;
+        return -1;
     for (ch = 0; ch < 3; ch++) {
         memset(bad, 0, px);
         for (i = 0; i < count[ch]; i++) {
@@ -138,6 +146,7 @@ void ft_faul_fix(float *t, int lines, int px, int pix[3][FT_FAUL_MAX],
         }
     }
     free(bad);
+    return 0;
 }
 
 int ft_align_rgb(float *t, int lines, int px, int k)

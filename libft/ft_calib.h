@@ -18,8 +18,10 @@ void ft_flatfield(const unsigned short *raw, int lines, int px,
 /* +999 entries of a Faul Pixs dump per channel; returns their number */
 int ft_faul_parse(const char *text, size_t n, int pix[3][FT_FAUL_MAX],
                   int count[3]);
-/* interpolate output pixels whose CCD span starts at a flagged pixel */
-void ft_faul_fix(float *t, int lines, int px, int pix[3][FT_FAUL_MAX],
+/* interpolate output pixels whose CCD span starts at a flagged pixel;
+ * returns -1 on bin < 1 or out of memory, else 0. pix is read-only but not
+ * const: C99 forbids int(*)[N] -> const int(*)[N]. */
+int ft_faul_fix(float *t, int lines, int px, int pix[3][FT_FAUL_MAX],
                  const int count[3], int x, int bin);
 /* realign the tri-linear rows in place (k = 12 / bin); returns new lines */
 int ft_align_rgb(float *t, int lines, int px, int k);

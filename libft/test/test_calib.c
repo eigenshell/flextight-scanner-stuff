@@ -74,5 +74,81 @@ int main(void)
         CHECK_NEAR(t[2], 2, 1e-9);
         CHECK_NEAR(t[3 * 3 + 0], 50, 1e-9);
     }
+
+    /* more faul-fix cases */
+    {
+        float t[2 * 10 * 3], u[3 * 3];
+        int pix[3][FT_FAUL_MAX], cnt[3] = { 1, 0, 0 };
+        int ln, j;
+        memset(pix, 0, sizeof pix);
+        for (ln = 0; ln < 2; ln++)
+            for (j = 0; j < 10; j++) {
+                t[(ln * 10 + j) * 3 + 0] = j * 0.1f + ln;
+                t[(ln * 10 + j) * 3 + 1] = 5;
+                t[(ln * 10 + j) * 3 + 2] = 6;
+            }
+        pix[0][0] = 100;                    /* d = -44 -> -11: outside */
+        CHECK(ft_faul_fix(t, 2, 10, pix, cnt, 0, 4) == 0);
+        CHECK_NEAR(t[0], 0, 1e-9);
+        CHECK_NEAR(t[4 * 3], 0.4, 1e-6);
+        t[3 * 3] = 9;
+        t[(10 + 3) * 3] = 9;
+        pix[0][0] = 144 + 4 * 5;            /* bin 4, x 2 -> column 3 */
+        CHECK(ft_faul_fix(t, 2, 10, pix, cnt, 2, 4) == 0);
+        CHECK_NEAR(t[3 * 3], 0.3, 1e-6);
+        CHECK_NEAR(t[(10 + 3) * 3], 1.3, 1e-6);
+        CHECK_NEAR(t[3 * 3 + 1], 5, 1e-9);
+        CHECK_NEAR(t[3 * 3 + 2], 6, 1e-9);
+        CHECK_NEAR(t[(10 + 3) * 3 + 1], 5, 1e-9);
+        CHECK(ft_faul_fix(t, 2, 10, pix, cnt, 0, 0) == -1);
+
+        /* edges and all-flagged on a 3 px line */
+        u[0] = 7; u[3] = 8; u[6] = 9;
+        pix[0][0] = 144;
+        CHECK(ft_faul_fix(u, 1, 3, pix, cnt, 0, 1) == 0);
+        CHECK_NEAR(u[0], 8, 1e-9);
+        pix[0][0] = 144 + 2;
+        CHECK(ft_faul_fix(u, 1, 3, pix, cnt, 0, 1) == 0);
+        CHECK_NEAR(u[6], 8, 1e-9);
+        u[0] = 1; u[3] = 2; u[6] = 3;
+        cnt[0] = 3;
+        pix[0][0] = 144; pix[0][1] = 145; pix[0][2] = 146;
+        CHECK(ft_faul_fix(u, 1, 3, pix, cnt, 0, 1) == 0);
+        CHECK_NEAR(u[0], 1, 1e-9);
+        CHECK_NEAR(u[3], 2, 1e-9);
+        CHECK_NEAR(u[6], 3, 1e-9);
+    }
+
+    /* align: 6 lines x 2 px, k = 1 */
+    {
+        float t[6 * 2 * 3];
+        int px, o;
+        for (l = 0; l < 6; l++)
+            for (px = 0; px < 2; px++)
+                for (i = 0; i < 3; i++)
+                    t[(l * 2 + px) * 3 + i] = (float)(l * 100 + px * 10 + i);
+        CHECK(ft_align_rgb(t, 6, 2, 1) == 4);
+        for (o = 0; o < 4; o++)
+            for (px = 0; px < 2; px++) {
+                CHECK_NEAR(t[(o * 2 + px) * 3 + 0], (o + 2) * 100 + px * 10, 1e-9);
+                CHECK_NEAR(t[(o * 2 + px) * 3 + 1], (o + 1) * 100 + px * 10 + 1, 1e-9);
+                CHECK_NEAR(t[(o * 2 + px) * 3 + 2], o * 100 + px * 10 + 2, 1e-9);
+            }
+        CHECK(ft_align_rgb(t, 6, 2, 0) == 6);
+        CHECK(ft_align_rgb(t, 4, 2, 2) == 4);
+        CHECK_NEAR(t[0], 200, 1e-9);        /* untouched */
+    }
+
+    /* CRLF line endings */
+    {
+        static const char txt[] =
+            "Faul Pixs\r\n100\t0\r\n1234\t+999\r\n100\t0\r\n100\t0\r\n"
+            "2000\t+999\r\n";
+        int pix[3][FT_FAUL_MAX], cnt[3];
+        CHECK(ft_faul_parse(txt, sizeof txt - 1, pix, cnt) == 2);
+        CHECK(cnt[0] == 1 && pix[0][0] == 1234);
+        CHECK(cnt[2] == 1 && pix[2][0] == 2000);
+    }
+    CHECK(ft_split_cal(cal, 0, PX, dark, white, &e) == -1);
     return TEST_DONE();
 }
