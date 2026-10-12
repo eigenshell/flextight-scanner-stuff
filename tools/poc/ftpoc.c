@@ -413,7 +413,7 @@ static int parse_lamp(const char *v)
 {
     char *end;
     long l = strtol(v, &end, 10);
-    if (*end || l < 0 || l > 255) {
+    if (*end || !(l >= 0 && l <= 255)) {
         fprintf(stderr, "-l wants a lamp level 0..255\n");
         return 1;
     }
@@ -572,7 +572,7 @@ static int move_to(long pos, const char *why)
 {
     BYTE desc[84];
     int r;
-    if (pos < 0 || pos > POS_MAX) {
+    if (!(pos >= 0 && pos <= POS_MAX)) {
         fprintf(stderr, "refusing position %ld (observed range 0..%ld)\n",
                 pos, POS_MAX);
         return 1;
@@ -720,7 +720,7 @@ static int cmd_move(long delta, int steps)
     int s;
     if (steps < 1) steps = 1;
     if (steps > 50) { fprintf(stderr, "steps capped at 50\n"); return 1; }
-    if (delta == 0 || delta > 5000000L || delta < -5000000L) {
+    if (!(delta != 0 && delta >= -5000000L && delta <= 5000000L)) {
         fprintf(stderr, "per-step delta must be within +/-5000000 "
                         "(given %ld)\n", delta);
         return 1;
@@ -1234,8 +1234,8 @@ static BYTE CROP_SCAN[84], CROP_END[84];
  * point of eight CCD focus brackets at 3807..6230 px/inch (2026-10-12).
  * FlexColor's own crop/preview pairs sit 9000-10000 CCD steps short of
  * that peak on this scanner, and are visibly softer, so crop does not use
- * them. The curve: focus.txt next to ftpoc.exe if present (written by
- * calibrate-focus), else this scanner's fit compiled into libft. */
+ * them. The curve: focus.txt in the current directory if present (written
+ * by calibrate-focus), else this scanner's fit compiled into libft. */
 static ft_lens g_lens;
 
 static void load_lens(void)
@@ -1248,6 +1248,9 @@ static void load_lens(void)
     if (ft_lens_read(&g_lens, f, &e)) {
         fprintf(stderr, "focus.txt: %s; using the built-in curve\n", e.msg);
         g_lens = ft_lens_default;
+    } else {
+        printf("focus.txt: film=%.0f w=%.0f fl=%.0f p=%.4e\n", g_lens.film,
+               g_lens.w, g_lens.fl, g_lens.p);
     }
     fclose(f);
 }
@@ -1271,13 +1274,19 @@ static int crop_scan(const struct crop_req *r)
     double scale, cx;
     int i, rc;
 
-    if (r->ppi < 525 || r->ppi > 6300) {
+    /* every range check is written so that NaN fails it */
+    if (!isfinite(r->ppi) || !isfinite(r->x) || !isfinite(r->y) ||
+        !isfinite(r->w) || !isfinite(r->h)) {
+        fprintf(stderr, "crop: non-finite window\n");
+        return 1;
+    }
+    if (!(r->ppi >= 525 && r->ppi <= 6300)) {
         fprintf(stderr, "crop: ppi 525..6300\n");
         return 1;
     }
     /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
-    if (r->x < 0 || r->w <= 0 || r->x + r->w > 32.0 || r->y < 0 ||
-        r->h <= 0 || r->y + r->h > 231.0) {
+    if (!(r->x >= 0 && r->w > 0 && r->x + r->w <= 32.0 && r->y >= 0 &&
+          r->h > 0 && r->y + r->h <= 231.0)) {
         fprintf(stderr, "crop: window outside the holder area FlexColor "
                         "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
         return 1;
@@ -1285,6 +1294,8 @@ static int crop_scan(const struct crop_req *r)
     /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
      * keeps the optical scale ppi x bin within 6300 */
     bin = ft_bin_for_ppi(r->ppi);
+    if (bin < 0)
+        return 1;
     scale = r->ppi * bin;
     if ((long)(r->w / 25.4 * r->ppi + 0.5) * 6 > 60000) {
         fprintf(stderr, "crop: line too long for one ReadExt\n");
@@ -1304,8 +1315,8 @@ static int crop_scan(const struct crop_req *r)
     /* mm across are measured at the 6000 scale; other scales magnify
      * about the optical axis */
     cx = ft_mm_to_ccd(r->x, scale);
-    if (cx < FT_CCD_FIRST ||
-        cx + r->w / 25.4 * scale > FT_CCD_FIRST + FT_CCD_PIXELS) {
+    if (!(cx >= FT_CCD_FIRST &&
+          cx + r->w / 25.4 * scale <= FT_CCD_FIRST + FT_CCD_PIXELS)) {
         fprintf(stderr, "crop: window runs off the CCD at this scale\n");
         return 1;
     }

@@ -27,7 +27,12 @@ typedef int (*FARPROC)(void);
 typedef unsigned long SIZE_T;
 typedef unsigned char BYTE;
 typedef void *LPSECURITY_ATTRIBUTES;
-typedef void *LPOVERLAPPED;
+typedef struct _OVERLAPPED {
+    ULONG_PTR Internal, InternalHigh;
+    DWORD Offset, OffsetHigh;
+    HANDLE hEvent;
+} OVERLAPPED;
+typedef struct _OVERLAPPED *LPOVERLAPPED;
 typedef unsigned long *PULONG;
 typedef long LONG;
 
@@ -151,11 +156,6 @@ BOOL CloseHandle(HANDLE hObject);
 DWORD GetLastError(void);
 
 /* --- names used by tools/poc/ftpoc.c --- */
-typedef struct _OVERLAPPED {
-    ULONG_PTR Internal, InternalHigh;
-    DWORD Offset, OffsetHigh;
-    HANDLE hEvent;
-} OVERLAPPED;
 #define GENERIC_READ         0x80000000UL
 #define GENERIC_WRITE        0x40000000UL
 #define FILE_SHARE_READ      0x1
