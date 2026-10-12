@@ -46,3 +46,10 @@ flextrace_bufs*.bin
 # private working notes / recon docs (kept local, not published)
 notes/
 docs/
+
+# libft build outputs
+libft/*.o
+libft/libft.a
+libft/test/test_*
+!libft/test/test_*.c
+libft/test/png_dump
