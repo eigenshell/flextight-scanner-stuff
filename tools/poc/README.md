@@ -83,9 +83,12 @@ window through the crop checks before the scanner does anything; a
 refused frame is listed then, skipped, left `done = no`, and makes the
 exit status non-zero (the other frames are still scanned). Each frame
 is scanned slightly wider than its window (tilt + 0.3 mm, clipped to the
-holder and to what the CCD reaches at that ppi) into `frameNN.raw`
-(+ `.cal`, `.faul`, `.txt`); the tight crop is appended to
-`frameNN.raw.txt` (`crop_x/y/w/h` in output pixels of the scan as sent,
+holder and to what the CCD reaches at that ppi) into
+`<jobbase>_frameNN.raw`, where `<jobbase>` is the job path without its
+extension (`neg.job` -> `neg_frame01.raw`, `neg_frame02.raw`, ...), so
+scans of different jobs never overwrite each other (+ `.cal`, `.faul`,
+`.txt`); the tight crop is appended to the matching `.raw.txt`
+(`crop_x/y/w/h` in output pixels of the scan as sent,
 plus `tilt`, `straighten`, `focus_offset`). The job file is rewritten
 after every frame (via `strip.job.tmp`, renamed over it), with finished
 frames marked `done = yes`, so a run stopped by Ctrl+C or a failed scan

@@ -1058,6 +1058,10 @@ static int cmd_scan(const struct preset *p, long y, long keep,
         printf("interrupted: not starting another scan\n");
         return 1;
     }
+    if (strlen(out) + sizeof ".faul" > sizeof meta) {
+        fprintf(stderr, "output name too long: %s\n", out);
+        return 1;
+    }
     if (g_ccd >= 0 || g_lamp >= 0) {
         /* the end descriptor carries these too (bytes 53+) */
         memcpy(xscan, p->scan, 84);
@@ -2249,7 +2253,7 @@ static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
  * (origin and size from <out>.txt), to <out>.txt. */
 static void write_crop(const char *out, const ft_job_frame *fr, long off)
 {
-    char meta[80];
+    char meta[300];
     long xs = meta_long(out, "x"), ys = meta_long(out, "y");
     long pxs = meta_long(out, "px"), ls = meta_long(out, "lines");
     long cx, cy, cw, ch;
@@ -2305,7 +2309,8 @@ static int cmd_scanjob(int argc, char **argv)
 {
     static ft_job j;
     const ft_holder *h;
-    const char *path;
+    const char *path, *dot, *sep;
+    char jobbase[240];                  /* + _frameNN.raw.faul < 260 */
     ft_err e;
     FILE *f;
     char ref[FT_MAX_FRAMES];
@@ -2325,6 +2330,20 @@ static int cmd_scanjob(int argc, char **argv)
             return 2;
         }
     }
+    /* outputs are <jobbase>_frameNN.raw: the job path without its
+     * extension, so scans of different jobs never overwrite each other */
+    dot = strrchr(path, '.');
+    sep = strrchr(path, '/');
+    if (!sep || (strrchr(path, '\\') && strrchr(path, '\\') > sep))
+        sep = strrchr(path, '\\');
+    if (!dot || (sep && dot < sep) || dot == (sep ? sep + 1 : path))
+        dot = path + strlen(path);
+    if ((size_t)(dot - path) + sizeof "_frame00.raw" > sizeof jobbase) {
+        fprintf(stderr, "scan --job: job path too long\n");
+        return 2;
+    }
+    memcpy(jobbase, path, (size_t)(dot - path));
+    jobbase[dot - path] = 0;
     f = fopen(path, "r");
     if (!f) {
         perror(path);
@@ -2374,7 +2393,7 @@ static int cmd_scanjob(int argc, char **argv)
     for (i = 0; i < j.nframes && !g_abort; i++) {
         ft_job_frame *fr = &j.f[i];
         struct crop_req q;
-        char out[64];
+        char out[300];
         long off = j.focus_offset;
         int rc;
 
@@ -2409,7 +2428,7 @@ static int cmd_scanjob(int argc, char **argv)
             }
         }
         job_window(fr, h, off, &q);
-        snprintf(out, sizeof out, "frame%02d.raw", fr->index);
+        snprintf(out, sizeof out, "%s_frame%02d.raw", jobbase, fr->index);
         q.out = out;
         printf("\n=== frame %d: %s, %g ppi, focus offset %ld\n", fr->index,
                type_name(fr->type), fr->ppi, off);
@@ -2711,7 +2730,8 @@ int main(int argc, char **argv)
             "                     check -> strip.job (edit it) + strip.png;\n"
             "                     fb.raw* are scratch focus crops\n"
             "  scan --job strip.job [-h s]  scan the job's included frames\n"
-            "                     (resumable; frameNN.raw + .txt with the tight crop)\n"
+            "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
+            "                     crop, named after the job file)\n"
             "  calibrate-focus <x> <y> <w> [-h s]  fit this scanner's focus curve\n"
             "                     on a textured window (mm) -> focus.txt\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
