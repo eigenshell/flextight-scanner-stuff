@@ -74,5 +74,52 @@ int main(void)
         CHECK(ft_focus_decide(off, &shift) == FT_FOCUS_SHIFTED);
         CHECK(shift == -3033);
     }
+    /* sharpness: a crisp pattern beats a blurred one, flat is zero */
+    {
+        float crisp[64], soft[64], flat[64];
+        int i;
+        for (i = 0; i < 64; i++) {
+            crisp[i] = (i / 4) % 2 ? 0.8f : 0.2f;
+            soft[i] = 0.5f + 0.15f * (float)sin(i * 3.14159 / 4);
+            flat[i] = 0.5f;
+        }
+        CHECK(ft_sharpness(crisp, 16, 4) > ft_sharpness(soft, 16, 4));
+        CHECK_NEAR(ft_sharpness(flat, 16, 4), 0, 1e-12);
+    }
+
+    /* focus file round trip */
+    {
+        ft_lens a = ft_lens_default, b;
+        ft_err e;
+        FILE *f = tmpfile();
+        CHECK(f != NULL);
+        CHECK(ft_lens_write(&a, f) == 0);
+        rewind(f);
+        CHECK(ft_lens_read(&b, f, &e) == 0);
+        CHECK_NEAR(b.film, a.film, 0.05);
+        CHECK_NEAR(b.p, a.p, 1e-9);
+        fclose(f);
+        f = tmpfile();
+        fputs("film = 1\nw = 2\n", f);
+        rewind(f);
+        CHECK(ft_lens_read(&b, f, &e) == -1);   /* fl and p missing */
+        fclose(f);
+    }
+
+    /* lens fit recovers the curve from the eight measured focus peaks */
+    {
+        double M[8] = { 3807, 4000, 4309, 4787, 5384, 5678, 5947, 6230 };
+        long C[8] = { 440254, 429917, 412759, 380637, 335765, 312131,
+                      289987, 265226 };
+        long L[8] = { 911050, 922360, 938639, 959966, 981011, 989872,
+                      997296, 1004246 };
+        ft_lens l = { 1460000.0, 270000.0, 320000.0, 3.5e-4 };
+        double rc, rl;
+        CHECK(ft_lens_fit(M, C, L, 8, &l, &rc, &rl) == 0);
+        CHECK(rc < 240 && rl < 130);
+        CHECK_NEAR(l.film, ft_lens_default.film, 3000);
+        CHECK_NEAR(l.p, ft_lens_default.p, 2e-6);
+        CHECK(ft_lens_fit(M, C, L, 3, &l, &rc, &rl) == -1);
+    }
     return TEST_DONE();
 }

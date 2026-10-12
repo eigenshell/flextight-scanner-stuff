@@ -94,3 +94,152 @@ ft_focus_mode ft_focus_decide(const long off[3], long *shift)
             return FT_FOCUS_PER_FRAME;
     return FT_FOCUS_SHIFTED;
 }
+
+int ft_lens_write(const ft_lens *l, FILE *f)
+{
+    fprintf(f, "# ftpoc focus curve (thin lens, motor steps)\n"
+               "film = %.1f\nw = %.1f\nfl = %.1f\np = %.6e\n",
+            l->film, l->w, l->fl, l->p);
+    return ferror(f) ? -1 : 0;
+}
+
+int ft_lens_read(ft_lens *l, FILE *f, ft_err *e)
+{
+    char line[160];
+    int ln = 0, seen = 0;
+    while (fgets(line, sizeof line, f)) {
+        char key[16];
+        double v;
+        ln++;
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r')
+            continue;
+        if (sscanf(line, " %15[a-z] = %lf", key, &v) != 2)
+            return ft_fail(e, "focus file line %d: expected key = number", ln);
+        if (strcmp(key, "film") == 0)    { l->film = v; seen |= 1; }
+        else if (strcmp(key, "w") == 0)  { l->w = v;    seen |= 2; }
+        else if (strcmp(key, "fl") == 0) { l->fl = v;   seen |= 4; }
+        else if (strcmp(key, "p") == 0)  { l->p = v;    seen |= 8; }
+        else return ft_fail(e, "focus file line %d: unknown key %s", ln, key);
+    }
+    if (seen != 15)
+        return ft_fail(e, "focus file: needs film, w, fl and p");
+    return 0;
+}
+
+/* parameters in comparable units: film, w, fl in Msteps, p x 1e4 */
+static void lens_predict(const double q[4], double M, double *c, double *o)
+{
+    double m = q[3] * 1e-4 * M;
+    double u = q[2] * 1e6 * (1 + 1 / m), v = q[2] * 1e6 * (1 + m);
+    double lens = q[0] * 1e6 - u;
+    *o = lens;
+    *c = lens + q[1] * 1e6 - v;
+}
+
+static double fit_cost(const double q[4], const double *M, const long *C,
+                       const long *L, int n)
+{
+    double s = 0, c, o;
+    int i;
+    for (i = 0; i < n; i++) {
+        lens_predict(q, M[i], &c, &o);
+        s += (c - C[i]) * (c - C[i]) + (o - L[i]) * (o - L[i]);
+    }
+    return s;
+}
+
+/* solve a x = b for 4x4 a (partial pivoting); -1 if singular */
+static int solve4(double a[4][4], double b[4], double x[4])
+{
+    int i, j, k, p;
+    for (i = 0; i < 4; i++) {
+        p = i;
+        for (j = i + 1; j < 4; j++)
+            if (fabs(a[j][i]) > fabs(a[p][i]))
+                p = j;
+        if (fabs(a[p][i]) < 1e-300)
+            return -1;
+        for (k = 0; k < 4; k++) {
+            double t = a[i][k]; a[i][k] = a[p][k]; a[p][k] = t;
+        }
+        { double t = b[i]; b[i] = b[p]; b[p] = t; }
+        for (j = i + 1; j < 4; j++) {
+            double f = a[j][i] / a[i][i];
+            for (k = i; k < 4; k++)
+                a[j][k] -= f * a[i][k];
+            b[j] -= f * b[i];
+        }
+    }
+    for (i = 3; i >= 0; i--) {
+        double s = b[i];
+        for (k = i + 1; k < 4; k++)
+            s -= a[i][k] * x[k];
+        x[i] = s / a[i][i];
+    }
+    return 0;
+}
+
+int ft_lens_fit(const double *M, const long *C, const long *L, int n,
+                ft_lens *l, double *rms_ccd, double *rms_lens)
+{
+    double q[4], lambda = 1e-3, cost;
+    double sc = 0, so = 0, c, o;
+    int it, i, j, k, r;
+    if (n < 4)
+        return -1;
+    q[0] = l->film / 1e6; q[1] = l->w / 1e6; q[2] = l->fl / 1e6;
+    q[3] = l->p * 1e4;
+    cost = fit_cost(q, M, C, L, n);
+    for (it = 0; it < 200; it++) {      /* Levenberg-Marquardt */
+        double JTJ[4][4] = { { 0 } }, JTr[4] = { 0 }, step[4], qn[4], nc;
+        for (i = 0; i < n; i++) {
+            double c0, o0, res[2], J[2][4];
+            lens_predict(q, M[i], &c0, &o0);
+            res[0] = c0 - C[i];
+            res[1] = o0 - L[i];
+            for (k = 0; k < 4; k++) {
+                double qq[4], c1, o1, h = 1e-6;
+                memcpy(qq, q, sizeof qq);
+                qq[k] += h;
+                lens_predict(qq, M[i], &c1, &o1);
+                J[0][k] = (c1 - c0) / h;
+                J[1][k] = (o1 - o0) / h;
+            }
+            for (r = 0; r < 2; r++)
+                for (j = 0; j < 4; j++) {
+                    JTr[j] += J[r][j] * res[r];
+                    for (k = 0; k < 4; k++)
+                        JTJ[j][k] += J[r][j] * J[r][k];
+                }
+        }
+        for (j = 0; j < 4; j++)
+            JTJ[j][j] *= 1 + lambda;
+        if (solve4(JTJ, JTr, step))
+            break;
+        for (k = 0; k < 4; k++)
+            qn[k] = q[k] - step[k];
+        nc = fit_cost(qn, M, C, L, n);
+        if (nc < cost) {
+            int done = cost - nc < 1e-12 * cost;
+            memcpy(q, qn, sizeof q);
+            cost = nc;
+            lambda *= 0.3;
+            if (done)
+                break;
+        } else {
+            lambda *= 10;
+            if (lambda > 1e10)
+                break;
+        }
+    }
+    l->film = q[0] * 1e6; l->w = q[1] * 1e6; l->fl = q[2] * 1e6;
+    l->p = q[3] * 1e-4;
+    for (i = 0; i < n; i++) {
+        lens_predict(q, M[i], &c, &o);
+        sc += (c - C[i]) * (c - C[i]);
+        so += (o - L[i]) * (o - L[i]);
+    }
+    *rms_ccd = sqrt(sc / n);
+    *rms_lens = sqrt(so / n);
+    return 0;
+}
