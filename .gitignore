@@ -27,3 +27,18 @@ traces/
 
 # generated darktable styles (tools/xml2dtstyle.py)
 styles/
+
+# never commit vendor-owned or personal data (public repo):
+# firmware, vendor binaries, profiles from an install, scans of your film
+MICROCOD*
+*.dll
+*.exe
+*.fff
+*.icm
+*.icc
+*.raw
+*.raw.cal
+*.raw.faul
+*.raw.txt
+*.jsonl
+flextrace_bufs*.bin
