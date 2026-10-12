@@ -19,9 +19,11 @@
  *
  * SAFETY: every descriptor sent is one FlexColor sent, byte for byte. The
  * only fields ever patched are the resolution (BE u32 @10, goto/move on the
- * idle template; the firmware moves CCD + optics for it) and the start line
- * (BE u32 @18, scan -y; FlexColor's own 3f frames differ only there), both
- * clamped to ranges FlexColor used. Park is FlexColor's shutdown descriptor.
+ * idle template) and the start line (BE u32 @18, scan -y; FlexColor's own
+ * 3f frames differ only there), both clamped to ranges FlexColor used, plus
+ * the window and lens/CCD fields of synthesized crops (crop) and the -p/-l
+ * overrides, each within the values FlexColor sent. Park is FlexColor's
+ * shutdown descriptor.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -41,7 +43,7 @@
 static HANDLE g_dev = INVALID_HANDLE_VALUE;
 static HANDLE g_evt = NULL;
 
-/* Current resolution field (ppi x 10000 = zoom setting), as far as this process has
+/* Current resolution field (ppi x 10000), as far as this process has
  * commanded it. Seeded by park(), updated by move/step. Display only. */
 static long g_pos = -1;
 static int  g_pos_known = 0;
@@ -177,8 +179,9 @@ static const BYTE CDB_UPTRAIL[10]= { 0x3b, 1, 0, 0x30, 1, 0, 0x0e, 0, 0, 0 };
  * earlier hand copy silently dropped bytes and C zero-padded the [84]
  * array, shifting every field. The typedefs fail the build unless each
  * template is exactly 84 bytes. Regenerate from the captures, never edit. */
-/* session 5 (pid 412) seq 73: preview scan @5250000, 3996-B blocks; exposures @56/@60
- * are per-session (session 4 seq 292 differed only in bytes 58-59, 62-63) */
+/* session 5 (pid 412) seq 73: preview scan @5250000, 3996-B blocks; the CCD/lens
+ * positions @56/@60 are per-session (session 4 seq 292 differed only in bytes
+ * 58-59, 62-63) */
 static const BYTE SCAN_WIN[] = {
     0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x4c,0x00,0x00,0x00,0x50,
     0x1b,0xd0,0x00,0x00,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,
@@ -292,10 +295,12 @@ typedef char END_3F_is_84[sizeof END_3F == 84 ? 1 : -1];
 /* Descriptor geometry, all big-endian u32 (session 6: 2000/1000 ppi crops
  * and a 3f strip, checked against the TIFFs FlexColor saved):
  *  @10 resolution x 10000 (5250000 = 525 ppi preview, 63000000 = 6300 ppi
- *      max). The firmware moves CCD + optics (zoom/focus) and sets the drum
- *      speed for it from its flashed motor table (FP...txt CCD/OPTIC/DRUM).
+ *      max): line pitch along the strip.
  *  @14 first pixel across the film     @22 pixels per line (block = px*6)
  *  @18 first line along the strip      @26 number of lines
+ *  @56 CCD position, @60 lens position, @64 drum position (motor steps,
+ *      the CCD/OPTIC/DRUM columns of the scanner's FP<serial>.txt). The host
+ *      picks them; they set magnification and focus, see F_CCD.
  * The six 3f frames differ ONLY in @18; each end descriptor is its scan
  * descriptor with bytes 8-52 zeroed. Never command outside the observed
  * range. */
@@ -340,6 +345,82 @@ static const struct preset {
 static const long F3_Y[6] = { 50, 967, 1910, 2852, 3795, 4737 };
 /* holder length in lines at 525 ppi (preview @26); scales with resolution */
 #define HOLDER_LINES_525 4795L
+
+/* Lens and CCD positions (BE u32, motor steps; 2026-10-12 sweep): moving
+ * either one changes magnification and focus, and with them the white
+ * level (fewer CCD pixels per mm of film collect more light). Neither is an
+ * exposure: the same pair gives the same white level at 1000-6300 ppi,
+ * whatever the line rate. FlexColor sends one pair per optical scale,
+ * ppi x bin = CCD pixels per inch of film:
+ *   6300  254935 / 1004246   preview (session 4: 254123 / 1004988)
+ *   6000  280943 /  997296   1000 and 2000 ppi crops (square pixels)
+ *   3780  438790 /  911050   3f
+ *   3600  440113 /  895204   idle and exit descriptors
+ * and 1020000 / 1021000 in session 4. The two seem to share a rail: the
+ * CCD stays below the lens (see parse_pos). */
+#define F_CCD      56
+#define F_OPTIC    60
+#define CCD_MIN    254123L
+#define CCD_MAX    1020000L
+#define OPTIC_MIN  895204L
+#define OPTIC_MAX  1021000L
+static long g_ccd = -1, g_optic = -1;     /* -1: keep the template's */
+
+static int pos_ok(long a, long b)
+{
+    if (a < CCD_MIN || a > CCD_MAX || b < OPTIC_MIN || b > OPTIC_MAX) {
+        fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent: CCD "
+                        "%ld..%ld, lens %ld..%ld\n", a, b, CCD_MIN, CCD_MAX,
+                OPTIC_MIN, OPTIC_MAX);
+        return 0;
+    }
+    /* With the CCD past the lens (1020000 / 997296) the calibration lines
+     * flickered, the white batch never came and the carriage did not move
+     * to the start line. FlexColor always keeps CCD < lens. */
+    if (a >= b) {
+        fprintf(stderr, "CCD/lens %ld/%ld: the CCD must stay below the "
+                        "lens\n", a, b);
+        return 0;
+    }
+    return 1;
+}
+
+static int parse_pos(const char *v)
+{
+    long a, b;
+    if (sscanf(v, "%ld,%ld", &a, &b) != 2) {
+        fprintf(stderr, "-p wants <ccd>,<lens>\n");
+        return 1;
+    }
+    if (!pos_ok(a, b))
+        return 1;
+    g_ccd = a;
+    g_optic = b;
+    return 0;
+}
+
+/* Lamp level (u8 @76), the only light lever (2026-10-12): FlexColor's
+ * maintenance Monitor sends 0..255 here as its lamp spinner moves; its
+ * scan descriptors send 0, its idle/exit descriptors 1. 0 keeps the
+ * current level, any other value sets it and it sticks across scans.
+ * White level vs lamp (1000 ppi crop optics, R): 1 -> 47 %, 32 -> 67 %,
+ * 64 -> 84 %, 80 -> 92 %, 96..255 -> 100 % (flat), no hysteresis; dimmer
+ * is slightly redder. Nothing raises the light above 96; integration
+ * time is not a descriptor field. */
+#define F_LAMP     76
+static int g_lamp = -1;                   /* -1: keep the template's */
+
+static int parse_lamp(const char *v)
+{
+    char *end;
+    long l = strtol(v, &end, 10);
+    if (*end || l < 0 || l > 255) {
+        fprintf(stderr, "-l wants a lamp level 0..255\n");
+        return 1;
+    }
+    g_lamp = (int)l;
+    return 0;
+}
 
 static long desc_pos(const BYTE *d)
 {
@@ -924,6 +1005,8 @@ static int wait_move(DWORD min_ms, DWORD timeout_ms, const char *what)
 static int cmd_scan(const struct preset *p, long y, long keep,
                     DWORD hold_ms, const char *out)
 {
+    static BYTE xscan[84], xend[84];
+    static struct preset xp;
     BYTE desc[84];
     FILE *f, *fc;
     long got, px, lines, res, maxl;
@@ -932,6 +1015,23 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     DWORD start;
     char meta[260];
 
+    if (g_ccd >= 0 || g_lamp >= 0) {
+        /* the end descriptor carries these too (bytes 53+) */
+        memcpy(xscan, p->scan, 84);
+        if (g_ccd >= 0) {
+            put_be32(xscan, F_CCD, g_ccd);
+            put_be32(xscan, F_OPTIC, g_optic);
+        }
+        if (g_lamp >= 0)
+            xscan[F_LAMP] = (BYTE)g_lamp;
+        memcpy(xend, xscan, 84);
+        memset(xend + 8, 0, 53 - 8);
+        xp.name = p->name;
+        xp.what = p->what;
+        xp.scan = xscan;
+        xp.end = xend;
+        p = &xp;
+    }
     memcpy(desc, p->scan, 84);
     res = be32(desc, POS_OFF);
     px = be32(desc, F_PX);
@@ -950,8 +1050,10 @@ static int cmd_scan(const struct preset *p, long y, long keep,
         keep = lines;
     blklen = (WORD)(px * 6);
     printf("%s: %s\n  %ld ppi, %ld px from %ld x %ld lines from %ld, "
-           "%u-byte lines; keeping %ld\n", p->name, p->what, res / 10000, px,
-           be32(desc, F_X), lines, be32(desc, F_Y), blklen, keep);
+           "%u-byte lines; keeping %ld; CCD/lens %ld/%ld, lamp %u\n",
+           p->name, p->what, res / 10000, px, be32(desc, F_X), lines,
+           be32(desc, F_Y), blklen, keep, be32(desc, F_CCD),
+           be32(desc, F_OPTIC), desc[F_LAMP]);
 
     printf("page burst\n");
     read_pages(0);
@@ -1052,9 +1154,11 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     f = fopen(meta, "w");
     if (f) {
         fprintf(f, "preset=%s\nppi=%ld\npx=%ld\nx=%ld\nlines=%ld\ny=%ld\n"
-                   "bin=%u\nblklen=%u\nkept=%ld\ncal_lines=250\n",
+                   "bin=%u\nblklen=%u\nkept=%ld\ncal_lines=250\n"
+                   "ccd=%ld\noptic=%ld\nlamp=%u\n",
                 p->name, res / 10000, px, be32(desc, F_X), lines,
-                be32(desc, F_Y), desc[F_BIN], blklen, got);
+                be32(desc, F_Y), desc[F_BIN], blklen, got,
+                be32(desc, F_CCD), be32(desc, F_OPTIC), desc[F_LAMP]);
         fclose(f);
     }
     return got == keep ? 0 : 1;
@@ -1119,11 +1223,49 @@ static int cmd_upload(const char *file)
  * only the decoded fields replaced (session 6):
  *   @10 ppi x 10000, @14/@18 origin and @22/@26 size in output pixels at
  *   that ppi (square pixels; origin fixed on the holder: both captured
- *   crops centre the frame at 16.8 mm across), @51 bin = 6300 / ppi
- *   rounded down (preview 12, 1000 -> 6, 2000 -> 3), @55 = 12 / bin.
- * Exposures @56/@60 stay the crop values (identical at 1000 and 2000 ppi).
+ *   crops centre the frame at 16.8 mm across), @51 bin = the largest divisor
+ *   of 12 with ppi x bin <= 6300 (preview 12, 1000 -> 6, 2000 -> 3,
+ *   1200 -> 4), @55 = 12 / bin.
+ * CCD/lens @56/@60: the in-focus pair for the optical scale ppi x bin
+ * (optics_for), or -p.
  * mm in, clamped to the area the captured scans covered. */
 static BYTE CROP_SCAN[84], CROP_END[84];
+
+/* CCD pixel on the optical axis: the image scales about it when the
+ * lens/CCD pair changes (fit of FlexColor's four pairs, 2026-10-12) */
+#define CCD_AXIS   4118
+#define CCD_PIXELS 7992     /* preview: 666 px x bin 12 from pixel 144 */
+
+/* Focus: thin lens on one rail, in motor steps (fit 2026-10-12). Film at
+ * FOCUS_FILM, lens at L, CCD at C: object distance u = FOCUS_FILM - L,
+ * image distance v = L - C + FOCUS_W, 1/u + 1/v = 1/FOCUS_FL, and the
+ * magnification v/u = FOCUS_P * scale (scale = CCD px per inch of film,
+ * so FOCUS_P = CCD pixel pitch in inches: 8.8 um). Fitted to the
+ * sharpest point of eight CCD focus brackets at 3807..6230 px/inch
+ * (sharpness = rms log-gradient across the film, magnification by image
+ * correlation); rms residual 223 CCD / 114 lens steps, while sharpness
+ * drops ~10 % at 1700 steps. FlexColor's own crop/preview pairs sit
+ * 9000-10000 CCD steps short of that peak on this scanner, and are
+ * visibly softer, so crop does not use them. */
+#define FOCUS_FILM 1468601.0
+#define FOCUS_W     268105.0
+#define FOCUS_FL    317836.0
+#define FOCUS_P     3.4799e-4
+#define SCALE_MIN   3800.0
+#define SCALE_MAX   6300.0
+
+static int optics_for(double scale, long *ccd, long *optic)
+{
+    double m = FOCUS_P * scale;
+    double u = FOCUS_FL * (1 + 1 / m), v = FOCUS_FL * (1 + m);
+    double lens = FOCUS_FILM - u;
+
+    if (scale < SCALE_MIN || scale > SCALE_MAX)
+        return 1;
+    *optic = (long)(lens + 0.5);
+    *ccd = (long)(lens + FOCUS_W - v + 0.5);
+    return 0;
+}
 
 static int cmd_crop(int argc, char **argv)
 {
@@ -1137,7 +1279,7 @@ static int cmd_crop(int argc, char **argv)
 
     if (argc < 5) {
         fprintf(stderr, "crop <ppi> <x_mm> <y_mm> <w_mm> <h_mm> "
-                        "[-n lines] [-h s] [-o file]\n");
+                        "[-n lines] [-h s] [-p ccd,lens] [-l lamp] [-o file]\n");
         return 2;
     }
     ppi = atof(argv[0]); x = atof(argv[1]); y = atof(argv[2]);
@@ -1146,6 +1288,8 @@ static int cmd_crop(int argc, char **argv)
         if (strcmp(argv[i], "-n") == 0) keep = atol(argv[i + 1]);
         else if (strcmp(argv[i], "-h") == 0) hold = (DWORD)atol(argv[i + 1]) * 1000;
         else if (strcmp(argv[i], "-o") == 0) out = argv[i + 1];
+        else if (strcmp(argv[i], "-p") == 0) { if (parse_pos(argv[i + 1])) return 2; }
+        else if (strcmp(argv[i], "-l") == 0) { if (parse_lamp(argv[i + 1])) return 2; }
         else { fprintf(stderr, "crop: unknown option %s\n", argv[i]); return 2; }
     }
     if (ppi < 525 || ppi > 6300) {
@@ -1158,24 +1302,48 @@ static int cmd_crop(int argc, char **argv)
                         "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
         return 1;
     }
-    bin = (long)(6300.0 / ppi + 1e-9);
-    if (bin < 1) bin = 1;
-    if (bin > 12) bin = 12;
-    if (12 % bin) {
-        fprintf(stderr, "crop: bin %ld does not divide 12 (byte 55 = 12/bin "
-                        "in every capture); pick another ppi\n", bin);
-        return 1;
+    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
+     * keeps the optical scale ppi x bin within 6300 */
+    {
+        static const int bins[] = { 12, 6, 4, 3, 2, 1 };
+        for (i = 0; bins[i] > 1 && ppi * bins[i] > 6300 + 1e-6; i++)
+            ;
+        bin = bins[i];
     }
     if ((long)(w / 25.4 * ppi + 0.5) * 6 > 60000) {
         fprintf(stderr, "crop: line too long for one ReadExt\n");
         return 1;
     }
+    if (g_ccd < 0) {
+        if (optics_for(ppi * bin, &g_ccd, &g_optic)) {
+            fprintf(stderr, "crop: %g ppi x bin %ld = optical scale %.0f; "
+                            "focus is known for %.0f..%.0f (or give -p)\n",
+                    ppi, bin, ppi * bin, SCALE_MIN, SCALE_MAX);
+            return 1;
+        }
+        if (!pos_ok(g_ccd, g_optic))
+            return 1;
+    }
     memcpy(CROP_SCAN, SCAN_2000, 84);
     put_be32(CROP_SCAN, POS_OFF, (long)(ppi * 10000 + 0.5));
-    put_be32(CROP_SCAN, F_X, (long)(x / 25.4 * ppi + 0.5));
+    {
+        /* mm across are measured at the 6000 scale (CCD pixel 144 + px *
+         * 25.4 / 6000); other scales magnify about the optical axis */
+        double scale = ppi * bin;
+        double ccd = CCD_AXIS + (x / 25.4 * 6000.0 + 144 - CCD_AXIS) *
+                     scale / 6000.0;
+        if (ccd < 144 ||
+            ccd + w / 25.4 * scale > 144 + CCD_PIXELS) {
+            fprintf(stderr, "crop: window runs off the CCD at this scale\n");
+            return 1;
+        }
+        put_be32(CROP_SCAN, F_X, (long)((ccd - 144) / bin + 0.5));
+    }
     put_be32(CROP_SCAN, F_Y, (long)(y / 25.4 * ppi + 0.5));
     put_be32(CROP_SCAN, F_PX, (long)(w / 25.4 * ppi + 0.5));
     put_be32(CROP_SCAN, F_LINES, (long)(h / 25.4 * ppi + 0.5));
+    put_be32(CROP_SCAN, F_CCD, g_ccd);
+    put_be32(CROP_SCAN, F_OPTIC, g_optic);
     CROP_SCAN[F_BIN] = (BYTE)bin;
     CROP_SCAN[55] = (BYTE)(12 / bin);
     memcpy(CROP_END, CROP_SCAN, 84);
@@ -1205,6 +1373,8 @@ static int scan_args(int argc, char **argv)
             case 'f': frame = atoi(v); break;
             case 'h': hold = (DWORD)atol(v) * 1000; break;
             case 'o': out = v; break;
+            case 'p': if (parse_pos(v)) return 2; break;
+            case 'l': if (parse_lamp(v)) return 2; break;
             default: fprintf(stderr, "scan: unknown option %s\n", a); return 2;
             }
         } else {
@@ -1250,8 +1420,8 @@ int main(int argc, char **argv)
             "  poll [n]           n ScannerReady polls (default 10)\n"
             "  win                one SetWindow exchange (idle template), hexdump\n"
             "  park               rest position (FlexColor's shutdown descriptor)\n"
-            "  goto <ppi*10000>   CCD + optics to that resolution's zoom, 0..63000000\n"
-            "  move <+/-d> [n]    n relative zoom steps of d (max 5000000, 50 steps)\n"
+            "  goto <ppi*10000>   idle template with @10 set, 0..63000000\n"
+            "  move <+/-d> [n]    n relative @10 steps of d (max 5000000, 50 steps)\n"
             "  stop               end-of-scan descriptor x2 (FlexColor end/Stop)\n"
             "  pages              read the standard ReadBuffer pages\n"
             "  grab <n> [len]     n ReadExt blocks (default len 3996) -> grab.raw\n"
@@ -1261,8 +1431,11 @@ int main(int argc, char **argv)
             "                     -y start line along the strip (holder-clamped)\n"
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
             "                     -h hold before calibration, s (default 10; 35 cold)\n"
+            "                     -p <ccd>,<lens> positions @56/@60 (clamped to\n"
+            "                        FlexColor's values, CCD below lens)\n"
+            "                     -l <0..255> lamp level @76 (scans send 0)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
-            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-o file]\n"
+            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"

@@ -20,9 +20,9 @@ build.bat            REM cl or i686-w64-mingw32-gcc, see header
 ftpoc inquiry        identity; "SCSI Loader" means run `upload` first
 ftpoc poll [n]       ScannerReady polls (00 00 idle, 08 00 motor, 04 00 busy)
 ftpoc win            one SetWindow exchange with the idle template, hexdump
-ftpoc park           rest: FlexColor's shutdown descriptor (3600 ppi zoom)
-ftpoc goto <ppi*1e4> CCD + optics to that resolution's zoom, 0..63000000
-ftpoc move <+/-d> [n]  n relative zoom steps, max 5000000/step, 50 steps
+ftpoc park           rest: FlexColor's shutdown descriptor
+ftpoc goto <ppi*1e4> idle template with the resolution field set, 0..63000000
+ftpoc move <+/-d> [n]  n relative resolution steps, max 5000000/step, 50 steps
 ftpoc stop           end-of-scan descriptor x2 (FlexColor's end/Stop)
 ftpoc pages          the standard ReadBuffer pages (Faul Pixs map etc.)
 ftpoc grab <n> [len] n ReadExt blocks (default 3996 B) -> grab.raw
@@ -37,11 +37,20 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                          e.g. `scan 1000 -y 4600` = one frame earlier
                      -f  3f frame 1-6; 0 = whole strip -> frame1..6.raw
                      -h  hold before calibration (default 10 s; 35 cold)
+                     -p  <ccd>,<lens> positions (@56/@60): they set
+                         magnification and focus; there is no exposure field
+                     -l  <0..255> lamp level (@76): 0 keeps the current
+                         level, 1..95 dims, 96..255 = full; it sticks
                      writes <file> (lines), <file>.cal (250 calibration
                      lines), <file>.faul (Faul Pixs table), <file>.txt
-ftpoc crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-o file]
-                     SYNTHESIZED window, mm from the holder origin, any
-                     ppi 525..6300 whose bin (6300/ppi) divides 12.
+ftpoc crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]
+           [-o file]
+                     SYNTHESIZED window, mm from the holder origin, at
+                     525, 634..3150 or 3800..6300 ppi. bin = the largest
+                     divisor of 12 with ppi x bin <= 6300; that optical
+                     scale sets the lens/CCD pair from a thin-lens focus
+                     model fitted to this scanner (sharper than
+                     FlexColor's own pairs here).
                      e.g. café frame centre at 3150:
                        crop 3150 13.0 130.4 7.6 11.4
                      6300 sliver across the frame:
@@ -63,11 +72,14 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
 
 ## Safety model
 
-- Every descriptor is one FlexColor sent, byte for byte. Only two fields
-  are ever patched: the resolution (BE u32 @10, `goto`/`move` on the idle
-  template — the firmware moves CCD and optics for it from its flashed
-  motor table) and the start line (BE u32 @18, `scan -y` — FlexColor's
-  six 3f frames differ only in that field).
+- Every descriptor is one FlexColor sent, byte for byte, except for
+  these fields: the resolution (BE u32 @10, `goto`/`move` on the idle
+  template), the start line (BE u32 @18, `scan -y` — FlexColor's six 3f
+  frames differ only in that field), the window of a synthesized `crop`,
+  the CCD/lens positions (BE u32 @56/@60, `-p`; `crop` computes them
+  from its focus model) and the lamp level (@76, `-l`). Each stays
+  within the values FlexColor sent, and the CCD always stays below the
+  lens.
 - Resolution is limited to FlexColor's range (0..63000000 = 6300 ppi); the
   start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching

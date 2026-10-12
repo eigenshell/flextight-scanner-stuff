@@ -24,7 +24,7 @@ No Hasselblad/Imacon software, firmware, film profiles, ICC profiles or
 disassembly is distributed here. Where the scanner needs vendor data —
 most importantly the `MICROCOD.3XX` firmware the host uploads after a cold
 power-up — the tools read it from a FlexColor installation you obtained
-yourself. Test fixtures are synthetic.
+yourself.[^firmware] Test fixtures are synthetic.
 
 The protocol was documented by observing the traffic between FlexColor
 and a scanner we own, and by limited analysis of the software for the
@@ -41,3 +41,6 @@ software this project interoperates with.
 Use at your own risk: this talks to expensive, irreplaceable hardware.
 A malformed scan descriptor can leave the scanner busy until it is
 power-cycled.
+
+[^firmware]: An eventual goal is an independent reimplementation of the
+    scanner firmware, so that no vendor code is needed at all.

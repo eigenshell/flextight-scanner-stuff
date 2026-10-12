@@ -3,8 +3,8 @@
 """Turn an ftpoc scan (<file>, <file>.cal, <file>.txt) into an image.
 
 Each line the scanner sends is one CCD readout across the film: px pixels,
-RGB interleaved, u16 LE, linear (dark ~300, open beam ~2400-6600 depending
-on the exposure in the descriptor). The
+RGB interleaved, u16 LE, linear, 14-bit (dark ~300, open beam ~3400-6400
+set by the lens/CCD positions, not by resolution or line rate). The
 scanner does NOT correct the CCD; it hands the host two reference batches
 before every scan and FlexColor (CCalibrateLineHandler) corrects on the PC:
 
