@@ -21,6 +21,15 @@ typedef struct {
     int blob;                              /* base-like circle */
     double blob_y, blob_x, blob_r;
     unsigned seed;
+    /* realistic degradations (all off after synth_default) */
+    float base[3];                         /* film base transmittance */
+    double blur_mm;                        /* separable box blur radius */
+    double grain;                          /* multiplicative Gaussian, fraction */
+    double noise;                          /* additive Gaussian sigma */
+    double drift;                          /* base gain 1 + drift*sin(2 pi y / len) */
+    int nspeck;                            /* open-beam specks on the film */
+    double speck_r;                        /* their radius, mm */
+    int open_outside;                      /* holder outside the film is open */
 } synth_spec;
 
 void synth_default(synth_spec *s, ft_film film);
