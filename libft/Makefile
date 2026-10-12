@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 CC ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic
-SRC = ft.c
+SRC = ft.c ft_geom.c ft_holder.c
 OBJ = $(SRC:.c=.o)
-TESTS = test/test_ft
+TESTS = test/test_ft test/test_geom
 
 libft.a: $(OBJ)
 	$(AR) rcs $@ $(OBJ)

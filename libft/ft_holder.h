@@ -1,0 +1,18 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef FT_HOLDER_H
+#define FT_HOLDER_H
+
+/* Holder geometry, all mm. scan_* are the limits crop windows must stay
+ * in; grid_* is the fixed frame grid used when detection finds no edge
+ * (FlexColor's 3f autoframe: first frame 50 lines, pitch 943 lines,
+ * 992-line frames at 630 ppi). */
+typedef struct {
+    const char *name;
+    double scan_len_mm, scan_width_mm;
+    double grid_first_mm, grid_pitch_mm, grid_frame_mm;
+    int grid_frames;
+} ft_holder;
+
+const ft_holder *ft_holder_find(const char *name);
+
+#endif
