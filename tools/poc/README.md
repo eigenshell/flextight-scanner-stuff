@@ -40,6 +40,13 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                      -h  hold before calibration (default 10 s; 35 cold)
                      writes <file> (lines), <file>.cal (250 calibration
                      lines), <file>.faul (Faul Pixs table), <file>.txt
+ftpoc crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-o file]
+                     SYNTHESIZED window, mm from the holder origin, any
+                     ppi 525..6300 whose bin (6300/ppi) divides 12.
+                     e.g. café frame centre at 3150:
+                       crop 3150 13.0 130.4 7.6 11.4
+                     6300 sliver across the frame:
+                       crop 6300 4.8 135.65 24 0.9
 ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only
 ftpoc scanstop       0xdb (kHwiScanStop) — device rejects it (CHECK COND.)
 ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
@@ -97,5 +104,6 @@ and 50 white (open beam) lines, and the host corrects
 `CCalibrateLineHandler`. Without it, pixel gain differences show as fine
 lines along the strip. Pixels in the device's Faul Pixs table flicker
 line to line and are interpolated instead (output pixel j covers CCD
-pixels `(x + j) × bin + 144 …`, `bin` = descriptor byte 51). `--negative`
+pixels `(x + j) × bin + 144 …`, `bin` = descriptor byte 51). The
+tri-linear CCD's R and B rows are realigned to G by 12 / bin lines. `--negative`
 is a rough inversion, not FlexColor's film profiles.

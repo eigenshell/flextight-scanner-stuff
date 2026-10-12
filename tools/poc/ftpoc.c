@@ -1114,6 +1114,77 @@ static int cmd_upload(const char *file)
 
 /* ------------------------------------------------------------------- driver */
 
+/* Synthesized crop at any resolution: the 2000 ppi crop descriptor with
+ * only the decoded fields replaced (session 6):
+ *   @10 ppi x 10000, @14/@18 origin and @22/@26 size in output pixels at
+ *   that ppi (square pixels; origin fixed on the holder: both captured
+ *   crops centre the frame at 16.8 mm across), @51 bin = 6300 / ppi
+ *   rounded down (preview 12, 1000 -> 6, 2000 -> 3), @55 = 12 / bin.
+ * Exposures @56/@60 stay the crop values (identical at 1000 and 2000 ppi).
+ * mm in, clamped to the area the captured scans covered. */
+static BYTE CROP_SCAN[84], CROP_END[84];
+
+static int cmd_crop(int argc, char **argv)
+{
+    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
+                                        "synthesized crop" };
+    double ppi, x, y, w, h;
+    long bin, keep = 0;
+    DWORD hold = 10000;
+    const char *out = "crop.raw";
+    int i;
+
+    if (argc < 5) {
+        fprintf(stderr, "crop <ppi> <x_mm> <y_mm> <w_mm> <h_mm> "
+                        "[-n lines] [-h s] [-o file]\n");
+        return 2;
+    }
+    ppi = atof(argv[0]); x = atof(argv[1]); y = atof(argv[2]);
+    w = atof(argv[3]); h = atof(argv[4]);
+    for (i = 5; i + 1 < argc; i += 2) {
+        if (strcmp(argv[i], "-n") == 0) keep = atol(argv[i + 1]);
+        else if (strcmp(argv[i], "-h") == 0) hold = (DWORD)atol(argv[i + 1]) * 1000;
+        else if (strcmp(argv[i], "-o") == 0) out = argv[i + 1];
+        else { fprintf(stderr, "crop: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (ppi < 525 || ppi > 6300) {
+        fprintf(stderr, "crop: ppi 525..6300\n");
+        return 1;
+    }
+    /* captured coverage: across 0.1-32.3 mm (preview), along 0-232 mm */
+    if (x < 0 || w <= 0 || x + w > 32.0 || y < 0 || h <= 0 || y + h > 231.0) {
+        fprintf(stderr, "crop: window outside the holder area FlexColor "
+                        "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
+        return 1;
+    }
+    bin = (long)(6300.0 / ppi + 1e-9);
+    if (bin < 1) bin = 1;
+    if (bin > 12) bin = 12;
+    if (12 % bin) {
+        fprintf(stderr, "crop: bin %ld does not divide 12 (byte 55 = 12/bin "
+                        "in every capture); pick another ppi\n", bin);
+        return 1;
+    }
+    if ((long)(w / 25.4 * ppi + 0.5) * 6 > 60000) {
+        fprintf(stderr, "crop: line too long for one ReadExt\n");
+        return 1;
+    }
+    memcpy(CROP_SCAN, SCAN_2000, 84);
+    put_be32(CROP_SCAN, POS_OFF, (long)(ppi * 10000 + 0.5));
+    put_be32(CROP_SCAN, F_X, (long)(x / 25.4 * ppi + 0.5));
+    put_be32(CROP_SCAN, F_Y, (long)(y / 25.4 * ppi + 0.5));
+    put_be32(CROP_SCAN, F_PX, (long)(w / 25.4 * ppi + 0.5));
+    put_be32(CROP_SCAN, F_LINES, (long)(h / 25.4 * ppi + 0.5));
+    CROP_SCAN[F_BIN] = (BYTE)bin;
+    CROP_SCAN[55] = (BYTE)(12 / bin);
+    memcpy(CROP_END, CROP_SCAN, 84);
+    memset(CROP_END + 8, 0, 53 - 8);
+    printf("crop descriptor:");
+    for (i = 0; i < 84; i++) printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
+    printf("\n");
+    return cmd_scan(&crop, -1, keep, hold, out);
+}
+
 static int scan_args(int argc, char **argv)
 {
     const struct preset *p = &PRESETS[0];
@@ -1190,6 +1261,9 @@ int main(int argc, char **argv)
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
             "                     -h hold before calibration, s (default 10; 35 cold)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
+            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-o file]\n"
+            "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
+            "                     -> crop.raw (+ .cal .faul .txt)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped; Ctrl+C aborts.\n");
@@ -1230,6 +1304,8 @@ int main(int argc, char **argv)
         } else if (strcmp(cmd, "grab") == 0 && argc > 2) {
             rc = cmd_grab(atol(argv[2]),
                           argc > 3 ? (WORD)atoi(argv[3]) : 3996, "grab.raw");
+        } else if (strcmp(cmd, "crop") == 0) {
+            rc = cmd_crop(argc - 2, argv + 2);
         } else if (strcmp(cmd, "scan") == 0) {
             rc = scan_args(argc - 2, argv + 2);
         } else if (strcmp(cmd, "upload") == 0 && argc > 2) {

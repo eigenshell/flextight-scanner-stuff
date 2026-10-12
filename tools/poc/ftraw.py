@@ -7,8 +7,9 @@ on the exposure in the descriptor). The
 scanner does NOT correct the CCD; it hands the host two reference batches
 before every scan and FlexColor (CCalibrateLineHandler) corrects on the PC:
 
-  .cal lines   0-199  dark reference  (lamp path blocked, ~300 counts)
-  .cal lines 200-249  white reference (open beam, per-pixel lamp/lens/PRNU)
+  .cal batch 1 (200 lines)  dark reference  (lamp path blocked, ~300 counts)
+  .cal batch 2 (50 lines)   white reference (open beam, per-pixel lamp/lens/PRNU)
+  (the switch is timed in the device; lines are classified by level)
 
   T = (raw - dark) / (white - dark)      per CCD pixel and channel
 
@@ -21,6 +22,11 @@ scanner lists them in its "Faul Pixs" table (<file>.faul): per channel,
 (x + j) * bin + 144 ... + bin - 1 (bin = descriptor byte 51); flagged
 pixels are interpolated from their neighbours. Entries with a negative
 value instead of +999 are not understood yet and are left alone.
+
+The CCD is tri-linear: its R, G and B rows see a film point k lines
+apart, k = 12 / bin (= descriptor byte 55; measured 1, 2, 2, 4, 6 lines at
+525, 630, 1000, 2000, 3150 ppi). R leads G by k lines, B trails by k; the
+host realigns them and drops k lines at each end.
 
 usage: ftraw.py scan.raw [-o out.png] [--negative] [--raw]
 """
@@ -100,10 +106,36 @@ def fix_faul(t, faul, x, binning):
     return fixed
 
 
+def split_cal(cal):
+    """Dark and white reference lines, classified by level: the switch is
+    timed in the device, so at slow line rates (3150 ppi: 188 dark + 12
+    white in the first batch) it does not fall on line 200. Lines within
+    10 % of either extreme count; transition lines are dropped."""
+    c = cal.astype(np.float64)
+    lm = c.mean(axis=(1, 2))
+    lo, hi = lm.min(), lm.max()
+    band = 0.1 * (hi - lo)
+    dark, white = c[lm < lo + band], c[lm > hi - band]
+    if len(dark) < 10 or len(white) < 10:
+        sys.exit(f"calibration: {len(dark)} dark / {len(white)} white lines")
+    return dark.mean(axis=0), white.mean(axis=0)
+
+
+def align_rgb(t, k):
+    """Realign the tri-linear rows: R[l + k] and B[l - k] see G[l]."""
+    if k <= 0 or t.shape[0] <= 2 * k:
+        return t
+    n = t.shape[0] - 2 * k
+    out = np.empty((n,) + t.shape[1:], t.dtype)
+    out[..., 0] = t[2 * k:, :, 0]
+    out[..., 1] = t[k:k + n, :, 1]
+    out[..., 2] = t[:n, :, 2]
+    return out
+
+
 def flatfield(raw, cal):
     """Transmittance 0..1 per pixel; per-column dark/white from .cal."""
-    dark = cal[:DARK_LINES].astype(np.float64).mean(axis=0)
-    white = cal[DARK_LINES:].astype(np.float64).mean(axis=0)
+    dark, white = split_cal(cal)
     span = np.maximum(white - dark, 1.0)
     return np.clip((raw.astype(np.float64) - dark) / span, 0.0, 1.0)
 
@@ -145,6 +177,7 @@ def main():
                          int(meta["x"]), binning)
         if fixed:
             print("Faul Pixs interpolated (channel, pixel):", fixed)
+        t = align_rgb(t, 12 // binning)
     # scanner lines run along the strip: put them on the x axis, the way
     # FlexColor saves crops (2000 ppi crop: 2807 lines wide x 1818 px high)
     t = t.transpose(1, 0, 2)
