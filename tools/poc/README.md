@@ -61,6 +61,50 @@ ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
                      does NOT clear the scanner's scan state
 ```
 
+### Smart scanning
+
+```
+ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no] [-h s] [-o strip]
+ftpoc scan --job strip.job
+ftpoc calibrate-focus <x_mm> <y_mm> <w_mm>
+```
+
+`frames` scans a preview, finds every frame (full, half, panorama,
+partial; blank frames dropped), checks focus at the first, middle and
+last frame, and writes `strip.job` plus `strip.png` (numbered boxes; dim yellow
+= excluded, orange = low confidence). Edit `strip.job` — `include`,
+`ppi`, `sprockets`, `straighten`, `window` per frame — then run
+`scan --job`. The job is validated before anything is scanned. Each
+frame is scanned slightly wider than its window (tilt + 0.3 mm, clipped
+to the holder and to what the CCD reaches at that ppi) into
+`frameNN.raw` (+ `.cal`, `.faul`, `.txt`); the tight crop is appended to
+`frameNN.raw.txt` (`crop_x/y/w/h`, output pixels, plus `tilt`,
+`straighten`, `focus_offset`). A frame the crop checks refuse is
+reported and left `done = no`; the others are still scanned and the run
+exits non-zero. A run can be stopped with Ctrl+C (the end handshake is
+still sent, no new scan starts) and resumed: finished frames are marked
+`done = yes`. A failed scan also saves the job and stops.
+
+Focus: the curve comes from `focus.txt` in the current directory
+(written there by `calibrate-focus` on a textured window) or the
+built-in curve for the development scanner. If the three check points
+agree within ±1200 CCD steps of their mean the curve is shifted by the
+mean; otherwise every frame gets its own focus bracket before it is
+scanned, centred on its `focus_offset` (the strip's when 0); a frame
+with no usable peak is scanned at that centre, with a warning. Focus
+crops go to the scratch files `fb.raw`, `fb.raw.cal`, `fb.raw.faul`
+and `fb.raw.txt`, overwritten by each crop.
+
+`calibrate-focus` brackets the CCD (9 crops, 1500 steps) at eight
+optical scales (3800..6300) on a 1 mm band at `y` across `x..x+w`
+(clipped to the CCD's reach), skips scales without a usable peak, and
+fits the thin-lens curve. It writes `focus.txt` only with at least six
+usable scales, an rms residual of at most 600 CCD steps, and a curve
+that keeps every measured scale inside FlexColor's positions. Each
+bracket stays within ±6000 steps of the current curve, so a scanner far
+off the built-in curve may need a few runs (each run brackets around
+the curve in `focus.txt`).
+
 ## Device selection
 
 The scanner answers on all 8 LUNs of its SCSI target, so Windows creates
