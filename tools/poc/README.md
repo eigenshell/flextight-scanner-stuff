@@ -88,8 +88,8 @@ Job file keys (`key = value`, `#` starts a comment anywhere):
 holder        holder geometry name (24x217)
 film          negative | slide
 focus         shifted (one offset for the strip) | per-frame (bracket each frame)
-focus_offset  CCD steps added to the focus curve (shifted mode; the
-              per-frame brackets' default centre)
+focus_offset  steps added to both CCD and lens on the focus curve
+              (tandem; shifted mode; the per-frame brackets' default centre)
 [frame N]
 type          full | half | panorama | partial (informational)
 include       yes | no: scan this frame or not
@@ -136,15 +136,22 @@ Other commands are stopped by Ctrl+C at once, as before.
 
 Focus: the curve comes from `focus.txt` in the current directory
 (written there by `calibrate-focus` on a textured window) or the
-built-in curve for the development scanner. If the three check points
-agree within ±1200 CCD steps of their mean the curve is shifted by the
-mean; otherwise every frame gets its own focus bracket before it is
+built-in curve for the development scanner. Focus offsets move the CCD
+and the lens together (tandem, as the manual's manual focus does): the
+gap between them, and so the magnification, stays, and only the focus
+plane on the film side moves. Moving the CCD alone also changes the
+magnification (~1 % for 9000 steps at 6300 ppi) and is ~5x less
+sensitive. The check points and the per-frame brackets step 500 and stay
+within ±4000 of the curve. If the three check points agree within ±300
+steps of their mean the curve is shifted by the mean; otherwise every
+frame gets its own focus bracket before it is
 scanned, centred on its `focus_offset` (the strip's when 0); a frame
 with no usable peak is scanned at that centre, with a warning. Focus
 crops go to the scratch files `fb.raw`, `fb.raw.cal`, `fb.raw.faul`
 and `fb.raw.txt`, overwritten by each crop.
 
-`calibrate-focus` brackets the CCD, lens on the current curve, at eight
+`calibrate-focus` (which finds the curve itself, so it is the one place
+that moves the CCD alone) brackets the CCD, lens on the current curve, at eight
 optical scales (3800..6300) on a 1 mm band at `y` across `x..x+w`
 (clipped to the CCD's reach): the first usable scale gets a coarse
 bracket (5 crops, 3000 steps, moving up to ±12000 if the peak is at an

@@ -63,20 +63,31 @@ int main(void)
         CHECK(ft_peak(x, y, 2, &pk) == -1);
     }
 
-    /* 3-point decision: all within the margin of their mean -> shift */
+    /* 3-point decision (tandem offsets): all within the margin of their
+     * mean -> shift */
     {
-        long off[3] = { 2000, 2600, 3100 };
+        long off[3] = { 400, 500, 620 };
         CHECK(ft_focus_decide(off, &shift) == FT_FOCUS_SHIFTED);
-        CHECK(shift == 2567);
+        CHECK(shift == 507);
     }
     {
-        long off[3] = { 0, 500, 4500 };          /* bowed strip */
+        long off[3] = { 0, 100, 900 };           /* bowed strip */
         CHECK(ft_focus_decide(off, &shift) == FT_FOCUS_PER_FRAME);
     }
     {
-        long off[3] = { -3000, -3200, -2900 };
+        long off[3] = { -600, -640, -580 };
         CHECK(ft_focus_decide(off, &shift) == FT_FOCUS_SHIFTED);
-        CHECK(shift == -3033);
+        CHECK(shift == -607);
+    }
+    /* tandem focus: CCD and lens move together, the gap stays */
+    {
+        long c0, o0, c1, o1;
+        CHECK(ft_optics_for(&ft_lens_default, 6300, &c0, &o0) == 0);
+        CHECK(ft_optics_focus(&ft_lens_default, 6300, -2068, &c1, &o1) == 0);
+        CHECK(c1 == c0 - 2068 && o1 == o0 - 2068);
+        CHECK(ft_optics_focus(&ft_lens_default, 100, 0, &c1, &o1) == -1);
+        CHECK(FT_FOCUS_MARGIN == 300 && FT_BRACKET_MAX == 4000);
+        CHECK(FT_CAL_MARGIN == 1200 && FT_CAL_BRACKET_MAX == 12000);
     }
     /* sharpness: a crisp pattern beats a blurred one, flat is zero */
     {
@@ -151,7 +162,7 @@ int main(void)
 
     /* decision exactly at the margin */
     {
-        long a[3] = { 0, 0, 3600 }, b[3] = { 0, 1200, 2400 };
+        long a[3] = { 0, 0, 900 }, b[3] = { 0, 300, 600 };
         CHECK(ft_focus_decide(a, &shift) == FT_FOCUS_PER_FRAME);
         CHECK(ft_focus_decide(b, &shift) == FT_FOCUS_SHIFTED);
     }
