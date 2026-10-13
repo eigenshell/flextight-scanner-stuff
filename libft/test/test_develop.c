@@ -104,7 +104,6 @@ int main(void)
         /* PNG and DNG through the writer table */
         CHECK(ft_writer_find("dng") != NULL);
         CHECK(ft_writer_find("png") != NULL);
-        CHECK(ft_writer_find("fff") != NULL);
         CHECK(ft_writer_find("tiff") == NULL);
         CHECK(ft_writer_find("png")->write("test_develop.png", &im, &e) == 0);
         im.ppi = 2000;

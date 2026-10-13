@@ -58,9 +58,8 @@ FlexColor software — first on Windows, then on Linux.
   dark/white correction, the scanner's Faul Pixs table plus your own
   defect map (`-d`), RGB realignment and the job's crop, then one file
   per selected format (`-f dng,png`). DNG is linear 16-bit LinearRaw
-  for darktable, RawTherapee or Lightroom; `fff` is FlexColor's 3F
-  (read by LibRaw; FlexColor itself not yet tested). Formats are
-  entries in `libft/ft_out.c`.
+  for darktable, RawTherapee or Lightroom. Formats are entries in
+  `libft/ft_out.c`; FlexColor 3F (.fff) output is planned there.
 - `src/flextight/` — the Python package for the Linux (SG_IO) stack.
 - `tools/spti_logger/` — the DeviceIoControl tracer used to observe the
   protocol.
