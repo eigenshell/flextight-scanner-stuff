@@ -74,8 +74,8 @@ int main(void)
 
     /* fast: ~2.4 min (1000) and ~5.4 min (1500) for the whole holder,
      * against 7.2 / 21.7 min measured at the low-magnification optics */
-    CHECK_NEAR(ft_scan_seconds(1000, 6, len) - FT_SCAN_OVERHEAD, 145, 2);
-    CHECK_NEAR(ft_scan_seconds(1500, 4, len) - FT_SCAN_OVERHEAD, 326, 2);
+    CHECK_NEAR(ft_line_seconds(ft_preview_lines(h), h->bin), 145, 2);
+    CHECK_NEAR(ft_line_seconds(ft_preview_lines(n), n->bin), 326, 2);
 
     /* box average: 4 x 5 -> 2 x 2, last line and column dropped */
     {
