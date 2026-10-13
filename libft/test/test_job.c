@@ -104,6 +104,12 @@ int main(void)
         f = text("[strip]\nholder = 24x217\nfilm_base = 0.2 0.5 0.9 1\n");
         CHECK(ft_job_read(&b, f, &e) == -1);       /* four values */
         fclose(f);
+        f = text("[strip]\nholder = 24x217\nfilm_base = 0.2 0.5 0.9   # comment\n");
+        CHECK(ft_job_read(&b, f, &e) == 0 && b.has_film_base);
+        fclose(f);
+        f = text("[strip]\nholder = 24x217\nfilm_base = -0.1 0.5 0.9\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);       /* negative D */
+        fclose(f);
     }
     /* a job without bin keys (older files) scans with the fastest bin */
     f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\n"

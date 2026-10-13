@@ -1097,9 +1097,12 @@ void ft_layout_to_job(const ft_layout *L, const ft_holder *h, ft_film film,
     j->film = film;
     j->focus = FT_FOCUS_SHIFTED;
     /* the render's film base (negative) or black (slide), as density */
-    for (i = 0; i < 3; i++)
-        j->film_base[i] = -log10(L->base[i] > FT_T_FLOOR ? L->base[i]
-                                                         : FT_T_FLOOR);
+    for (i = 0; i < 3; i++) {
+        double d = -log10(L->base[i] > FT_T_FLOOR ? L->base[i] : FT_T_FLOOR);
+        /* a channel may exceed T = 1, and -log10(FT_T_FLOOR) is a hair
+         * above 4.5; the job reader accepts [0, 4.5] only */
+        j->film_base[i] = d < 0 ? 0 : d > 4.5 ? 4.5 : d;
+    }
     j->has_film_base = 1;
     for (i = 0; i < L->nframes && i < FT_MAX_FRAMES; i++) {
         const ft_det_frame *d = &L->f[i];
