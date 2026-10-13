@@ -27,25 +27,33 @@
 
 /* Block means of transmittance for the BLOCK x BLOCK block at x, y: dense
  * highlights are a few DN above dark and one pixel's density is mostly
- * noise there. Floored (also NaN) so logs are finite. */
-static void block_t(const ft_image *m, int x, int y, double t[3])
+ * noise there. Floored (also NaN) so logs are finite. Returns 1 if any
+ * pixel of the block is not film (T <= dense in all three channels, or
+ * T > clear in all three): a block that straddles the edge of a holder or
+ * a hole is a mix, not the highlight or the base. */
+static int block_t(const ft_image *m, int x, int y, double dense,
+                   double clear, double t[3])
 {
-    int i, j, c;
+    int i, j, c, bad = 0;
     t[0] = t[1] = t[2] = 0;
     for (j = 0; j < BLOCK; j++)
         for (i = 0; i < BLOCK; i++) {
             const float *p = m->rgb + 3 * ((size_t)(y + j) * m->w + x + i);
             for (c = 0; c < 3; c++)
                 t[c] += p[c];
+            if ((p[0] <= dense && p[1] <= dense && p[2] <= dense) ||
+                (p[0] > clear && p[1] > clear && p[2] > clear))
+                bad = 1;
         }
     for (c = 0; c < 3; c++) {
         t[c] /= BLOCK * BLOCK;
         if (!(t[c] >= FT_T_FLOOR))
             t[c] = FT_T_FLOOR;
     }
+    return bad;
 }
 
-/* not film: T <= dense in all three channels, or T > clear in all three */
+/* the block's mean is not film either (same test on the means) */
 static int skipped(const double t[3], double dense, double clear)
 {
     return (t[0] <= dense && t[1] <= dense && t[2] <= dense) ||
@@ -97,20 +105,20 @@ static unsigned long histogram(const ft_image *const *im, int n, int ch,
             for (x = x0; x + (sel >= 0 ? 3 : 1) * BLOCK <= x1; x += step) {
                 double t[3], d;
                 if (sel >= 0) {
-                    block_t(m, x, y, t);
-                    if (skipped(t, dense, clear) ||
+                    if (block_t(m, x, y, dense, clear, t) ||
+                        skipped(t, dense, clear) ||
                         density(t, sel, w) < min)
                         continue;
                     /* neighbour in other scene content: skip it. The
                      * margin is ~5x the block noise, so this hardly
                      * selects on noise */
-                    block_t(m, x + 2 * BLOCK, y, t);
-                    if (skipped(t, dense, clear) ||
+                    if (block_t(m, x + 2 * BLOCK, y, dense, clear, t) ||
+                        skipped(t, dense, clear) ||
                         density(t, sel, w) < min - SAME_D)
                         continue;
                 } else {
-                    block_t(m, x, y, t);
-                    if (skipped(t, dense, clear))
+                    if (block_t(m, x, y, dense, clear, t) ||
+                        skipped(t, dense, clear))
                         continue;
                 }
                 d = (density(t, ch, w) - H_D0) / H_STEP;

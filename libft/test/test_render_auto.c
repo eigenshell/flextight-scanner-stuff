@@ -159,7 +159,7 @@ int main(void)
         CHECK_NEAR(d[0], 3.0, 0.002);
         /* opaque metal (T at the floor) must not become the slide black */
         for (i = 0; i < H; i++)
-            memset(im.rgb + 3 * (i * W + 19), 0, 40 * 3 * sizeof(float));
+            memset(im.rgb + 3 * (i * W + 21), 0, 40 * 3 * sizeof(float));
         CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_SLIDE, d, &e) == 0);
         CHECK_NEAR(d[0], 3.0, 0.002);
         ft_recipe_default(&r, FT_RENDER_SLIDE);
@@ -188,6 +188,31 @@ int main(void)
         two[0] = two[1] = &im;
         CHECK(ft_render_auto(two, 2, &a, &e) == 0);
         CHECK_NEAR(a.range[1], r.range[1], 0.005);
+    }
+
+    /* holder metal (T = 0) from x = 102 on, off the 4-px block grid (x0 = 4,
+     * so the block at 100 is half metal, half film): that block is half as
+     * transmissive, 0.3 D denser than the uniform film (1.0 D over base),
+     * 2 % of the blocks. It must not be taken for the highlight. */
+    {
+        ft_image mt;
+        const ft_image *mp[1];
+        ft_recipe t;
+        int x, y;
+        ft_image_init(&mt);
+        CHECK(ft_image_alloc(&mt, 200, 100, &e) == 0);
+        for (y = 0; y < 100; y++)
+            for (x = 0; x < 200; x++)
+                for (c = 0; c < 3; c++)
+                    mt.rgb[3 * (y * 200 + x) + c] = x >= 102 ? 0 :
+                        (float)pow(10, -(BASE[c] + 1.0));
+        mp[0] = &mt;
+        ft_recipe_default(&t, FT_RENDER_NEG);
+        ft_recipe_set_base(&t, BASE);
+        CHECK(ft_render_auto(mp, 1, &t, &e) == 0);
+        for (c = 0; c < 3; c++)
+            CHECK_NEAR(t.range[c], 1.0, 0.01);
+        ft_image_free(&mt);
     }
 
     /* a thin highlight with no usable right neighbour (1.0 D lighter): the
@@ -256,7 +281,7 @@ int main(void)
     {
         int x, y;
         for (y = 0; y < H; y++)
-            for (x = 0; x < 59; x++)
+            for (x = 0; x < 62; x++)
                 for (c = 0; c < 3; c++)
                     im.rgb[3 * (y * W + x) + c] = 0;
         ft_recipe_default(&r, FT_RENDER_NEG);
@@ -268,7 +293,8 @@ int main(void)
     }
 
     /* a clear band (T = 1.02: a sprocket hole, the open beam) is not the
-     * thinnest film. The band spans whole 4-px blocks (x0 = 19 here). */
+     * thinnest film. The band starts and ends off the 4-px block grid
+     * (x0 = 19). */
     negative(&im);
     {
         float d[3];
@@ -277,7 +303,7 @@ int main(void)
             for (x = 0; x < W / 50 + 8; x++)
                 for (c = 0; c < 3; c++)
                     im.rgb[3 * (y * W + x) + c] = (float)pow(10, -BASE[c]);
-            for (x = 803; x < 859; x++)
+            for (x = 805; x < 862; x++)
                 for (c = 0; c < 3; c++)
                     im.rgb[3 * (y * W + x) + c] = 1.02f;
         }
