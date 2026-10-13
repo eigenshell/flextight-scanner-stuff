@@ -38,9 +38,13 @@ double ft_dmax_est(double light)
     return d < FT_DMAX_CEIL ? d : FT_DMAX_CEIL;
 }
 
+double ft_line_seconds(double lines, int bin)
+{
+    return lines * (FT_CCD_PIXELS / (double)bin) / FT_OUT_PX_RATE;
+}
+
 double ft_scan_seconds(double ppi, int bin, double len_mm)
 {
-    double lines = len_mm / 25.4 * ppi;
-    return FT_SCAN_OVERHEAD + lines * (FT_CCD_PIXELS / (double)bin) /
-                                  FT_OUT_PX_RATE;
+    return FT_SCAN_FIXED +
+           ft_line_seconds(len_mm / 25.4 * ppi + FT_CAL_LINES, bin);
 }

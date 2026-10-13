@@ -38,19 +38,18 @@ int main(void)
     CHECK_NEAR(ft_dmax_est(ft_light_rel(&ft_lens_default, 2000)), 3.55, 0.01);
     CHECK_NEAR(ft_dmax_est(100), FT_DMAX_CEIL, 1e-12);
 
-    /* time: the measured line rates (21.1 l/s at bin 2, 10.5 at bin 1,
-     * 127 at bin 12) over the hires/native/standard previews */
-    CHECK_NEAR(ft_scan_seconds(1000, 2, 9133 / 1000.0 * 25.4) -
-               FT_SCAN_OVERHEAD, 433.5, 5);
-    CHECK_NEAR(ft_scan_seconds(1500, 1, 13700 / 1500.0 * 25.4) -
-               FT_SCAN_OVERHEAD, 1300.7, 15);
-    CHECK_NEAR(ft_scan_seconds(525, 12, 4795 / 525.0 * 25.4) -
-               FT_SCAN_OVERHEAD, 37.9, 1);
-    /* a 36 mm frame at 2000 ppi: bin 3 ~1.5 min, bin 1 ~4.6 min */
-    CHECK_NEAR(ft_scan_seconds(2000, 3, 36), 15 + 2834.6 * 2664 / 84000.0,
-               0.5);
-    CHECK(ft_scan_seconds(2000, 1, 36) > 3 * (ft_scan_seconds(2000, 3, 36) -
-                                              FT_SCAN_OVERHEAD));
+    /* time: the measured line floods (2026-10-13) */
+    CHECK_NEAR(ft_line_seconds(9133, 2), 433.5, 5);     /* 1000 ppi bin 2 */
+    CHECK_NEAR(ft_line_seconds(13700, 1), 1300.7, 15);  /* 1500 ppi bin 1 */
+    CHECK_NEAR(ft_line_seconds(9133, 6), 144.4, 2);     /* 1000 ppi bin 6 */
+    CHECK_NEAR(ft_line_seconds(1409, 1), 134.0, 2);     /* 2000 bin 1 crop */
+    CHECK_NEAR(ft_line_seconds(4795, 12), 37.9, 1);     /* standard */
+    CHECK_NEAR(ft_line_seconds(FT_CAL_LINES, 1), 24.2, 1);  /* cal, bin 1 */
+    CHECK_NEAR(ft_line_seconds(FT_CAL_LINES, 3), 7.8, 0.5); /* cal, bin 3 */
+    /* a whole scan: fixed + calibration + lines */
+    CHECK_NEAR(ft_scan_seconds(2000, 3, 36),
+               FT_SCAN_FIXED + (2834.6 + 250) * 2664 / 84000.0, 0.5);
+    CHECK(ft_scan_seconds(2000, 1, 36) > 2.5 * ft_scan_seconds(2000, 3, 36));
 
     return TEST_DONE();
 }
