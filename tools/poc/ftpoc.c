@@ -506,7 +506,7 @@ static const char *poll_name(unsigned v)
     case 0x0400: return "busy";
     case 0x1060: return "DATA READY";
     case 0x9299: return "monitor-live";
-    case 0x0800: return "motor op";
+    case 0x0800: return "pending (7639)";
     case 0x0500: return "move ack";
     case 0x4894: return "settling";
     case 0xbb12: return "position done";
@@ -826,7 +826,11 @@ static int read_pages(int verbose)
     return 0;
 }
 
-/* Poll until idle (0000), printing every status; 1 after 10 s. */
+#define MAINT_SETTLE_MS 3000 /* bus silence after a maintenance write */
+
+/* Poll until idle (0000), printing every status; 1 after 10 s. Poll 0800
+ * = flag 7639 "3b/24 command pending" (the df reply is 08 00 while it is
+ * set), not a motor state. */
 static int maint_wait_idle(void)
 {
     DWORD start = GetTickCount();
@@ -1004,8 +1008,18 @@ static int cmd_maint(int argc, char **argv)
     printf("\n");
     r = srb_exec(cdb, 10, SRB_DIR_OUT, buf, (DWORD)len, TIMEOUT_MS);
     printf("send: %s\n", r < 0 ? srb_errstr(r) : "ok (check with peek)");
-    if (maint_wait_idle()) return 1;
-    return r < 0 ? 1 : 0;
+    if (r < 0) return 1;
+    /* The completed 3b sets "pending" (7639, poll 0800) and the main loop
+     * runs it only while the last CDB opcode (8f42) is still 3b: any
+     * command sent before that (a poll) overwrites 8f42, the packet is never
+     * run and 7639 stays set until the next scan. So stay off the bus for
+     * a while first. */
+    Sleep(MAINT_SETTLE_MS);
+    if (maint_wait_idle()) {
+        printf("still pending: the write was probably NOT executed\n");
+        return 1;
+    }
+    return 0;
 }
 
 /* Save the device's Faul Pixs table (e0 @ 0x400, 318 B; ASCII, per
