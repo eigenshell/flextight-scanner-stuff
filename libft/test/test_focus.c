@@ -47,6 +47,11 @@ int main(void)
     CHECK(!ft_positions_ok(200000, 998540));    /* below FlexColor's range */
     CHECK(ft_positions_ok(240000, 1005789));    /* extended CCD floor */
     CHECK(!ft_positions_ok(239999, 1005789));
+    /* carrier gap: lens - CCD >= 150000 while scanning (FP table >= 160231) */
+    CHECK(FT_GAP_BOTTOM == 1000 && FT_GAP_MIN == 150000);
+    CHECK(ft_positions_ok(850000, 1000000));    /* gap 150000 */
+    CHECK(!ft_positions_ok(850001, 1000000));   /* gap 149999 */
+    CHECK(!ft_positions_ok(1020000, 1021000));  /* maintenance bottom, gap 1000 */
 
     /* parabola peak: the 4800-scale bracket measured on hardware */
     {

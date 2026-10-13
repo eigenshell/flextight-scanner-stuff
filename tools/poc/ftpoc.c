@@ -374,14 +374,15 @@ static long g_ccd = -1, g_optic = -1;     /* -1: keep the template's */
 
 /* With the CCD past the lens (1020000 / 997296) the calibration lines
  * flickered, the white batch never came and the carriage did not move to
- * the start line. FlexColor always keeps CCD < lens. */
+ * the start line. Scans keep the lens >= FT_GAP_MIN steps below the CCD
+ * (see libft/ft_focus.h). */
 static int pos_ok(long a, long b)
 {
     if (ft_positions_ok(a, b))
         return 1;
     fprintf(stderr, "CCD/lens %ld/%ld outside the safe range (CCD "
-                    "%ld..%ld, lens %ld..%ld, CCD below lens)\n", a, b,
-            FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX);
+                    "%ld..%ld, lens %ld..%ld, lens - CCD >= %ld)\n", a, b,
+            FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX, FT_GAP_MIN);
     return 0;
 }
 
@@ -2751,7 +2752,7 @@ int main(int argc, char **argv)
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
             "                     -h hold before calibration, 0..120 s (default 10; 35 cold)\n"
             "                     -p <ccd>,<lens> positions @56/@60 (clamped to\n"
-            "                        FlexColor's values, CCD below lens)\n"
+            "                        FlexColor's values, lens - CCD >= 150000)\n"
             "                     -l <0..255> lamp level @76 (scans send 0)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
             "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]\n"

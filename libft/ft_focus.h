@@ -36,6 +36,15 @@ extern const ft_lens ft_lens_default;
 #define FT_CCD_MAX    1020000L
 #define FT_OPTIC_MIN  895204L
 #define FT_OPTIC_MAX  1021000L
+/* Carrier gap (lens - CCD, steps). Collisions depend on the gap alone:
+ * both counters share one scale. FlexColor's maintenance "bottom" parks
+ * them at 1020000 / 1021000 (gap 1000, the smallest proven safe; it sets
+ * FT_CCD_MAX/FT_OPTIC_MAX); a crossed pair (1020000 / 997296, gap -22704)
+ * lost the white batch and the carriage never moved. The scanner's own
+ * focus table (FP<serial>.txt) never goes below a 160231 gap, so scans
+ * keep FT_GAP_MIN (user, 2026-10-13). */
+#define FT_GAP_BOTTOM 1000L
+#define FT_GAP_MIN    150000L
 
 int ft_bin_for_ppi(double ppi);          /* -1 if ppi > 6300 */
 int ft_ppi_supported(double ppi);        /* 1 = crop can scan it in focus */
