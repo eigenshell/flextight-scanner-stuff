@@ -20,4 +20,8 @@ typedef enum { FT_FOCUS_SHIFTED, FT_FOCUS_PER_FRAME } ft_focus_mode;
 
 #define FT_MAX_FRAMES 64
 
+/* Transmittance floor, 10^-4.5 (density 4.5): just below the ~3.6 per-read
+ * Dmax, so log10 of a noisy dense pixel stays finite */
+#define FT_T_FLOOR 3.16227766e-5
+
 #endif
