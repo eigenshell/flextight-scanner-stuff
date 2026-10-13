@@ -35,8 +35,9 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                      synthesized whole-holder previews (same window as
                      preview, optics from the focus curve, more light):
                        hires    1000 ppi, optics 2000, bin 2 (~3.5x light)
-                       native   1500 ppi, optics 1500, bin 1 (~4.4x light;
-                                every CCD pixel, ~1903 px x 13700 lines)
+                       native   1500 ppi, optics 1500, bin 1 (3.9x light
+                                measured; every CCD pixel, 1903 px x 13700
+                                lines)
                        they take only -n, -h, -l and -o
                      -n  stop after n lines (FlexColor's Stop: END x2)
                      -y  start line along the strip (holder-clamped);
@@ -94,17 +95,19 @@ warns per frame and writes it anyway.
 | mode | ppi | optics / bin | light per sample | time (strip) |
 |---|---|---|---|---|
 | standard | 525 | 6300 / 12 (FlexColor's) | 1x | ~40 s |
-| hires | 1000 | 2000 / 2 | ~3.5x | ~2.5 min |
-| native | 1500 | 1500 / 1 | ~4.4x | ~5 min |
+| hires | 1000 | 2000 / 2 | ~3.5x | ~7 min |
+| native | 1500 | 1500 / 1 | 3.9x | ~22 min |
 
 The stock firmware does not average a bin: it keeps one CCD pixel in
-`bin`. A lower magnification puts ~1/(1+m)^2 more light on each sample
-for the same pixel count, so hires/native are cleaner (per-read Dmax
-~3.5-3.6 vs ~3.0) and, at bin 1, alias-free. `strip.raw` keeps the
+`bin`. A lower magnification puts ~1/(1+m)^2 more light on each sample,
+so hires/native are cleaner and, at bin 1, alias-free. Measured on
+native (2026-10-13): R white 12865 above dark (no clipping), per-read
+Dmax R 3.56 / G 3.40 / B 3.43 vs ~3.0 / 2.8 / 2.8 at 6300 optics. The
+line rate depends on bin, not on the window width (~10 lines/s at bin 1,
+~21 at bin 2 while scanning), hence the times. `strip.raw` keeps the
 full-resolution preview (render it with `ftraw.py`); detection and
-`strip.png` use a copy box-averaged to 500 ppi. Native puts the clear
-base near the top of the ADC (R white ~15000 of ~15860 predicted):
-`frames` warns when the white reference nears clipping.
+`strip.png` use a copy box-averaged to 500 ppi. `frames` warns when
+the white reference nears clipping (~15860).
 
 Job file keys (`key = value`, `#` starts a comment anywhere):
 
