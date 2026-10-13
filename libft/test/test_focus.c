@@ -23,14 +23,16 @@ int main(void)
     CHECK(ft_bin_for_ppi(6300) == 1);
     CHECK(ft_bin_for_ppi(6301) == -1);
 
-    /* supported: 525, 634..3150, 3800..6300 */
+    /* supported: 525..6300 (every bin's scale is >= 3150 >= FT_SCALE_MIN) */
+    CHECK(FT_SCALE_MIN == 1500.0);
     CHECK(ft_ppi_supported(525));
-    CHECK(!ft_ppi_supported(600));
+    CHECK(ft_ppi_supported(600));
     CHECK(ft_ppi_supported(634));
     CHECK(ft_ppi_supported(3150));
-    CHECK(!ft_ppi_supported(3500));
+    CHECK(ft_ppi_supported(3500));
     CHECK(ft_ppi_supported(3800));
     CHECK(!ft_ppi_supported(500));
+    CHECK(!ft_ppi_supported(6301));
 
     /* thin-lens optics, this scanner's curve (values from the 2026-10-12 fit) */
     CHECK(ft_optics_for(&ft_lens_default, 3807, &c, &o) == 0);
@@ -39,7 +41,17 @@ int main(void)
     CHECK(c == 285187 && o == 998540);
     CHECK(ft_optics_for(&ft_lens_default, 6300, &c, &o) == 0);
     CHECK(c == 259254 && o == 1005789);
-    CHECK(ft_optics_for(&ft_lens_default, 3700, &c, &o) == -1);
+    /* low scales (previews), checked against the scanner's FP table */
+    CHECK(ft_optics_for(&ft_lens_default, 1500, &c, &o) == 0);
+    CHECK(c == 326230 && o == 541866);
+    CHECK(ft_positions_ok(c, o));
+    CHECK(ft_optics_for(&ft_lens_default, 2000, &c, &o) == 0);
+    CHECK(c == 423152 && o == 694091);
+    CHECK(ft_positions_ok(c, o));
+    CHECK(ft_optics_for(&ft_lens_default, 1499, &c, &o) == -1);
+    CHECK(FT_OPTIC_MIN == 530000);
+    CHECK(ft_positions_ok(317523, 530820));     /* FP entry 6, m 0.51 */
+    CHECK(!ft_positions_ok(317523, 529999));
     CHECK(ft_optics_for(&ft_lens_default, 6400, &c, &o) == -1);
 
     CHECK(ft_positions_ok(285187, 998540));

@@ -32,6 +32,12 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
                        2000     2000 ppi crop, 1818 px x 2807 lines
                        1000     1000 ppi crop, 1142 px x 1490 lines
                        3f       630 ppi frame, 655 px x 992 lines
+                     synthesized whole-holder previews (same window as
+                     preview, optics from the focus curve, more light):
+                       hires    1000 ppi, optics 2000, bin 2 (~3.5x light)
+                       native   1500 ppi, optics 1500, bin 1 (~4.4x light;
+                                every CCD pixel, ~1903 px x 13700 lines)
+                       they take only -n, -h, -l and -o
                      -n  stop after n lines (FlexColor's Stop: END x2)
                      -y  start line along the strip (holder-clamped);
                          e.g. `scan 1000 -y 4600` = one frame earlier
@@ -47,7 +53,7 @@ ftpoc scan [preset] [-n lines] [-y line] [-f frame] [-h s] [-o file]
 ftpoc crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]
            [-o file]
                      SYNTHESIZED window, mm from the holder origin, at
-                     525, 634..3150 or 3800..6300 ppi. bin = the largest
+                     525..6300 ppi. bin = the largest
                      divisor of 12 with ppi x bin <= 6300; that optical
                      scale sets the lens/CCD pair from a thin-lens focus
                      model fitted to this scanner (sharper than
@@ -65,7 +71,8 @@ ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
 ### Smart scanning
 
 ```
-ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no] [-h s] [-o strip]
+ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no]
+             [--preview standard|hires|native] [-h s] [-o strip]
 ftpoc scan --job strip.job [-h s]
 ftpoc calibrate-focus <x_mm> <y_mm> <w_mm> [-h s]
 ```
@@ -81,6 +88,24 @@ excluded, orange = low confidence). Edit `strip.job` — `include`,
 across and ~232 mm along); if the job would still be refused, `frames`
 warns per frame and writes it anyway.
 
+`--preview` picks the preview (`scan` takes the same names, except that
+`standard` is `scan preview`):
+
+| mode | ppi | optics / bin | light per sample | time (strip) |
+|---|---|---|---|---|
+| standard | 525 | 6300 / 12 (FlexColor's) | 1x | ~40 s |
+| hires | 1000 | 2000 / 2 | ~3.5x | ~2.5 min |
+| native | 1500 | 1500 / 1 | ~4.4x | ~5 min |
+
+The stock firmware does not average a bin: it keeps one CCD pixel in
+`bin`. A lower magnification puts ~1/(1+m)^2 more light on each sample
+for the same pixel count, so hires/native are cleaner (per-read Dmax
+~3.5-3.6 vs ~3.0) and, at bin 1, alias-free. `strip.raw` keeps the
+full-resolution preview (render it with `ftraw.py`); detection and
+`strip.png` use a copy box-averaged to 500 ppi. Native puts the clear
+base near the top of the ADC (R white ~15000 of ~15860 predicted):
+`frames` warns when the white reference nears clipping.
+
 Job file keys (`key = value`, `#` starts a comment anywhere):
 
 ```
@@ -93,7 +118,7 @@ focus_offset  steps added to both CCD and lens on the focus curve
 [frame N]
 type          full | half | panorama | partial (informational)
 include       yes | no: scan this frame or not
-ppi           scan resolution: 525, 634..3150 or 3800..6300
+ppi           scan resolution: 525..6300
 window        y0 x0 length width, mm from the holder origin (what is scanned)
 tilt          strip tilt in degrees (widens the scan window; recorded)
 sprockets     yes | no: set by `frames --sprockets`, whose window then

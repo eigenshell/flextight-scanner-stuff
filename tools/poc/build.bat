@@ -7,7 +7,7 @@ REM LIBFT: path to the repo's libft directory (default ..\..\libft).
 if not defined LIBFT set LIBFT=..\..\libft
 where cl >nul 2>nul
 if %errorlevel%==0 (
-    cl /O2 /I%LIBFT% ftpoc.c %LIBFT%\ft.c %LIBFT%\ft_geom.c %LIBFT%\ft_holder.c %LIBFT%\ft_focus.c %LIBFT%\ft_calib.c %LIBFT%\ft_job.c %LIBFT%\ft_png.c %LIBFT%\ft_detect.c
+    cl /O2 /I%LIBFT% ftpoc.c %LIBFT%\ft.c %LIBFT%\ft_geom.c %LIBFT%\ft_holder.c %LIBFT%\ft_focus.c %LIBFT%\ft_calib.c %LIBFT%\ft_job.c %LIBFT%\ft_png.c %LIBFT%\ft_detect.c %LIBFT%\ft_preview.c
 ) else (
-    i686-w64-mingw32-gcc -std=c99 -O2 -Wall -Wextra -static-libgcc -I%LIBFT% -o ftpoc.exe ftpoc.c %LIBFT%\ft.c %LIBFT%\ft_geom.c %LIBFT%\ft_holder.c %LIBFT%\ft_focus.c %LIBFT%\ft_calib.c %LIBFT%\ft_job.c %LIBFT%\ft_png.c %LIBFT%\ft_detect.c
+    i686-w64-mingw32-gcc -std=c99 -O2 -Wall -Wextra -static-libgcc -I%LIBFT% -o ftpoc.exe ftpoc.c %LIBFT%\ft.c %LIBFT%\ft_geom.c %LIBFT%\ft_holder.c %LIBFT%\ft_focus.c %LIBFT%\ft_calib.c %LIBFT%\ft_job.c %LIBFT%\ft_png.c %LIBFT%\ft_detect.c %LIBFT%\ft_preview.c
 )

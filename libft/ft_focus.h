@@ -14,7 +14,10 @@
 typedef struct { double film, w, fl, p; } ft_lens;
 extern const ft_lens ft_lens_default;
 
-#define FT_SCALE_MIN     3800.0
+/* The fit spans 3807..6230; the scanner's own focus table (FP<serial>.txt)
+ * sits within ~2400 tandem steps of the curve down to scale ~1475
+ * (m 0.51), so the curve is trusted to 1500 (2026-10-13). */
+#define FT_SCALE_MIN     1500.0
 #define FT_SCALE_MAX     6300.0
 /* Focus offsets move the CCD and the lens together (tandem, as the manual
  * says): the gap and so the magnification stay, only the film-side focus
@@ -26,15 +29,16 @@ extern const ft_lens ft_lens_default;
 /* calibrate-focus brackets the CCD alone (lens on the curve) */
 #define FT_CAL_MARGIN    1200L      /* CCD steps: ~5 % sharpness loss */
 #define FT_CAL_BRACKET_MAX 12000L
-/* every value FlexColor sent; the CCD must also stay below the lens.
- * Exception: the CCD may go to 240000, ~14k steps under FlexColor's
- * 254123: at 3150 ppi negative focus was still rising at 254270
- * (hardware 2026-10-12). Both counters grow towards the film below; a
+/* every value FlexColor sent, except: the lens may go up to 530000, the
+ * scanner's own focus-table minimum for film (FP<serial>.txt entries 6/7,
+ * m 0.51; the gap rule below keeps the carriers apart), and the CCD may
+ * go to 240000, ~14k steps under FlexColor's 254123: at 3150 ppi negative
+ * focus was still rising at 254270 (hardware 2026-10-12). Both counters grow towards the film below; a
  * lower CCD value moves the CCD up, away from the lens. Stepped to 241813
  * with steady motor times (user approved). */
 #define FT_CCD_MIN    240000L
 #define FT_CCD_MAX    1020000L
-#define FT_OPTIC_MIN  895204L
+#define FT_OPTIC_MIN  530000L
 #define FT_OPTIC_MAX  1021000L
 /* Carrier gap (lens - CCD, steps). Collisions depend on the gap alone:
  * both counters share one scale. FlexColor's maintenance "bottom" parks
