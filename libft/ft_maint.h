@@ -20,15 +20,18 @@
  *
  * Reads: READ BUFFER (0x3c) is a memory read, CDB bytes 2..3 segment,
  * 4..5 offset, 6..8 length (all big-endian). Allowed: segments 3000
- * (microcode), 4000 (data), E000 and F000 (boot flash: the handler
- * enables the upper chip select first, as for FlexColor's Faul Pixs read
- * at E000:0400), 1..FT_MAINT_MAX_PEEK bytes, no wrap. C000..DFFF holds
- * the board's device windows (chip selects 0, 1, 3) and stays refused.
+ * (microcode), 4000 (data), C000:0000..7FFF (loader ROM, chip select 3:
+ * the reset stub ends in a jump to C000:3CDF), E000 and F000 (upper chip
+ * select, enabled by the handler first: parameter flash with Faul Pixs at
+ * E000:0400, reset stub at F000:C000), 1..FT_MAINT_MAX_PEEK bytes, no
+ * wrap. C800..D7FF (chip selects 0 and 1, unidentified devices) stays
+ * refused.
  *
  * See tools/poc/README.md, "Maintenance writes and memory reads". */
 #define FT_MAINT_HDR 10
 #define FT_MAINT_MAX_DATA 0x7c
 #define FT_MAINT_MAX_PEEK 0x400
+#define FT_MAINT_LOADER_LEN 0x8000u /* C000:0000.. */
 #define FT_MAINT_TABLE_SEG 0x4000u
 #define FT_MAINT_TABLE_LO 0x7640u
 #define FT_MAINT_TABLE_END 0x76bcu /* exclusive */

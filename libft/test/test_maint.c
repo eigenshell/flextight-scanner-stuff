@@ -23,6 +23,8 @@ int main(void)
         { 0x3c, 0x00, 0xe0, 0x00, 0x04, 0x00, 0x00, 0x01, 0x3e, 0 };
     static const unsigned char want_flash_top_cdb[10] =
         { 0x3c, 0x00, 0xf0, 0x00, 0xfc, 0x00, 0x00, 0x04, 0x00, 0 };
+    static const unsigned char want_loader_cdb[10] =
+        { 0x3c, 0x00, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0 };
     static const unsigned char want_peek_max_cdb[10] =
         { 0x3c, 0x00, 0x30, 0x00, 0xfc, 0x00, 0x00, 0x04, 0x00, 0 };
     const unsigned char dword16[4] = { 0x10, 0x00, 0x00, 0x00 };
@@ -79,8 +81,13 @@ int main(void)
     CHECK(memcmp(cdb, want_faul_cdb, 10) == 0);
     CHECK(ft_maint_peek(0xf000, 0xfc00, 0x400, cdb, &e) == 0);
     CHECK(memcmp(cdb, want_flash_top_cdb, 10) == 0);
-    /* the C/D device windows (CS0/CS1/CS3) and everything else stay out */
-    CHECK(ft_maint_peek(0xc000, 0x0000, 0x10, cdb, &e) == -1);
+    /* loader ROM (chip select 3): C000:0000..7FFF only */
+    CHECK(ft_maint_peek(0xc000, 0x0000, 0x400, cdb, &e) == 0);
+    CHECK(memcmp(cdb, want_loader_cdb, 10) == 0);
+    CHECK(ft_maint_peek(0xc000, 0x7c00, 0x400, cdb, &e) == 0);
+    CHECK(ft_maint_peek(0xc000, 0x7c01, 0x400, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xc000, 0x8000, 0x10, cdb, &e) == -1);
+    /* the device windows (CS0 C8000.., CS1 D0000..) and the rest stay out */
     CHECK(ft_maint_peek(0xc800, 0x0000, 0x10, cdb, &e) == -1);
     CHECK(ft_maint_peek(0xd000, 0x0000, 0x10, cdb, &e) == -1);
     CHECK(ft_maint_peek(0xd800, 0x0000, 0x10, cdb, &e) == -1);

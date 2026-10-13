@@ -259,15 +259,19 @@ e0 @ 0x400" is memory `E000:0400`).
     ftpoc maint mem 4000:<off> <hex> --confirm   timing table 4000:7640..76BB
     ftpoc maint peek 3000:<off> <len>            microcode, len <= 0x400
     ftpoc maint peek 4000:<off> <len>            data segment, len <= 0x400
-    ftpoc maint peek e000|f000:<off> <len>       boot flash, len <= 0x400
-    ftpoc maint dump-flash <file>                boot flash E000:0000..F000:FFFF
+    ftpoc maint peek c000:<off> <len>            loader ROM C000:0000..7FFF
+    ftpoc maint peek e000|f000:<off> <len>       upper chip select, len <= 0x400
+    ftpoc maint dump-flash <file>                E000..FFFF, then C000..C7FF
 
-`dump-flash` writes the 128 KiB boot flash (resident loader, Faul Pixs
-table) to a file in 128 READ BUFFER reads of 1 KiB, the first identical
-to FlexColor's own `e0` page read. It is the backup that makes a damaged
-flash recoverable with a chip programmer: take it once, twice in a row,
-and keep it if both files match. The C000..DFFF device windows are never
-read. Keep the dump outside the repo (vendor firmware).
+`dump-flash` writes the non-volatile memory to one 160 KiB file in READ
+BUFFER reads of 1 KiB, the first identical to FlexColor's own `e0` page
+read: E000:0000..F000:FFFF (parameter flash with the Faul Pixs table at
+E000:0400, the 386EX reset stub at F000:C000), then the loader ROM at
+C000:0000..7FFF (chip select 3; the reset stub jumps to C000:3CDF). It is
+the backup that makes a damaged flash recoverable with a chip
+programmer: take it twice in a row and keep it if both files match.
+C800..D7FF (chip selects 0 and 1, unidentified devices) is never read.
+Keep the dump outside the repo (vendor firmware).
 
 Every other command code is refused: among them `00` (jump), `02` (FPGA
 configuration) and the flash commands `10`/`20`/`30`/`50`. Flash writes
