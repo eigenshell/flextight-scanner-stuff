@@ -21,7 +21,11 @@
 
 #define PI          3.14159265358979323846
 #define OPEN_T      0.85f   /* all channels above: open beam */
-#define METAL_T     0.002f  /* all channels below: holder metal (or Dmax) */
+/* All channels below: holder metal (or Dmax). Metal reads ~0.0006-0.0014
+ * per channel with noise on the hardware (2026-10-12); at 0.005, 95 % of
+ * its pixels count, against at most 14 % on any colour-negative film line.
+ * Slide Dmax lines can be as dark: hole-row light keeps them film. */
+#define METAL_T     0.005f
 #define LINE_FRAC   0.80    /* line is open / metal when this much of it is */
 #define HOLE_LINE   0.02    /* open share of a line that marks hole rows */
 #define BASE_DENS   0.08    /* log10 density within this of the base */
@@ -41,12 +45,23 @@
 #define EDGE_WIN_MM 3.0
 #define EDGE_FOUND  0.80    /* inlier columns needed for an edge */
 #define EDGE_RMS_MM 0.25    /* inlier rms of the edge line */
+#define EDGE_OUTER  0.40    /* inliers of an outermost-cluster edge */
+#define EDGE_BEYOND 0.02    /* columns allowed past it, into the gap */
 /* Smallest inlier band of the robust edge fit: blur + grain jitter a
  * straight edge by 1-2 lines per column; 0.15 mm (3 lines) keeps those. */
 #define EDGE_CLIP_MM 0.15
 #define MIN_GAP_MM  0.2
 #define MIN_RUN_MM  6.0
 #define END_SLIVER  3.0
+/* Strip ends: lines within END_CUT_MM whose image band is at least
+ * CUT_OPEN open beam are past the film (a cut on the diagonal, hardware
+ * 2026-10-12), never frame. Dust specks cover ~1 % of the band. */
+#define END_CUT_MM  10.0
+#define CUT_OPEN    0.05
+/* A line whose image band is at least this much open beam has no film on
+ * it (open holder between loose pieces, hardware 2026-10-12): it counts as
+ * a gap line, never as a frame or a blank frame. */
+#define NOFILM_OPEN 0.50
 #define BLANK_MM    12.0
 #define FALLBACK_MM 45.0
 /* A run longer than this without a trusted edge inside is gridded and
@@ -67,6 +82,7 @@ enum { S_EXP = 0, S_BASE = 1, S_SKIP = 2 };
 typedef struct {
     int a, b;                          /* gap lines [a, b), deskewed */
     int lead_ok, trail_ok, ok;
+    int nofilm;                        /* open holder in it: not blank film */
     double lead_pos, trail_pos;        /* edge line at the image centre */
     double lead_slope, trail_slope;    /* residual, mm along per mm across */
 } gap_t;
@@ -84,6 +100,7 @@ typedef struct {
     int *off;                          /* deskew offset per column, lines */
     double tn;                         /* tan(strip tilt) */
     double *g;                         /* gap score per deskewed line */
+    unsigned char *nofilm;             /* per line: band mostly open beam */
     gap_t *gaps;
     int ng;
 } det_t;
@@ -104,6 +121,15 @@ static int is_dark(const float *p)
 }
 
 /* state at deskewed line l, column c */
+/* open-beam share of line l across the image band */
+static double band_open(const det_t *d, int l)
+{
+    int c, n = 0;
+    for (c = d->b0; c < d->b1; c++)
+        n += is_open(pix(d->t, d->px, l, c));
+    return d->b1 > d->b0 ? (double)n / (d->b1 - d->b0) : 0;
+}
+
 static int S(const det_t *d, int l, int c)
 {
     int ll = l + d->off[c];
@@ -449,6 +475,65 @@ static double holes_tilt(const det_t *d, int *ok)
     return sh * d->ym / (xr - xl);
 }
 
+/* Robust line fy = a + b fx from the start value a (slope 0): refit on
+ * the points within 3 rms (at least clip) until the set settles. The first
+ * band is 3 x the MAD about a, or just clip when tight (a second cluster
+ * would widen the MAD over both). Returns the inlier count (in[] marks
+ * them), 0 when degenerate. */
+static int line_fit(const double *fx, const double *fy, int n, double a,
+                    double clip, int tight, unsigned char *in, double *ao,
+                    double *bo, double *rmso)
+{
+    double b = 0, rms = 0;
+    int k, it, nin = 0;
+
+    if (!tight) {
+        double *r = malloc(n * sizeof *r);
+        if (!r)
+            return 0;
+        for (k = 0; k < n; k++)
+            r[k] = fabs(fy[k] - a);
+        rms = 1.4826 * dkth(r, n, n / 2);
+        free(r);
+    }
+    for (it = 0; it < 8; it++) {
+        double th = 3 * rms > clip ? 3 * rms : clip;
+        double sx = 0, sy = 0, sxx = 0, sxy = 0, rr = 0, den;
+        int changed = 0, m = 0;
+        for (k = 0; k < n; k++) {
+            unsigned char v = fabs(fy[k] - (a + b * fx[k])) <= th;
+            changed |= it == 0 || v != in[k];
+            in[k] = v;
+        }
+        if (!changed)
+            break;
+        for (k = 0; k < n; k++)
+            if (in[k]) {
+                sx += fx[k];
+                sy += fy[k];
+                sxx += fx[k] * fx[k];
+                sxy += fx[k] * fy[k];
+                m++;
+            }
+        den = m * sxx - sx * sx;
+        if (m < 3 || den <= 0)
+            return 0;
+        b = (m * sxy - sx * sy) / den;
+        a = (sy - b * sx) / m;
+        for (k = 0; k < n; k++)
+            if (in[k]) {
+                double e = fy[k] - (a + b * fx[k]);
+                rr += e * e;
+            }
+        rms = sqrt(rr / m);
+        nin = m;
+    }
+    *ao = a;
+    *bo = b;
+    *rmso = rms;
+    return nin;
+}
+
 /*
  * A frame edge of the gap [a, b): per image column, walk from the gap
  * middle outward (dir -1: towards the frame before, dir +1: the frame
@@ -457,13 +542,15 @@ static double holes_tilt(const det_t *d, int *ok)
  * from the median, then iterate least squares on inliers within
  * max(3 rms, EDGE_CLIP_MM). Accepted with EDGE_FOUND of the image columns
  * as inliers and inlier rms <= EDGE_RMS_MM: a straight edge across the
- * band. Curved boundaries (round shadows) have no such line.
+ * band. Curved boundaries (round shadows) have no such line. Failing that,
+ * the outermost straight cluster with EDGE_OUTER of the columns and at
+ * most EDGE_BEYOND past it (see below).
  */
 static int fit_edge(const det_t *d, const gap_t *q, int dir, double *pos,
                     double *slope)
 {
     int nc = d->ic1 - d->ic0, win = (int)(EDGE_WIN_MM / d->ym + 0.5);
-    int mid = (q->a + q->b) / 2, c, l, k, n = 0, nin = 0, it, ok = 0;
+    int mid = (q->a + q->b) / 2, c, l, k, n = 0, nin, ngap, ok = 0;
     double xc = 0.5 * (d->ic0 + d->ic1), clip = EDGE_CLIP_MM / d->ym;
     double *fx = malloc(nc * sizeof *fx), *fy = malloc(nc * sizeof *fy);
     double *r = malloc(nc * sizeof *r);
@@ -498,46 +585,30 @@ static int fit_edge(const det_t *d, const gap_t *q, int dir, double *pos,
     /* start: median, slope 0 (lines are deskewed) */
     for (k = 0; k < n; k++)
         r[k] = fy[k];
-    a = dkth(r, n, n / 2);
-    for (k = 0; k < n; k++)
-        r[k] = fabs(fy[k] - a);
-    rms = 1.4826 * dkth(r, n, n / 2);
-    for (it = 0; it < 8; it++) {
-        double th = 3 * rms > clip ? 3 * rms : clip;
-        double sx = 0, sy = 0, sxx = 0, sxy = 0, rr = 0, den;
-        int changed = 0, m = 0;
-        for (k = 0; k < n; k++) {
-            unsigned char v = fabs(fy[k] - (a + b * fx[k])) <= th;
-            changed |= it == 0 || v != in[k];
-            in[k] = v;
-        }
-        if (!changed)
-            break;
-        for (k = 0; k < n; k++)
-            if (in[k]) {
-                sx += fx[k];
-                sy += fy[k];
-                sxx += fx[k] * fx[k];
-                sxy += fx[k] * fy[k];
-                m++;
-            }
-        den = m * sxx - sx * sx;
-        if (m < 3 || den <= 0)
-            goto out;
-        b = (m * sxy - sx * sy) / den;
-        a = (sy - b * sx) / m;
-        for (k = 0; k < n; k++)
-            if (in[k]) {
-                double e = fy[k] - (a + b * fx[k]);
-                rr += e * e;
-            }
-        rms = sqrt(rr / m);
-        nin = m;
-    }
+    nin = line_fit(fx, fy, n, dkth(r, n, n / 2), clip, 0, in, &a, &b, &rms);
     if (nin >= EDGE_FOUND * nc && rms * d->ym <= EDGE_RMS_MM) {
+        ok = 1;
+        goto done;
+    }
+    /* Thin content at the frame end only moves the found edge into the
+     * frame, never into the gap: the true edge is the outermost straight
+     * cluster. Start on the gap side; accept a smaller cluster when hardly
+     * anything lies beyond it (hardware 2026-10-12: 53-56 % of columns on
+     * a clean line, the rest up to 3 mm inside). */
+    for (k = 0; k < n; k++)
+        r[k] = fy[k];
+    nin = line_fit(fx, fy, n, dkth(r, n, dir < 0 ? n * 9 / 10 : n / 10),
+                   clip, 1, in, &a, &b, &rms);
+    for (k = 0, ngap = 0; k < n; k++)
+        if (!in[k] && (fy[k] - (a + b * fx[k])) * -dir > 0)
+            ngap++;
+    if (nin >= EDGE_OUTER * nc && ngap <= EDGE_BEYOND * nc &&
+        rms * d->ym <= EDGE_RMS_MM)
+        ok = 1;
+done:
+    if (ok) {
         *pos = a;                       /* at the image centre */
         *slope = b * d->ym / d->xm;
-        ok = 1;
     }
 out:
     free(fx);
@@ -550,7 +621,7 @@ out:
 /* deskew offsets, gap score, gap runs and their edges; returns # trusted */
 static int analyse(det_t *d)
 {
-    int c, l, i, nok = 0, s = -1, minl = (int)ceil(MIN_GAP_MM / d->ym);
+    int c, l, i, k, nok = 0, s = -1, minl = (int)ceil(MIN_GAP_MM / d->ym);
     double xc = 0.5 * (d->ic0 + d->ic1);
 
     for (c = 0; c < d->px; c++)
@@ -562,7 +633,8 @@ static int analyse(det_t *d)
             nb += v == S_BASE;
             ne += v == S_EXP;
         }
-        d->g[l] = nb + ne >= 0.5 * (d->ic1 - d->ic0) ? (double)nb / (nb + ne) : -1;
+        d->g[l] = d->nofilm[l] ? 1 :
+                  nb + ne >= 0.5 * (d->ic1 - d->ic0) ? (double)nb / (nb + ne) : -1;
     }
     d->ng = 0;
     for (l = d->f0; l <= d->f1; l++) {
@@ -575,6 +647,8 @@ static int analyse(det_t *d)
                 memset(q, 0, sizeof *q);
                 q->a = s;
                 q->b = l;
+                for (k = s; k < l && !q->nofilm; k++)
+                    q->nofilm = d->nofilm[k];
             }
             s = -1;
         }
@@ -589,6 +663,12 @@ static int analyse(det_t *d)
         nok += q->ok;
     }
     return nok;
+}
+
+/* a full or half frame's length */
+static int frame_sized(double len)
+{
+    return (len >= 15.5 && len <= 21.0) || (len >= 33.0 && len <= 39.5);
 }
 
 static void classify(double len, int at_end, ft_frame_type *type, int *low,
@@ -678,13 +758,29 @@ static void add_run(const det_t *d, ft_layout *L, const ft_holder *h,
                     const ft_axes *ax, int s, int e, const gap_t *before,
                     const gap_t *after)
 {
-    double ym = d->ym;
-    double y0 = before ? (before->trail_ok ? before->trail_pos : before->b) : s;
-    double y1 = after ? (after->lead_ok ? after->lead_pos : after->a) : e;
-    double slope = 0, near = 0, len = (y1 - y0) * ym;
+    double ym = d->ym, y0, y1, slope = 0, near = 0, len;
     int nslope = 0, l, c0, c1, low, keep, at_end = !before || !after;
+    int cut = (int)(END_CUT_MM / d->ym + 0.5);
     ft_frame_type type = FT_FRAME_PARTIAL;
     ft_det_frame *f;
+
+    if (!before)                       /* past the last cut line */
+        for (l = s + cut < e ? s + cut : e - 1; l >= s; l--)
+            if (band_open(d, l) >= CUT_OPEN) {
+                s = l + 1;
+                break;
+            }
+    if (!after)
+        for (l = e - cut > s ? e - cut : s; l < e; l++)
+            if (band_open(d, l) >= CUT_OPEN) {
+                e = l;
+                break;
+            }
+    if (e <= s)
+        return;
+    y0 = before ? (before->trail_ok ? before->trail_pos : before->b) : s;
+    y1 = after ? (after->lead_ok ? after->lead_pos : after->a) : e;
+    len = (y1 - y0) * ym;
 
     run_extent(d, s, e, &c0, &c1);
     if (len > GRID_RUN_MM) {
@@ -774,9 +870,11 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
     d->st = calloc((size_t)lines * px, 1);
     d->off = calloc(px, sizeof *d->off);
     d->g = calloc(lines, sizeof *d->g);
+    d->nofilm = calloc(lines, 1);
     d->gaps = calloc(lines / 2 + 1, sizeof *d->gaps);
     base_l = malloc((size_t)lines * 3 * sizeof *base_l);
-    if (!col || !d->st || !d->off || !d->g || !d->gaps || !base_l) {
+    if (!col || !d->st || !d->off || !d->g || !d->nofilm || !d->gaps ||
+        !base_l) {
         ft_fail(e, "detect: out of memory");
         goto out;
     }
@@ -831,6 +929,9 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
         L->holes_x0 = ax->x_mm0 + d->hl0 * d->xm;
         L->holes_x1 = ax->x_mm0 + d->hr1 * d->xm;
     }
+
+    for (l = d->f0; l < d->f1; l++)
+        d->nofilm[l] = band_open(d, l) >= NOFILM_OPEN;
 
     /* 3. base level */
     if (!(halo = open_halo(d)) ||
@@ -935,8 +1036,11 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
         const gap_t *before = NULL;
         for (i = 0; i <= d->ng; i++) {
             const gap_t *q = i < d->ng ? &d->gaps[i] : NULL;
-            if (q && !q->ok)
-                continue;               /* untrusted gaps stay in the run */
+            /* untrusted gaps stay in the run, unless they end a
+             * frame-sized piece: gap lines across the band mark a frame
+             * end even when dark content hides the edge itself */
+            if (q && !q->ok && !frame_sized((q->a - s) * d->ym))
+                continue;
             if ((q ? q->a : d->f1) > s)
                 add_run(d, L, h, ax, s, q ? q->a : d->f1, before, q);
             if (q) {
@@ -949,7 +1053,7 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
      * be leader, so they are counted apart */
     for (i = 0; i < d->ng; i++) {
         const gap_t *q = &d->gaps[i];
-        if (q->ok && (q->b - q->a) * d->ym > BLANK_MM) {
+        if (q->ok && !q->nofilm && (q->b - q->a) * d->ym > BLANK_MM) {
             if (q->a > d->f0 && q->b < d->f1)
                 L->nblank += blanks(L, ax, d->ym, q);
             else
@@ -964,6 +1068,7 @@ out:
     free(d->st);
     free(d->off);
     free(d->g);
+    free(d->nofilm);
     free(d->gaps);
     return rc;
 }

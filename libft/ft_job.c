@@ -268,10 +268,11 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
                            f->tilt_deg);
         off = j->focus == FT_FOCUS_PER_FRAME ? f->focus_offset : j->focus_offset;
         if (off < -FT_CCD_MAX || off > FT_CCD_MAX ||
-            ft_optics_for(lens, f->ppi * ft_bin_for_ppi(f->ppi), &ccd, &optic) ||
-            !ft_positions_ok(ccd + off, optic))
-            return ft_fail(e, "%s: focus offset %ld puts the CCD outside "
-                              "FlexColor's range", w, off);
+            ft_optics_focus(lens, f->ppi * ft_bin_for_ppi(f->ppi), off,
+                            &ccd, &optic) ||
+            !ft_positions_ok(ccd, optic))
+            return ft_fail(e, "%s: focus offset %ld puts the CCD/lens "
+                              "outside the safe range", w, off);
     }
     return 0;
 }

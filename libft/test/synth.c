@@ -156,10 +156,24 @@ float *synth_preview(const synth_spec *s)
             float *p = t + ((size_t)l * s->px + c) * 3;
             int fr = -1, speck = 0;
             if (y < s->film_y0 || y >= s->film_y1) {  /* holder outside film */
-                p[0] = p[1] = p[2] = s->open_outside ? 1.0f : 0.0005f;
+                for (k = 0; k < 3; k++) {
+                    double v = s->open_outside ? 1.0 : s->metal > 0 ? s->metal : 0.0005;
+                    if (!s->open_outside && s->metal_noise > 0)
+                        v += s->metal_noise * gauss(&g);
+                    p[k] = (float)(v < 0 ? 0 : v);
+                }
                 continue;
             }
-            if (x < s->film_x0 || x >= s->film_x1 || in_hole(s, x, yf)) {
+            for (i = 0; i < s->nopen && i < 4; i++)
+                if (y >= s->open[i].y0 && y < s->open[i].y1)
+                    speck = 1;               /* no film: open holder */
+            if (speck) {
+                p[0] = p[1] = p[2] = 1.0f;
+                continue;
+            }
+            if (x < s->film_x0 || x >= s->film_x1 || in_hole(s, x, yf) ||
+                y < s->film_y0 + s->cut_mm * (x - s->film_x0) /
+                                 (s->film_x1 - s->film_x0)) {
                 p[0] = p[1] = p[2] = 1.0f;            /* open beam */
                 continue;
             }

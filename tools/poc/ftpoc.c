@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <math.h>
 #include "ft_calib.h"
 #include "ft_detect.h"
@@ -378,7 +379,7 @@ static int pos_ok(long a, long b)
 {
     if (ft_positions_ok(a, b))
         return 1;
-    fprintf(stderr, "CCD/lens %ld/%ld outside what FlexColor sent (CCD "
+    fprintf(stderr, "CCD/lens %ld/%ld outside the safe range (CCD "
                     "%ld..%ld, lens %ld..%ld, CCD below lens)\n", a, b,
             FT_CCD_MIN, FT_CCD_MAX, FT_OPTIC_MIN, FT_OPTIC_MAX);
     return 0;
@@ -1436,14 +1437,15 @@ static void load_lens(void)
 }
 
 /* One synthesized crop. ccd/optic >= 0: use them (after the safety check);
- * otherwise the focus curve for ppi x bin, with ccd_offset added to the
- * CCD (lens unchanged). Returns 0 ok, CROP_REFUSED when a check refused
+ * otherwise the focus curve for ppi x bin with focus_offset added to the
+ * CCD and the lens (tandem), or to the CCD alone with ccd_only. Returns 0 ok, CROP_REFUSED when a check refused
  * the request before anything was sent, 1 when the scan failed. */
 #define CROP_REFUSED 2
 #define CROP_X_MAX   32.0        /* mm across: the holder's crop limit */
 struct crop_req {
     double ppi, x, y, w, h;      /* mm */
-    long ccd, optic, ccd_offset;
+    long ccd, optic, focus_offset;
+    int ccd_only;                /* offset on the CCD alone (calibration) */
     long keep;
     DWORD hold;
     const char *out;
@@ -1493,7 +1495,9 @@ static int crop_check(const struct crop_req *r, long *ccd_out,
                     r->ppi, bin, scale, FT_SCALE_MIN, FT_SCALE_MAX);
             return CROP_REFUSED;
         }
-        ccd += r->ccd_offset;
+        ccd += r->focus_offset;
+        if (!r->ccd_only)
+            optic += r->focus_offset;
     }
     if (!pos_ok(ccd, optic))
         return CROP_REFUSED;
@@ -1580,11 +1584,12 @@ static int cmd_crop(int argc, char **argv)
 /* ------------------------------------------------------------ focus, frames */
 
 /* Focus bracket on a 1 mm band centred at (xc, yc), w mm across, at ppi:
- * n (3..9) crops with the CCD at curve + centre + (i - n/2) * step, lens
- * on the curve. Samples are kept by offset; on a peak at an end the
+ * n (3..9) crops at curve + centre + (i - n/2) * step on the CCD and the
+ * lens together, or on the CCD alone (lens on the curve) with ccd_only. Samples are kept by offset; on a peak at an end the
  * bracket moves there (up to twice), scanning only offsets not yet
  * sampled, at most max_samples (n..FB_SAMPLES) in all, and the peak is
- * fitted over every sample. The bracket is clamped to +-FT_BRACKET_MAX of the curve.
+ * fitted over every sample. The bracket is clamped to +-FT_BRACKET_MAX of
+ * the curve (FT_CAL_BRACKET_MAX with ccd_only).
  * Returns 0 with *best = peak offset from the curve; FB_NO_PEAK when the
  * point is unusable (crop refused before scanning, flat response, peak
  * still at an edge); -1 on a scan or file failure. */
@@ -1595,16 +1600,17 @@ static int cmd_crop(int argc, char **argv)
 
 static int focus_bracket(double ppi, double xc, double yc, double w,
                          long centre, long step, int n, int max_samples,
-                         long *best)
+                         int ccd_only, long *best)
 {
+    const long lim = ccd_only ? FT_CAL_BRACKET_MAX : FT_BRACKET_MAX;
     long off[FB_SAMPLES];
     double sh[FB_SAMPLES];
     int ns = 0, tries, i, k, m, bin = ft_bin_for_ppi(ppi), dir = 0;
-    long half;
+    long half, refused_lo = LONG_MAX, refused_hi = LONG_MIN;
 
     if (n < 3 || n > max_samples || max_samples > FB_SAMPLES || step <= 0 ||
         bin < 1 ||
-        (long)(n - 1) * step > 2 * FT_BRACKET_MAX) {
+        (long)(n - 1) * step > 2 * lim) {
         fprintf(stderr, "focus: bad bracket (n %d, step %ld, ppi %g)\n", n,
                 step, ppi);
         return FB_NO_PEAK;
@@ -1615,12 +1621,12 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
         double mx, mn, pk;
         int r;
 
-        /* keep the whole bracket inside +-FT_BRACKET_MAX */
+        /* keep the whole bracket inside +-lim */
         lo = centre - half;
-        if (lo < -FT_BRACKET_MAX)
-            lo = -FT_BRACKET_MAX;
-        if (lo + (long)(n - 1) * step > FT_BRACKET_MAX)
-            lo = FT_BRACKET_MAX - (long)(n - 1) * step;
+        if (lo < -lim)
+            lo = -lim;
+        if (lo + (long)(n - 1) * step > lim)
+            lo = lim - (long)(n - 1) * step;
         for (i = 0; i < n && ns < max_samples; i++) {
             struct crop_req q;
             int lines = 0, px, rc;
@@ -1631,9 +1637,9 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
                 ;
             if (k < ns)
                 continue;               /* sampled on an earlier bracket */
-            if (labs(o) > FT_BRACKET_MAX) {   /* cannot happen; belt and braces */
+            if (labs(o) > lim) {   /* cannot happen; belt and braces */
                 fprintf(stderr, "focus: offset %ld beyond +-%ld\n", o,
-                        FT_BRACKET_MAX);
+                        lim);
                 return FB_NO_PEAK;
             }
             memset(&q, 0, sizeof q);
@@ -1643,12 +1649,20 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
             q.w = w;
             q.h = 1.0;
             q.ccd = q.optic = -1;
-            q.ccd_offset = o;
+            q.focus_offset = o;
+            q.ccd_only = ccd_only;
             q.hold = 3000;
             q.out = "fb.raw";
             rc = crop_scan(&q);
-            if (rc == CROP_REFUSED)
-                return FB_NO_PEAK;
+            if (rc == CROP_REFUSED) {
+                /* outside the safe CCD/lens range: unreachable, not fatal
+                 * (at 3150 ppi the focus sits ~1700 steps above the CCD
+                 * floor, hardware 2026-10-12) */
+                printf("  focus %+6ld: outside the safe range; skipped\n", o);
+                if (o < refused_lo) refused_lo = o;
+                if (o > refused_hi) refused_hi = o;
+                continue;
+            }
             if (rc)
                 return -1;
             px = (int)meta_long("fb.raw", "px");
@@ -1691,6 +1705,13 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
         *best = (long)(pk < 0 ? pk - 0.5 : pk + 0.5);
         if (r == 0)
             return 0;
+        /* maximum against the safe limit: nothing sharper is reachable */
+        if ((m == 0 && refused_lo < off[0]) ||
+            (m == ns - 1 && refused_hi > off[ns - 1])) {
+            printf("  focus: sharpest at the safe limit (%+ld)\n", off[m]);
+            *best = off[m];
+            return 0;
+        }
         /* maximum at an end of everything sampled */
         if (dir != 0 && (m == 0 ? -1 : 1) != dir) {
             printf("  focus: maximum went back to the other end; no usable "
@@ -1942,8 +1963,8 @@ static int focus_point(const float *t, int lines, const ft_axes *ax,
     }
     printf("focus check, frame %d at %.1f mm (%.1f..%.1f mm across)\n",
            fr->index, yc, x0, x1);
-    return focus_bracket(ppi, (x0 + x1) / 2, yc, x1 - x0, 0, 2000, FOCUS_N,
-                         FB_FRAME_SAMPLES, off);
+    return focus_bracket(ppi, (x0 + x1) / 2, yc, x1 - x0, 0, 500, FOCUS_N,
+                         FB_FRAME_SAMPLES, 0, off);
 }
 
 /* 3-point focus check on the first, middle and last whole frame; a point
@@ -2127,7 +2148,8 @@ static int cmd_frames(int argc, char **argv)
         return 1;
     }
     if (L.fallback)
-        printf("WARNING: no frame edge found; using the fixed %g mm grid\n",
+        printf("WARNING: no trusted frame edge on part of the strip; "
+               "gridded at %g mm there (frames flagged LOW)\n",
                h->grid_pitch_mm);
     if (L.nblank)
         printf("note: %d blank frame(s) dropped\n", L.nblank);
@@ -2247,7 +2269,7 @@ static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
     q->w = x1 - x0;
     q->h = y1 - y0;
     q->ccd = q->optic = -1;
-    q->ccd_offset = off;
+    q->focus_offset = off;
     q->hold = 3000;                     /* cmd_scan: >= g_first_hold first */
 }
 
@@ -2265,7 +2287,11 @@ static void write_crop(const char *out, const ft_job_frame *fr, long off)
     double px_mm = fr->ppi / 25.4;
     FILE *m;
 
-    snprintf(meta, sizeof meta, "%s.txt", out);
+    if (snprintf(meta, sizeof meta, "%s.txt", out) >= (int)sizeof meta) {
+        fprintf(stderr, "warning: %s: name too long; crop not recorded\n",
+                out);
+        return;
+    }
     k = bin >= 1 ? 12 / bin : 0;
     ls -= 2 * k;                        /* aligned image height */
     if (xs < 0 || ys < 0 || pxs < 1 || ls < 1 || bin < 1) {
@@ -2415,8 +2441,8 @@ static int cmd_scanjob(int argc, char **argv)
                 rc = FB_NO_PEAK;
             } else {
                 rc = focus_bracket(fr->ppi, (lo + hi) / 2, fr->y0 + fr->len / 2,
-                                   hi - lo, base, 2000, FOCUS_N,
-                                   FB_FRAME_SAMPLES, &off);
+                                   hi - lo, base, 500, FOCUS_N,
+                                   FB_FRAME_SAMPLES, 0, &off);
             }
             if (rc < 0) {
                 save_job(path, &j);
@@ -2497,13 +2523,13 @@ static void lens_at(const ft_lens *l, double M, double *c, double *o)
  * textured window (the 1 mm band at y across x..x+w mm, clipped to the
  * CCD reach per scale). At eight optical scales, the CCD is bracketed
  * with the lens on the current curve: the first usable scale gets a
- * coarse bracket (5 crops, 3000 steps, moving up to +-FT_BRACKET_MAX),
+ * coarse bracket (5 crops, 3000 steps, moving up to +-FT_CAL_BRACKET_MAX),
  * then every scale a fine one (9 crops, 1000 steps) around the coarse
  * peak or the previous scale's. The magnification at the peak is exact
  * for the current curve (the CCD moving by d shortens v by d); thin-lens
  * least squares -> focus.txt in the current directory. focus.txt is only
  * written with >= CAL_MIN usable scales, rms <= CAL_RMS_MAX CCD and
- * CAL_LENS_RMS_MAX lens, every point within FT_FOCUS_MARGIN of the fit,
+ * CAL_LENS_RMS_MAX lens, every point within FT_CAL_MARGIN of the fit,
  * and every measured scale inside FlexColor's positions. */
 static int cmd_calibrate_focus(int argc, char **argv)
 {
@@ -2560,7 +2586,7 @@ static int cmd_calibrate_focus(int argc, char **argv)
         if (!have_prev) {
             printf("coarse bracket\n");
             r = focus_bracket(PPI[i], (lo + hi) / 2, y, hi - lo, 0, 3000, 5,
-                              FB_FRAME_SAMPLES, &centre);
+                              FB_FRAME_SAMPLES, 1, &centre);
             if (r == FB_NO_PEAK) {
                 printf("WARNING: no usable coarse peak at scale %.0f; "
                        "skipped\n", scale);
@@ -2571,7 +2597,7 @@ static int cmd_calibrate_focus(int argc, char **argv)
         }
         if (r == 0)
             r = focus_bracket(PPI[i], (lo + hi) / 2, y, hi - lo, centre,
-                              1000, 9, FB_SAMPLES, &best);
+                              1000, 9, FB_SAMPLES, 1, &best);
         if (r < 0) {
             printf("%s; focus.txt not written\n",
                    g_abort ? "interrupted" : "focus crop failed");
@@ -2619,10 +2645,10 @@ static int cmd_calibrate_focus(int argc, char **argv)
         lens_at(&fit, M[i], &fc, &foo);
         printf("  scale %.0f: measured CCD %ld lens %ld, fit %.0f / %.0f\n",
                S[i], C[i], L[i], fc, foo);
-        if (!(fabs(fc - C[i]) <= FT_FOCUS_MARGIN)) {
+        if (!(fabs(fc - C[i]) <= FT_CAL_MARGIN)) {
             fprintf(stderr, "calibrate-focus: scale %.0f is %.0f CCD steps "
                             "off the fit (> %ld); focus.txt not written\n",
-                    S[i], fc - C[i], FT_FOCUS_MARGIN);
+                    S[i], fc - C[i], FT_CAL_MARGIN);
             return 1;
         }
         if (ft_optics_for(&fit, S[i], &pc, &po) || !ft_positions_ok(pc, po)) {

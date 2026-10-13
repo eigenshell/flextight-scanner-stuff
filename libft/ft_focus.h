@@ -16,10 +16,23 @@ extern const ft_lens ft_lens_default;
 
 #define FT_SCALE_MIN     3800.0
 #define FT_SCALE_MAX     6300.0
-#define FT_FOCUS_MARGIN  1200L      /* CCD steps: ~5 % sharpness loss */
-#define FT_BRACKET_MAX   12000L     /* never bracket further from the curve */
-/* every value FlexColor sent; the CCD must also stay below the lens */
-#define FT_CCD_MIN    254123L
+/* Focus offsets move the CCD and the lens together (tandem, as the manual
+ * says): the gap and so the magnification stay, only the film-side focus
+ * plane moves. Moving the CCD alone also changes the magnification (~1 %
+ * for -9000 steps at 6300) and is ~m^2 (~5x) less sensitive. Hardware
+ * 2026-10-12, 6300 ppi: the tandem curve is 4-5x narrower than CCD-only. */
+#define FT_FOCUS_MARGIN  300L       /* tandem steps: ~5 % sharpness loss */
+#define FT_BRACKET_MAX   4000L      /* tandem: never further from the curve */
+/* calibrate-focus brackets the CCD alone (lens on the curve) */
+#define FT_CAL_MARGIN    1200L      /* CCD steps: ~5 % sharpness loss */
+#define FT_CAL_BRACKET_MAX 12000L
+/* every value FlexColor sent; the CCD must also stay below the lens.
+ * Exception: the CCD may go to 240000, ~14k steps under FlexColor's
+ * 254123: at 3150 ppi negative focus was still rising at 254270
+ * (hardware 2026-10-12). Both counters grow towards the film below; a
+ * lower CCD value moves the CCD up, away from the lens. Stepped to 241813
+ * with steady motor times (user approved). */
+#define FT_CCD_MIN    240000L
 #define FT_CCD_MAX    1020000L
 #define FT_OPTIC_MIN  895204L
 #define FT_OPTIC_MAX  1021000L
@@ -30,6 +43,10 @@ int ft_ppi_supported(double ppi);        /* 1 = crop can scan it in focus */
  * implausible lens or positions that overflow */
 int ft_optics_for(const ft_lens *l, double scale, long *ccd, long *optic);
 int ft_positions_ok(long ccd, long optic);
+/* the curve's pair for scale with focus offset off on both (tandem);
+ * same returns as ft_optics_for */
+int ft_optics_focus(const ft_lens *l, double scale, long off, long *ccd,
+                    long *optic);
 
 /* rms log-gradient along rows of a w x h single-channel image */
 double ft_sharpness(const float *g, int w, int h);

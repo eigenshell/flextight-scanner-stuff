@@ -46,6 +46,17 @@ int ft_optics_for(const ft_lens *l, double scale, long *ccd, long *optic)
     return 0;
 }
 
+int ft_optics_focus(const ft_lens *l, double scale, long off, long *ccd,
+                    long *optic)
+{
+    long c, o;
+    if (ft_optics_for(l, scale, &c, &o))
+        return -1;
+    *ccd = c + off;
+    *optic = o + off;
+    return 0;
+}
+
 int ft_positions_ok(long ccd, long optic)
 {
     return ccd >= FT_CCD_MIN && ccd <= FT_CCD_MAX &&

@@ -83,7 +83,7 @@ int main(void)
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
     b = a;
     b.focus = FT_FOCUS_SHIFTED;
-    b.focus_offset = 900000;                  /* CCD would pass the lens */
+    b.focus_offset = 900000;                  /* CCD/lens past their range */
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
     /* hardening */
     f = text("[strip]\r\nholder = 24x217\r\n[frame 1]\r\nppi = 2000\r\n"
