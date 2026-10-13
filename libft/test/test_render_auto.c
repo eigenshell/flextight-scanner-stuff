@@ -1,0 +1,181 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <stdint.h>
+#include <string.h>
+#include "ft_render.h"
+#include "ft_render_auto.h"
+#include "test/ftest.h"
+
+static ft_render cr;
+
+static uint32_t rng = 99;
+static double urand(void)
+{
+    rng = rng * 1664525u + 1013904223u;
+    return ((rng >> 8) + 0.5) / 16777216.0;
+}
+static double gauss(void)
+{
+    return sqrt(-2 * log(urand())) * cos(6.283185307179586 * urand());
+}
+
+/* linear Rec.2020 -> CIELAB (D65) */
+static void lab(const double rgb[3], double out[3])
+{
+    static const double M[9] = { 0.6369580, 0.1446169, 0.1688810,
+                                 0.2627002, 0.6779981, 0.0593017,
+                                 0.0000000, 0.0280727, 1.0609851 };
+    static const double W[3] = { 0.95047, 1.0, 1.08883 };
+    double f[3];
+    int i;
+    for (i = 0; i < 3; i++) {
+        double v = (M[3 * i] * rgb[0] + M[3 * i + 1] * rgb[1] +
+                    M[3 * i + 2] * rgb[2]) / W[i];
+        f[i] = v > 216.0 / 24389 ? cbrt(v) : (24389.0 / 27 * v + 16) / 116;
+    }
+    out[0] = 116 * f[1] - 16;
+    out[1] = 500 * (f[0] - f[1]);
+    out[2] = 200 * (f[1] - f[2]);
+}
+
+enum { W = 960, H = 200, STEPS = 12 };
+static const float BASE[3] = { 0.25f, 0.6f, 0.9f };    /* orange mask */
+static const double GAMMA[3] = { 0.55, 0.62, 0.70 };   /* per dye layer */
+
+/* A colour negative of a scene: a grey ramp (12 steps, exposure 0.01..1
+ * across 70 % of the width) and colour patches (right 30 %), through
+ * per-channel characteristic curves and noise like the scanner's (3 DN
+ * dark noise on a ~6000 DN open beam, plus shot noise). Patches are 56 px
+ * wide or more, like real highlight areas at scan resolution. */
+static void negative(ft_image *im)
+{
+    int x, y, c;
+    for (y = 0; y < H; y++)
+        for (x = 0; x < W; x++) {
+            double ex[3];
+            if (x < W * 7 / 10) {
+                int s = x * STEPS / (W * 7 / 10);
+                ex[0] = ex[1] = ex[2] = pow(10, -2 + 2.0 * s / (STEPS - 1));
+            } else {
+                int p = y * 3 / H;
+                ex[0] = p == 0 ? 0.6 : 0.05;
+                ex[1] = p == 1 ? 0.6 : 0.05;
+                ex[2] = p == 2 ? 0.6 : 0.05;
+            }
+            for (c = 0; c < 3; c++) {
+                double d = BASE[c] + GAMMA[c] * log10(ex[c] / 0.002);
+                double t = pow(10, -d), sig = sqrt(0.0005 * 0.0005 +
+                                                   t / 6000);
+                im->rgb[3 * (y * W + x) + c] = (float)(t + sig * gauss());
+            }
+        }
+}
+
+/* mean output of grey step s */
+static void step_mean(const ft_image *im, int s, double out[3])
+{
+    int x0 = s * (W * 7 / 10) / STEPS + 3, x1 = (s + 1) * (W * 7 / 10) / STEPS - 3;
+    int x, y, c, n = 0;
+    out[0] = out[1] = out[2] = 0;
+    for (y = 10; y < H - 10; y++)
+        for (x = x0; x < x1; x++, n++)
+            for (c = 0; c < 3; c++)
+                out[c] += im->rgb[3 * (y * W + x) + c];
+    for (c = 0; c < 3; c++)
+        out[c] /= n;
+}
+
+int main(void)
+{
+    const ft_image *one[1];
+    ft_image im;
+    ft_recipe r;
+    ft_err e;
+    int s, c;
+
+    ft_image_init(&im);
+    CHECK(ft_image_alloc(&im, W, H, &e) == 0);
+    negative(&im);
+    one[0] = &im;
+
+    /* auto on a known base: ranges follow the dye gammas, greys neutral */
+    ft_recipe_default(&r, FT_RENDER_NEG);
+    ft_recipe_set_base(&r, BASE);
+    r.tint[0] = 7;                                   /* auto resets tint */
+    CHECK(ft_render_auto(one, 1, &r, &e) == 0);
+    CHECK(r.tint[0] == 0);
+    for (c = 0; c < 3; c++)                          /* 2.7 decades */
+        CHECK_NEAR(r.range[c], GAMMA[c] * log10(1 / 0.002), 0.06);
+    CHECK(r.exposure > 0 && r.exposure < 6);
+    CHECK(ft_render_compile(&r, &cr, &e) == 0);
+    ft_render_image(&cr, &im);
+    {
+        double prev = -1;
+        for (s = 0; s < STEPS; s++) {
+            double m[3], l[3];
+            step_mean(&im, s, m);
+            lab(m, l);
+            CHECK(fabs(l[1]) < 1 && fabs(l[2]) < 1);  /* neutral */
+            CHECK(l[0] > prev);                       /* brighter with exposure */
+            prev = l[0];
+        }
+        CHECK(prev > 90);                             /* white near paper white */
+    }
+
+    /* base from the frame itself: a strip of unexposed film on the left */
+    negative(&im);
+    {
+        int x, y;
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W / 50 + 8; x++)
+                for (c = 0; c < 3; c++)
+                    im.rgb[3 * (y * W + x) + c] = (float)pow(10, -BASE[c]);
+        float d[3];
+        CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_NEG, d, &e) == 0);
+        for (c = 0; c < 3; c++)
+            CHECK_NEAR(d[c], BASE[c], 0.002);
+    }
+
+    /* slide: the densest film is the black; auto leaves exposure at 0 */
+    {
+        int i;
+        float d[3];
+        for (i = 0; i < W * H * 3; i++)
+            im.rgb[i] = 0.3f;
+        for (i = 0; i < W * 20 * 3; i++)              /* 20 black rows */
+            im.rgb[W * 3 * 90 + i] = 0.001f;
+        CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_SLIDE, d, &e) == 0);
+        CHECK_NEAR(d[0], 3.0, 0.002);
+        ft_recipe_default(&r, FT_RENDER_SLIDE);
+        r.exposure = 2;
+        CHECK(ft_render_auto(one, 1, &r, &e) == 0 && r.exposure == 0);
+    }
+
+    /* b&w: one luminance range in all three slots */
+    negative(&im);
+    ft_recipe_default(&r, FT_RENDER_BW);
+    ft_recipe_set_base(&r, BASE);
+    CHECK(ft_render_auto(one, 1, &r, &e) == 0);
+    CHECK(r.range[0] == r.range[1] && r.range[1] == r.range[2]);
+
+    /* two frames pool: the same frame twice gives the same answer */
+    {
+        const ft_image *two[2];
+        ft_recipe a = r;
+        two[0] = two[1] = &im;
+        CHECK(ft_render_auto(two, 2, &a, &e) == 0);
+        CHECK_NEAR(a.range[1], r.range[1], 0.005);
+    }
+
+    /* no pixels: an error, not a crash */
+    {
+        ft_image empty;
+        const ft_image *z[1];
+        float d[3];
+        ft_image_init(&empty);
+        z[0] = &empty;
+        CHECK(ft_render_base_from_frames(z, 1, FT_RENDER_NEG, d, &e) == -1);
+        CHECK(ft_render_auto(z, 1, &r, &e) == -1);
+    }
+    ft_image_free(&im);
+    return TEST_DONE();
+}
