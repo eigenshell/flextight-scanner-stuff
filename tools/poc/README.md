@@ -62,7 +62,9 @@ ftpoc crop <ppi> <x> <y> <w> <h> [-b bin] [-n lines] [-h s] [-p ccd,lens]
                        crop 3150 13.0 130.4 7.6 11.4
                      6300 sliver across the frame:
                        crop 6300 4.8 135.65 24 0.9
-ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only
+ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only: refused
+                     unless INQUIRY says "SCSI Loader"; sends FlexColor's
+                     packets (libft/ft_upload.h). Once per power-up.
 ftpoc scanstop       0xdb (kHwiScanStop) — device rejects it (CHECK COND.)
 ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
                      does NOT clear the scanner's scan state
