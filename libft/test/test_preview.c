@@ -48,17 +48,40 @@ int main(void)
 
     /* native: 3x3 boxes of 1500 ppi pixels = 500 ppi; x_out 3034 is where
      * the window's 0.898 mm lands at scale 1500 */
-    CHECK(lround((ft_mm_to_ccd(x0, 1500) - FT_CCD_FIRST) / n->bin) == 3034);
-    ft_preview_axes(n, 3034, &ax);
+    CHECK(lround((ft_preview_mm_to_ccd(n, x0) - FT_CCD_FIRST) / n->bin) ==
+          3065);
+    ft_preview_axes(n, 3065, &ax);
     CHECK_NEAR(ax.y_mm_per_line, 25.4 / 500, 1e-12);
     CHECK_NEAR(ax.y_mm0, 4 * 25.4 / 500, 1e-12);
-    CHECK_NEAR(ax.x_mm_per_px, 25.4 / 500, 1e-9);
-    CHECK_NEAR(ax.x_mm0, x0 + 25.4 / 1500, 0.01);  /* centre of 3 px */
-    /* hires: 2x2 boxes of 1000 ppi pixels = 500 ppi */
+    CHECK_NEAR(ax.x_mm_per_px, 3 * 25.4 / 1488.0, 1e-9);
+    CHECK_NEAR(ax.x_mm0, x0 + 25.4 / 1488.0, 0.01);  /* centre of 3 px */
+    /* hires: 2x2 boxes of 1000 ppi pixels = 500 ppi along */
     ft_preview_axes(h, 0, &ax);
     CHECK_NEAR(ax.y_mm_per_line, 25.4 / 500, 1e-12);
     CHECK_NEAR(ax.y_mm0, 3 * 25.4 / 500, 1e-12);
-    CHECK_NEAR(ax.x_mm_per_px, 25.4 / 500, 1e-9);
+    CHECK_NEAR(ax.x_mm_per_px, 4 * 25.4 / 1989.4, 1e-9);
+
+    /* the hardware fit (2026-10-13): four edges of one strip, measured as
+     * CCD pixels at native and hires (nominal-model mm 2.25/3.42/28.25/
+     * 29.74 and 2.27/3.41/28.31/29.83), land on the standard preview's
+     * 1.71/2.92/27.94/29.43 mm */
+    {
+        const double sd[4] = { 1.71, 2.92, 27.94, 29.43 };
+        const double nm[4] = { 2.25, 3.42, 28.25, 29.74 };
+        const double hm[4] = { 2.27, 3.41, 28.31, 29.83 };
+        int i;
+        for (i = 0; i < 4; i++) {
+            CHECK_NEAR(ft_preview_ccd_to_mm(n, ft_mm_to_ccd(nm[i], 1500)),
+                       sd[i], 0.05);
+            CHECK_NEAR(ft_preview_ccd_to_mm(h, ft_mm_to_ccd(hm[i], 2000)),
+                       sd[i], 0.05);
+        }
+        /* standard keeps ft_geom's model exactly */
+        CHECK_NEAR(ft_preview_ccd_to_mm(s, 3000), ft_ccd_to_mm(3000, 6300),
+                   1e-12);
+        CHECK_NEAR(ft_preview_mm_to_ccd(s, 10), ft_mm_to_ccd(10, 6300),
+                   1e-9);
+    }
 
     /* both synthesized previews are in focus and inside the limits */
     CHECK(ft_optics_for(&ft_lens_default, h->ppi * h->bin, &c, &o) == 0);
