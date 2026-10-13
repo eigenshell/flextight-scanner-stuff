@@ -1444,6 +1444,13 @@ static int cmd_upload(const char *file)
         fclose(f);
         return 1;
     }
+    {
+        /* FlexColor reads the D800 page from the loader right before the
+         * chunks (cold-boot traces); do the same */
+        static const BYTE pg[10] = { 0x3c, 0, 0xd8, 0, 0, 0, 0, 0, 0x42, 0 };
+        r = srb_exec(pg, 10, SRB_DIR_IN, buf, 0x42, TIMEOUT_MS);
+        printf("loader page d800 (0x42): %s\n", r < 0 ? srb_errstr(r) : "ok");
+    }
     for (i = 0; i < FT_UPLOAD_CHUNKS; i++) {
         if (fread(code, 1, sizeof code, f) != sizeof code) {
             fclose(f);
