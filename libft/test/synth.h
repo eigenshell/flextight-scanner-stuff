@@ -32,6 +32,8 @@ typedef struct {
     double speck_r;                        /* their radius, mm */
     int open_outside;                      /* holder outside the film is open */
     double metal, metal_noise;             /* holder metal level (0: 0.0005), sigma */
+    double win_x0, win_x1;                 /* holder window across, mm (metal
+                                              outside; both 0: no window) */
     double cut_mm;                         /* strip start cut diagonally: open
                                               beam over this much along */
     int nopen;                             /* open holder between loose pieces */

@@ -448,6 +448,37 @@ int main(void)
     CHECK_NEAR(L.f[1].y1, 102, 0.3);
     CHECK_NEAR(L.f[2].y0, 108.5, 0.3);
 
+    /* hardware 2026-10-13, slides (pv3): the holder window hides most of
+     * each hole row, leaving 0.7-1.6 mm of them in view. The narrow row
+     * still has to count, or the base falls back to the darkest band
+     * pixels (slide Dmax ~0, no noise floor) and every gap is lost. */
+    synth_default(&s, FT_FILM_SLIDE);
+    s.base[0] = s.base[1] = s.base[2] = 0.0005f;
+    s.noise = 2e-4;
+    s.metal = 0.0012;
+    s.metal_noise = 0.0008;
+    s.win_x0 = 2.6;                     /* left row: 0.8 mm in view */
+    s.win_x1 = 30.4;                    /* right row: 1.6 mm */
+    s.film_y0 = 2.2;
+    s.film_y1 = 227.3;
+    s.nopen = 2;
+    s.open[0].y0 = 2.2;   s.open[0].y1 = 27.6;
+    s.open[1].y0 = 102.3; s.open[1].y1 = 107.5;
+    synth_add(&s, 28.5, 36, 0);
+    synth_add(&s, 66.5, 35.5, 0);
+    for (i = 0; i < 4; i++)
+        synth_add(&s, 108.5 + 38.0 * i, 36, 0);
+    CHECK(run(&s) == 0);
+    CHECK(L.has_holes);
+    CHECK_NEAR(L.holes_x0, 2.6, 0.3);
+    CHECK_NEAR(L.holes_x1, 30.4, 0.3);
+    expect_types("FFFFFp");
+    CHECK(!L.fallback && nlow() == 0);
+    CHECK_NEAR(L.f[0].y0, 28.5, 0.3);
+    CHECK_NEAR(L.f[1].y1, 102, 0.3);
+    CHECK_NEAR(L.f[2].y0, 108.5, 0.3);
+    CHECK_NEAR(L.f[3].y0, 146.5, 0.3);
+
     /* hardware 2026-10-12, slides: dark (Dmax-like) content against half
      * of both edges of two gaps running, deeper than the edge window, so
      * no edge is trusted. Gap lines across the whole band still mark

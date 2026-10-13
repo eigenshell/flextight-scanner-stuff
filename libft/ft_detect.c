@@ -28,6 +28,11 @@
 #define METAL_T     0.005f
 #define LINE_FRAC   0.80    /* line is open / metal when this much of it is */
 #define HOLE_LINE   0.02    /* open share of a line that marks hole rows */
+/* Narrowest hole row in view. The 24x217 window hides most of each 2.8 mm
+ * hole row: 0.7-1.6 mm of them show, the narrow side moving with where
+ * the strip lies across (hardware 2026-10-12/13). Blur and the open halo
+ * are ~0.3 mm; no other column run is 25-90 % open over the film. */
+#define HOLE_MIN_MM 0.5
 #define BASE_DENS   0.08    /* log10 density within this of the base */
 /* Additive noise floor on the base-like test, in units of the base noise
  * (MAD of the rebate). Needed for slide Dmax (~0.0005) where sensor noise
@@ -919,7 +924,8 @@ int ft_detect(const float *t, int lines, int px, const ft_axes *ax,
     {
         int left = grow(col, px, b0 - 1, -1, 0.25, 0.9) + 1;
         int right = grow(col, px, b1, +1, 0.25, 0.9);
-        L->has_holes = (b0 - left) * d->xm >= 1.0 && (right - b1) * d->xm >= 1.0;
+        L->has_holes = (b0 - left) * d->xm >= HOLE_MIN_MM &&
+                       (right - b1) * d->xm >= HOLE_MIN_MM;
         d->b0 = b0;
         d->b1 = b1;
         d->hl0 = L->has_holes ? left : b0;
