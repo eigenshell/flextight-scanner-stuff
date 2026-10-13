@@ -133,6 +133,11 @@ film          negative | slide
 focus         shifted (one offset for the strip) | per-frame (bracket each frame)
 focus_offset  steps added to both CCD and lens on the focus curve
               (tandem; shifted mode; the per-frame brackets' default centre)
+film_base     D r g b of unexposed film, measured on the preview (the
+              rebate between the hole rows; without hole rows an estimate):
+              the negative's base or the slide's black. Optional; `frames`
+              writes it, `scan --job` copies it to each frame's .txt,
+              `ftdev -f positive` renders with it
 [frame N]
 type          full | half | panorama | partial (informational)
 include       yes | no: scan this frame or not
@@ -150,6 +155,10 @@ focus_offset  per-frame mode: the measured offset; 0 = use the strip's
 done          yes | no: scanned already (scan --job skips it; set no to redo)
 ```
 
+Jobs written by this ftpoc contain `film_base`, which older ftpoc
+builds reject ("unknown key"); rebuild ftpoc on the scanner box before
+using them.
+
 `scan --job` validates the job and runs every remaining frame's scan
 window through the crop checks before the scanner does anything; a
 refused frame is listed then, skipped, left `done = no`, and makes the
@@ -161,7 +170,8 @@ extension (`neg.job` -> `neg_frame01.raw`, `neg_frame02.raw`, ...), so
 scans of different jobs never overwrite each other (+ `.cal`, `.faul`,
 `.txt`); the tight crop is appended to the matching `.raw.txt`
 (`crop_x/y/w/h` in output pixels of the scan as sent,
-plus `tilt`, `straighten`, `focus_offset`). `crop_y`/`crop_h` count rows
+plus `tilt`, `straighten`, `focus_offset`, and `film_base` when the job
+has one). `crop_y`/`crop_h` count rows
 of the RGB-aligned image (as `ftraw.py` writes it): row r is the scan's
 green row r + k, k = 12 / bin lines dropped at each end. The job file is rewritten
 after every frame (via `strip.job.tmp`, renamed over it), with finished

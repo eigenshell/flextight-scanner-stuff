@@ -57,9 +57,13 @@ FlexColor software — first on Windows, then on Linux.
 - `tools/ftdev/` — `ftdev`, which develops an `ftpoc` scan on any OS:
   dark/white correction, the scanner's Faul Pixs table plus your own
   defect map (`-d`), RGB realignment and the job's crop, then one file
-  per selected format (`-f dng,png`). DNG is linear 16-bit LinearRaw
-  for darktable, RawTherapee or Lightroom. Formats are entries in
-  `libft/ft_out.c`; FlexColor 3F (.fff) output is planned there.
+  per selected format (`-f dng,png,positive`). DNG is linear 16-bit
+  LinearRaw for darktable, RawTherapee or Lightroom. `positive` renders
+  the frame (`--film neg|slide|bw`; `libft/ft_render.h`): film base from
+  the preview, automatic range and exposure, tint pairs in CC, paper
+  grade and curve presets, as a 16-bit sRGB PNG. Formats are entries in
+  `libft/ft_out.c`; FlexColor 3F (.fff) output is planned there as a
+  legacy option.
 - `src/flextight/` — the Python package for the Linux (SG_IO) stack.
 - `tools/spti_logger/` — the DeviceIoControl tracer used to observe the
   protocol.
