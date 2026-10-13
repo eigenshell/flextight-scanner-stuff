@@ -60,7 +60,8 @@ int ft_optics_focus(const ft_lens *l, double scale, long off, long *ccd,
 int ft_positions_ok(long ccd, long optic)
 {
     return ccd >= FT_CCD_MIN && ccd <= FT_CCD_MAX &&
-           optic >= FT_OPTIC_MIN && optic <= FT_OPTIC_MAX && ccd < optic;
+           optic >= FT_OPTIC_MIN && optic <= FT_OPTIC_MAX &&
+           optic - ccd >= FT_GAP_MIN;
 }
 
 double ft_sharpness(const float *g, int w, int h)
