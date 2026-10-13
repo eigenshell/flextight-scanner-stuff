@@ -22,41 +22,47 @@
  * floor (4.4 D and beyond in all channels) are metal. */
 #define OPAQUE_T 1e-4           /* 4.0 D */
 #define SLIDE_OPAQUE_T 3.98107e-5 /* 4.4 D */
-/* A single pixel of holder metal reads T ~ 0.001 +- 0.0005, far above the
- * block-mean limit, so for the range a pixel at T <= 0.003 (2.5 D) in all
- * three channels marks its block as metal. A negative's densest real
- * highlight is limited by its red layer (base ~0.25 D + range ~1.5 D:
- * T ~ 0.018), which leaves ~0.75 D of margin. */
-#define METAL_T 0.003
+/* Holder metal reads T ~ 0.001 +- 0.0005 per pixel, far above the block-
+ * mean limit. A metal block (or a block with a metal column at an edge)
+ * almost always has >= 4 of its 16 pixels at T <= 0.002 in all three
+ * channels; film up to ~2.6 D almost never does (noise would have to dip
+ * 2 sigma in three channels at once, four times). Beyond ~2.8 D film and
+ * metal look the same to the scanner: no estimate can tell them apart. */
+#define METAL_T 0.002
+#define METAL_MIN_PX 4
+#define NO_METAL_T -1.0         /* pixel test off */
 #define CLEAR_T 0.9
 #define NO_LIMIT 1e30
 
 /* Block means of transmittance for the BLOCK x BLOCK block at x, y: dense
  * highlights are a few DN above dark and one pixel's density is mostly
- * noise there. Floored (also NaN) so logs are finite. Returns 1 if any
- * pixel of the block is not film (T <= dense in all three channels, or
- * T > clear in all three): a block that straddles the edge of a holder or
- * a hole is a mix, not the highlight or the base. */
-static int block_t(const ft_image *m, int x, int y, double pdense,
+ * noise there. Floored (also NaN) so logs are finite. Returns 1 if the
+ * block is not film: it has a non-finite value, >= METAL_MIN_PX pixels at
+ * T <= metal in all three channels (holder metal, also the edge of one),
+ * or any pixel at T > clear in all three (a hole, the open beam): a block
+ * that straddles such an edge is a mix, not the highlight or the base. */
+static int block_t(const ft_image *m, int x, int y, double metal,
                    double clear, double t[3])
 {
-    int i, j, c, bad = 0;
+    int i, j, c, bad = 0, dark = 0;
     t[0] = t[1] = t[2] = 0;
     for (j = 0; j < BLOCK; j++)
         for (i = 0; i < BLOCK; i++) {
             const float *p = m->rgb + 3 * ((size_t)(y + j) * m->w + x + i);
             for (c = 0; c < 3; c++)
                 t[c] += p[c];
-            if ((p[0] <= pdense && p[1] <= pdense && p[2] <= pdense) ||
+            if (!isfinite(p[0]) || !isfinite(p[1]) || !isfinite(p[2]) ||
                 (p[0] > clear && p[1] > clear && p[2] > clear))
                 bad = 1;
+            if (p[0] <= metal && p[1] <= metal && p[2] <= metal)
+                dark++;
         }
     for (c = 0; c < 3; c++) {
         t[c] /= BLOCK * BLOCK;
         if (!(t[c] >= FT_T_FLOOR))
             t[c] = FT_T_FLOOR;
     }
-    return bad;
+    return bad || dark >= METAL_MIN_PX;
 }
 
 /* the block's mean is not film either (same test on the means) */
@@ -89,7 +95,7 @@ static double density(const double t[3], int ch, const float w[3])
  * its own value would pick its noise. Returns the count. */
 static unsigned long histogram(const ft_image *const *im, int n, int ch,
                                const float w[3], int sel, double min,
-                               double dense, double pdense, double clear,
+                               double dense, double pmetal, double clear,
                                unsigned *h)
 {
     unsigned long total = 0;
@@ -112,19 +118,19 @@ static unsigned long histogram(const ft_image *const *im, int n, int ch,
             for (x = x0; x + (sel >= 0 ? 3 : 1) * BLOCK <= x1; x += step) {
                 double t[3], d;
                 if (sel >= 0) {
-                    if (block_t(m, x, y, pdense, clear, t) ||
+                    if (block_t(m, x, y, pmetal, clear, t) ||
                         skipped(t, dense, clear) ||
                         density(t, sel, w) < min)
                         continue;
                     /* neighbour in other scene content: skip it. The
                      * margin is ~5x the block noise, so this hardly
                      * selects on noise */
-                    if (block_t(m, x + 2 * BLOCK, y, pdense, clear, t) ||
+                    if (block_t(m, x + 2 * BLOCK, y, pmetal, clear, t) ||
                         skipped(t, dense, clear) ||
                         density(t, sel, w) < min - SAME_D)
                         continue;
                 } else {
-                    if (block_t(m, x, y, pdense, clear, t) ||
+                    if (block_t(m, x, y, pmetal, clear, t) ||
                         skipped(t, dense, clear))
                         continue;
                 }
@@ -169,9 +175,9 @@ int ft_render_base_from_frames(const ft_image *const *im, int n,
         double q;
         if (m == FT_RENDER_SLIDE)
             tot = histogram(im, n, c, NULL, -1, 0, SLIDE_OPAQUE_T,
-                            SLIDE_OPAQUE_T, NO_LIMIT, h);
+                            NO_METAL_T, NO_LIMIT, h);
         else
-            tot = histogram(im, n, c, NULL, -1, 0, 0, 0, CLEAR_T, h);
+            tot = histogram(im, n, c, NULL, -1, 0, 0, NO_METAL_T, CLEAR_T, h);
         if (tot == 0)
             return ft_fail(e, "auto: no pixels for a film base estimate");
         q = quantile(h, tot, m == FT_RENDER_SLIDE ? 0.995 : 0.005);

@@ -334,6 +334,56 @@ int main(void)
     r.grade = 0;
     CHECK(ft_render_auto(one, 1, &r, &e) == 0 && r.exposure == 0);
 
+    /* b&w with a dense highlight: grey film at 1.0 D with a 2.55 D area
+     * (12 % of the frame), scanner noise (dark 0.0005 + shot t / 6000).
+     * Film that dense reads T ~ 0.0028; it must not be taken for metal. */
+    {
+        int x, y;
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++) {
+                double t = x >= 400 && x < 515 ? pow(10, -2.55) : 0.1;
+                double sig = sqrt(0.0005 * 0.0005 + t / 6000);
+                for (c = 0; c < 3; c++)
+                    im.rgb[3 * (y * W + x) + c] = (float)(t +
+                                                          sig * gauss());
+            }
+        ft_recipe_default(&r, FT_RENDER_BW);
+        r.base[0] = r.base[1] = r.base[2] = 0.2f;
+        CHECK(ft_render_auto(one, 1, &r, &e) == 0);
+        CHECK_NEAR(r.range[1], 2.55 - 0.2, 0.06);
+    }
+
+    /* slide with a noisy 3.5 D black (rows 92..107, the rest T = 0.3) */
+    {
+        float d[3];
+        int x, y;
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++)
+                for (c = 0; c < 3; c++)
+                    im.rgb[3 * (y * W + x) + c] = y >= 92 && y < 108 ?
+                        (float)(pow(10, -3.5) + 4e-5 * gauss()) : 0.3f;
+        CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_SLIDE, d, &e) == 0);
+        for (c = 0; c < 3; c++)
+            CHECK_NEAR(d[c], 3.5, 0.05);
+    }
+
+    /* a band of +inf red (a corrupt readout) does not move the red base */
+    negative(&im);
+    {
+        float d[3];
+        int x, y;
+        for (y = 0; y < H; y++) {
+            for (x = 0; x < W / 50 + 8; x++)
+                for (c = 0; c < 3; c++)
+                    im.rgb[3 * (y * W + x) + c] = (float)pow(10, -BASE[c]);
+            for (x = 100; x < 160; x++)
+                im.rgb[3 * (y * W + x)] = INFINITY;
+        }
+        CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_NEG, d, &e) == 0);
+        for (c = 0; c < 3; c++)
+            CHECK_NEAR(d[c], BASE[c], 0.002);
+    }
+
     /* no pixels: an error, not a crash */
     {
         ft_image empty;
