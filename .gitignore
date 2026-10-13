@@ -56,3 +56,6 @@ libft/test/png_dump
 
 # ssh credential helper (local-only credential, notes/ already ignored)
 notes/ssh-askpass.sh
+
+# Claude Code instructions (local)
+CLAUDE.md
