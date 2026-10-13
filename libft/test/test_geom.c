@@ -22,6 +22,34 @@ int main(void)
     CHECK_NEAR(ft_ccd_to_mm(144, 6000), 0, 1e-9);
     CHECK_NEAR(ft_ccd_to_mm(4118, 6000), 16.8233, 1e-4);
 
+    /* below 3150: the measured correction for the curve's optics. Edges at
+     * the strip start as CCD pixels at scale 2000 and 1500, each scanned
+     * back to back with a standard preview that put them at these mm
+     * (hardware 2026-10-13) */
+    {
+        const double hc[5] = { 5061.3, 2913.3, 3009.7, 4967.4, 5063.3 };
+        const double hm[5] = { 28.663, 1.276, 2.499, 27.456, 28.681 };
+        const double nc[5] = { 4822.9, 3214.4, 3287.1, 4752.3, 4824.1 };
+        const double nm[5] = { 28.637, 1.248, 2.481, 27.431, 28.663 };
+        int i;
+        for (i = 0; i < 5; i++) {
+            CHECK_NEAR(ft_ccd_to_mm(hc[i], 2000), hm[i], 0.01);
+            CHECK_NEAR(ft_ccd_to_mm(nc[i], 1500), nm[i], 0.01);
+            CHECK_NEAR(ft_mm_to_ccd(ft_ccd_to_mm(hc[i], 2000), 2000), hc[i],
+                       1e-6);
+        }
+    }
+    /* unchanged at 3150 and above (the 2026-10-12 model) */
+    CHECK_NEAR(ft_mm_to_ccd(5.0, 3150),
+               4118 + (5.0 / 25.4 * 6000 + 144 - 4118) * 3150 / 6000, 1e-9);
+    CHECK_NEAR(ft_ccd_to_mm(2000, 6300),
+               ((2000 - 4118) * 6000 / 6300.0 + 4118 - 144) * 25.4 / 6000,
+               1e-9);
+    /* continuous across the blend (no jump at 2000 / 3150) */
+    CHECK_NEAR(ft_ccd_to_mm(3000, 3149.999), ft_ccd_to_mm(3000, 3150), 1e-4);
+    CHECK_NEAR(ft_ccd_to_mm(3000, 1999.999), ft_ccd_to_mm(3000, 2000.001),
+               1e-4);
+
     h = ft_holder_find("24x217");
     CHECK(h != NULL);
     CHECK_NEAR(h->scan_len_mm, 231.0, 1e-9);

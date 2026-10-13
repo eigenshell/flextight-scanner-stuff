@@ -6,10 +6,31 @@
 #include <string.h>
 #include "ft_holder.h"
 #include "ft_job.h"
+#include "ft_plan.h"
 
 static const char *TYPES[] = { "full", "half", "panorama", "partial" };
 
 static const char *yn(int v) { return v ? "yes" : "no"; }
+
+int ft_job_bin(const ft_job_frame *f)
+{
+    return f->bin ? f->bin : ft_bin_for_ppi(f->ppi);
+}
+
+/* "# bin options at P ppi: b: time, light, Dmax | ..." for the frame */
+static void bin_options(FILE *out, const ft_job_frame *f)
+{
+    int b[6], n = ft_bins_for_ppi(f->ppi, b), i;
+    if (n < 2)
+        return;
+    fprintf(out, "# bin options at %g ppi (time, light, Dmax~):", f->ppi);
+    for (i = 0; i < n; i++) {
+        double l = ft_light_rel(&ft_lens_default, f->ppi * b[i]);
+        fprintf(out, "%s %d: %.0f s %.1fx %.2f", i ? " |" : "", b[i],
+                ft_scan_seconds(f->ppi, b[i], f->len), l, ft_dmax_est(l));
+    }
+    fprintf(out, "\n");
+}
 
 int ft_job_write(const ft_job *j, FILE *out)
 {
@@ -25,10 +46,12 @@ int ft_job_write(const ft_job *j, FILE *out)
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
-                     "window = %.3f %.3f %.3f %.3f   # y0 x0 length width, mm\n"
+                     "bin = %d   # 0 = fastest; smaller = more light, slower\n",
+                f->index, TYPES[f->type], yn(f->include), f->ppi, f->bin);
+        bin_options(out, f);
+        fprintf(out, "window = %.3f %.3f %.3f %.3f   # y0 x0 length width, mm\n"
                      "tilt = %.2f\nsprockets = %s\nstraighten = %s\n"
                      "confidence = %s\nfocus_offset = %ld\ndone = %s\n",
-                f->index, TYPES[f->type], yn(f->include), f->ppi,
                 f->y0, f->x0, f->len, f->width, f->tilt_deg,
                 yn(f->sprockets), yn(f->straighten),
                 f->confidence_low ? "low" : "high", f->focus_offset,
@@ -72,7 +95,9 @@ static int lnum(const char *v, long *out)
 
 static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset" };
 static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
-    "sprockets", "straighten", "confidence", "focus_offset", "done" };
+    "sprockets", "straighten", "confidence", "focus_offset", "done",
+    "bin" };
+#define N_FRAME_KEYS 11
 #define K_PPI 2
 #define K_WINDOW 3
 
@@ -164,7 +189,7 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
         if (in_strip)
             ki = key_index(STRIP_KEYS, 4, k);
         else if (f)
-            ki = key_index(FRAME_KEYS, 10, k);
+            ki = key_index(FRAME_KEYS, N_FRAME_KEYS, k);
         else
             return ft_fail(e, "line %d: %s outside a section", ln, k);
         if (ki < 0)
@@ -217,6 +242,13 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                 else bad = 1;
                 break;
             case 8: bad = lnum(v, &f->focus_offset); break;
+            case 10: {
+                long b;
+                bad = lnum(v, &b) || b < 0 || b > 12;
+                if (!bad)
+                    f->bin = (int)b;
+                break;
+            }
             default: bad = yesno(v, &f->done); break;
             }
         }
@@ -258,6 +290,10 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
         if (!isfinite(f->ppi) || !ft_ppi_supported(f->ppi))
             return ft_fail(e, "%s: ppi %g not supported "
                               "(525..6300)", w, f->ppi);
+        if (f->bin && !ft_bin_ok(f->ppi, f->bin))
+            return ft_fail(e, "%s: bin %d not usable at %g ppi (the optics "
+                              "ppi x bin must be 1500..6300)", w, f->bin,
+                           f->ppi);
         if (!(f->len > 0 && f->width > 0 && f->y0 >= 0 && f->x0 >= 0 &&
               f->y0 + f->len <= h->scan_len_mm &&
               f->x0 + f->width <= h->scan_width_mm))
@@ -268,7 +304,7 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
                            f->tilt_deg);
         off = j->focus == FT_FOCUS_PER_FRAME ? f->focus_offset : j->focus_offset;
         if (off < -FT_CCD_MAX || off > FT_CCD_MAX ||
-            ft_optics_focus(lens, f->ppi * ft_bin_for_ppi(f->ppi), off,
+            ft_optics_focus(lens, f->ppi * ft_job_bin(f), off,
                             &ccd, &optic) ||
             !ft_positions_ok(ccd, optic))
             return ft_fail(e, "%s: focus offset %ld puts the CCD/lens "
