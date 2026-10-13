@@ -24,7 +24,8 @@ double ft_curve_eval(const ft_curve *c, double x);
 int ft_curve_preset(const char *name, ft_curve *c);
 /* the i-th preset's name, NULL past the last */
 const char *ft_curve_preset_name(int i);
-/* "x,y x,y ..." (spaces between points), validated */
+/* "x,y x,y ..." (spaces between points), validated; numbers are read with
+ * strtod in the C locale */
 int ft_curve_parse(const char *s, ft_curve *c, ft_err *e);
 
 #endif

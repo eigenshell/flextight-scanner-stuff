@@ -47,7 +47,7 @@ static void tangents(const ft_curve *c, double *m)
     double d[FT_CURVE_MAX] = { 0 };
     int n = c->n, i;
     for (i = 0; i < n - 1; i++)
-        d[i] = (c->y[i + 1] - c->y[i]) / ((double)c->x[i + 1] - c->x[i]);
+        d[i] = ((double)c->y[i + 1] - c->y[i]) / ((double)c->x[i + 1] - c->x[i]);
     m[0] = d[0];
     m[n - 1] = d[n - 2];
     for (i = 1; i < n - 1; i++)
@@ -73,7 +73,7 @@ double ft_curve_eval(const ft_curve *c, double x)
 {
     double m[FT_CURVE_MAX], h, t, t2, t3, v;
     int k = 0;
-    if (x <= c->x[0])
+    if (!(x > c->x[0]))
         return c->y[0];
     if (x >= c->x[c->n - 1])
         return c->y[c->n - 1];
@@ -132,6 +132,9 @@ int ft_curve_parse(const char *s, ft_curve *c, ft_err *e)
         if (end == s || (*end && *end != ' '))
             return ft_fail(e, "curve: point %d: expected x,y", c->n + 1);
         s = end;
+        if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1))
+            return ft_fail(e, "curve: point %d (%g,%g) outside [0,1]",
+                           c->n + 1, x, y);
         c->x[c->n] = (float)x;
         c->y[c->n] = (float)y;
         c->n++;

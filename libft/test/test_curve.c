@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+#include <math.h>
 #include <string.h>
 #include "ft_curve.h"
 #include "test/ftest.h"
@@ -65,5 +66,33 @@ int main(void)
                          "0.35,0.35 0.4,0.4 0.45,0.45 0.5,0.5 0.55,0.55 "
                          "0.6,0.6 0.65,0.65 0.7,0.7 0.75,0.75 0.8,0.8 1,1",
                          &c, &e) == -1);                      /* 17 points */
+    /* review edge cases */
+    {
+        ft_curve h;
+        memset(&h, 0, sizeof h);
+        h.n = 1;
+        CHECK(ft_curve_validate(&h, &e) == -1);
+        h.n = FT_CURVE_MAX + 1;
+        CHECK(ft_curve_validate(&h, &e) == -1);
+        ft_curve_identity(&h);
+        h.x[0] = NAN;
+        CHECK(ft_curve_validate(&h, &e) == -1);
+        h.x[0] = -0.5f;
+        CHECK(ft_curve_validate(&h, &e) == -1);
+
+        CHECK(ft_curve_parse("", &c, &e) == -1);
+        CHECK(ft_curve_parse("0,0 1e300,1", &c, &e) == -1);
+
+        CHECK(ft_curve_parse("0,0 0.5,1 1,0", &c, &e) == 0);
+        CHECK_NEAR(ft_curve_eval(&c, 0.5), 1, 0);
+        for (i = 0; i <= 1000; i++) {
+            double v = ft_curve_eval(&c, i / 1000.0);
+            CHECK(v >= 0 && v <= 1);
+        }
+
+        ft_curve_identity(&h);
+        CHECK_NEAR(ft_curve_eval(&h, NAN), 0, 0);
+        CHECK(ft_curve_preset_name(-1) == NULL);
+    }
     return TEST_DONE();
 }
