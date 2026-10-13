@@ -22,8 +22,8 @@ test/%: test/%.c test/ftest.h libft.a
 # the check must pass the render core and catch an allocating object
 purity: $(PURE) ft_image.o
 	@sh test/purity.sh $(PURE)
-	@! sh test/purity.sh ft_image.o >/dev/null || \
-	    { echo "purity: the check missed calloc in ft_image.o"; exit 1; }
+	@sh test/purity.sh ft_image.o >/dev/null; test $$? -eq 1 || \
+	    { echo "purity: the check did not reject calloc in ft_image.o"; exit 1; }
 
 test: $(TESTS) purity
 	@for t in $(TESTS); do ./$$t || exit 1; done
