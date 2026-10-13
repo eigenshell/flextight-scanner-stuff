@@ -38,6 +38,7 @@
 #include "ft_geom.h"
 #include "ft_holder.h"
 #include "ft_job.h"
+#include "ft_maint.h"
 #include "ft_plan.h"
 #include "ft_png.h"
 #include "ft_preview.h"
@@ -779,11 +780,11 @@ static int cmd_move(long delta, int steps)
 
 static int read_pages(int verbose)
 {
-    /* CDB: 3c 00 II OO OO OO LL LL LL 00 — standard SCSI READ BUFFER(10):
-     * 24-bit big-endian offset @3, 24-bit big-endian length @6. Every 0x3c
-     * CDB in the session-4 trace (flextrace_ioctl.jsonl) fits this layout;
-     * Faul Pixs lives at offset 0x400 of buffer e0, right after the 1 KiB
-     * block FlexColor reads at offset 0. */
+    /* CDB: 3c 00 SS SS OO OO LL LL LL 00. The microcode treats READ BUFFER
+     * as a memory read: segment @2, offset @4 (16-bit big-endian each),
+     * 24-bit big-endian length @6. So "buffer e0, offset 0x400" is memory
+     * E000:0400 (Faul Pixs, boot flash) and d8 is D800:xxxx. The id/off
+     * fields below encode the same bytes; see cmd_maint for raw peeks. */
     static const struct { BYTE id; DWORD off; WORD len; const char *name; } pages[] = {
         { 0xd8, 0x000000, 0x0042, "descriptor page" },
         { 0xd8, 0x000037, 0x000a, "descriptor tail" },
@@ -813,6 +814,110 @@ static int read_pages(int verbose)
         printf("%s\n", r > 48 ? " ..." : "");
     }
     return 0;
+}
+
+/* Poll until idle (0000), printing every status; 1 after 10 s. */
+static int maint_wait_idle(void)
+{
+    DWORD start = GetTickCount();
+    int v;
+    for (;;) {
+        v = poll_once();
+        printf("  poll %04x %s\n", v < 0 ? 0 : v,
+               v < 0 ? "poll failed" : poll_name((unsigned)v));
+        if (v == 0x0000) return 0;
+        if (GetTickCount() - start > 10000) {
+            printf("not idle after 10 s: STOP, power-cycle and re-upload "
+                   "(README: Maintenance writes)\n");
+            return 1;
+        }
+        Sleep(200);
+    }
+}
+
+/* maint io <0x342|0x344> <byte> --confirm
+ * maint mem 4000:<off> <hexbytes> --confirm
+ * maint peek <3000|4000>:<off> <len>
+ * One whitelisted microcode maintenance packet (libft/ft_maint.c), only
+ * while the scanner is idle. Writes complete on the bus before the device
+ * acts on them, so "send ok" proves nothing: check with peek. */
+static int cmd_maint(int argc, char **argv)
+{
+    /* buf holds a peek reply (<= FT_MAINT_MAX_PEEK) or a write packet
+     * (FT_MAINT_HDR + FT_MAINT_MAX_DATA, smaller) */
+    BYTE cdb[10], buf[FT_MAINT_MAX_PEEK], data[FT_MAINT_MAX_DATA];
+    ft_err e;
+    int len, i, v, r, peek = 0;
+    unsigned seg = 0, off = 0;
+    size_t n = 0;
+
+    if (argc == 3 && strcmp(argv[0], "peek") == 0) {
+        unsigned long cnt = strtoul(argv[2], NULL, 0);
+        if (sscanf(argv[1], "%x:%x", &seg, &off) != 2) {
+            fprintf(stderr, "maint: address must be seg:off in hex\n");
+            return 2;
+        }
+        len = ft_maint_peek(seg, off, (size_t)cnt, cdb, &e) < 0 ? -1 : (int)cnt;
+        peek = 1;
+    } else if (argc == 4 && strcmp(argv[3], "--confirm") == 0 &&
+               strcmp(argv[0], "io") == 0) {
+        unsigned long port = strtoul(argv[1], NULL, 0);
+        unsigned long val = strtoul(argv[2], NULL, 0);
+        if (val > 0xff) { fprintf(stderr, "maint: byte > 0xff\n"); return 2; }
+        len = ft_maint_io((unsigned)port, (unsigned char)val, cdb, buf,
+                          sizeof buf, &e);
+    } else if (argc == 4 && strcmp(argv[3], "--confirm") == 0 &&
+               strcmp(argv[0], "mem") == 0) {
+        const char *h = argv[2];
+        if (sscanf(argv[1], "%x:%x", &seg, &off) != 2) {
+            fprintf(stderr, "maint: address must be seg:off in hex\n");
+            return 2;
+        }
+        while (h[0] && h[1] && n < sizeof data) {
+            unsigned b;
+            if (sscanf(h, "%2x", &b) != 1) break;
+            data[n++] = (BYTE)b;
+            h += 2;
+        }
+        if (*h) { fprintf(stderr, "maint: bad hex bytes\n"); return 2; }
+        len = ft_maint_mem(seg, off, data, n, cdb, buf, sizeof buf, &e);
+    } else {
+        fprintf(stderr, "maint io <0x342|0x344> <byte> --confirm\n"
+                        "maint mem 4000:<off> <hexbytes> --confirm\n"
+                        "maint peek <3000|4000>:<off> <len>\n");
+        return 2;
+    }
+    if (len < 0) { fprintf(stderr, "%s\n", e.msg); return 2; }
+
+    v = poll_once();
+    if (v != 0x0000) {
+        fprintf(stderr, "maint: scanner not idle (%04x %s); refusing\n",
+                v < 0 ? 0 : v, v < 0 ? "poll failed" : poll_name((unsigned)v));
+        return 1;
+    }
+    printf("cdb:");
+    for (i = 0; i < 10; i++) printf(" %02x", cdb[i]);
+    printf("\n");
+
+    if (peek) {
+        memset(buf, 0, sizeof buf);
+        r = srb_exec(cdb, 10, SRB_DIR_IN, buf, (DWORD)len, TIMEOUT_MS);
+        if (r < 0) { printf("peek: %s\n", srb_errstr(r)); return 1; }
+        for (i = 0; i < r; i++) {
+            if (i % 16 == 0) printf("%s%04x:%04x", i ? "\n" : "", seg, off + i);
+            printf(" %02x", buf[i]);
+        }
+        printf("\n");
+        return maint_wait_idle();
+    }
+
+    printf("data:");
+    for (i = 0; i < len; i++) printf(" %02x", buf[i]);
+    printf("\n");
+    r = srb_exec(cdb, 10, SRB_DIR_OUT, buf, (DWORD)len, TIMEOUT_MS);
+    printf("send: %s\n", r < 0 ? srb_errstr(r) : "ok (check with peek)");
+    if (maint_wait_idle()) return 1;
+    return r < 0 ? 1 : 0;
 }
 
 /* Save the device's Faul Pixs table (e0 @ 0x400, 318 B; ASCII, per
@@ -3026,6 +3131,12 @@ int main(int argc, char **argv)
             "  calibrate-focus <x> <y> <w> [-h s]  fit this scanner's focus curve\n"
             "                     on a textured window (mm) -> focus.txt\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
+            "  maint io <0x342|0x344> <byte> --confirm\n"
+            "  maint mem 4000:<off> <hexbytes> --confirm   (4000:7640..76bb)\n"
+            "  maint peek <3000|4000>:<off> <len>   (len <= 0x400)\n"
+            "                     one whitelisted microcode maintenance write or\n"
+            "                     memory read, idle only; everything else is\n"
+            "                     refused (README: Maintenance writes)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped. The first scan of a\n"
@@ -3087,6 +3198,8 @@ int main(int argc, char **argv)
             rc = cmd_calibrate_focus(argc - 2, argv + 2);
         } else if (strcmp(cmd, "scan") == 0) {
             rc = scan_args(argc - 2, argv + 2);
+        } else if (strcmp(cmd, "maint") == 0) {
+            rc = cmd_maint(argc - 2, argv + 2);
         } else if (strcmp(cmd, "upload") == 0 && argc > 2) {
             rc = cmd_upload(argv[2]);
         } else {

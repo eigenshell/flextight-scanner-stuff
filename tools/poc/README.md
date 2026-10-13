@@ -236,6 +236,42 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
   start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching
   FlexColor's own 5 s wait.
+- `maint` sends only the whitelisted packets described below.
+
+## Maintenance writes and memory reads (`maint`)
+
+The uploaded microcode treats WRITE BUFFER (`3b`) data as a maintenance
+packet: a 10-byte header (`[0]` command, `[1..2]` and `[3..4]` big-endian
+words W1/W2, `[9]` flags) followed by a payload. Command `01` writes the
+payload to memory W1:W2, or with flags bit 0 to I/O port W1 (bit 2 keeps
+the port instead of incrementing it). The device copies length − 10
+bytes without checking, acts only once idle, and reports good status
+before it acts. READ BUFFER (`3c`) is a memory read: segment in CDB
+bytes 2–3, offset in 4–5, length in 6–8 (so FlexColor's Faul Pixs "page
+e0 @ 0x400" is memory `E000:0400`).
+
+`ftpoc maint` (built on `libft/ft_maint.c`) can send only:
+
+    ftpoc maint io 0x342 <byte> --confirm        FPGA mode register
+    ftpoc maint io 0x344 <byte> --confirm        FPGA register, meaning under test
+    ftpoc maint mem 4000:<off> <hex> --confirm   timing table 4000:7640..76BB
+    ftpoc maint peek 3000:<off> <len>            microcode, len <= 0x400
+    ftpoc maint peek 4000:<off> <len>            data segment, len <= 0x400
+
+Every other command code is refused: among them `00` (jump), `02` (FPGA
+configuration) and the flash commands `10`/`20`/`30`/`50`. Flash writes
+are the only permanent change the protocol allows. So are every other
+port (the motor DACs, the output latch, the SCSI chip, the 386EX
+peripherals and the FPGA control register `0x340`) and every other
+memory range. Each `maint` call checks that the scanner is idle first and
+polls until it is idle again.
+
+Everything `maint` can change lives in RAM: power-cycling the scanner
+(≥ 10 s off) returns it to the loader, and `ftpoc upload MICROCOD.3XX`
+restores the stock microcode. After any write, read it back with
+`maint peek` and run a short preview before going further. Stop and
+power off on grinding motors, an unexpected eject, a lamp change, an
+unknown poll status or a scan that hangs for more than 30 s.
 
 ## Templates
 

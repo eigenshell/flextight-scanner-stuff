@@ -22,7 +22,7 @@
  * 4..5 offset, 6..8 length (all big-endian). Allowed: segments 3000
  * (microcode) and 4000 (data), 1..FT_MAINT_MAX_PEEK bytes, no wrap.
  *
- * See notes/plans/2026-10-13-ccd-timing-tests.md. */
+ * See tools/poc/README.md, "Maintenance writes and memory reads". */
 #define FT_MAINT_HDR 10
 #define FT_MAINT_MAX_DATA 0x7c
 #define FT_MAINT_MAX_PEEK 0x400
