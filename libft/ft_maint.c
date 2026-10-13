@@ -70,9 +70,9 @@ int ft_maint_mem(unsigned seg, unsigned off, const unsigned char *data,
 int ft_maint_peek(unsigned seg, unsigned off, size_t n, unsigned char cdb[10],
                   ft_err *e)
 {
-    if (seg != 0x3000 && seg != 0x4000)
-        return ft_fail(e, "maint: peek segment 0x%x not allowed (3000, 4000)",
-                       seg);
+    if (seg != 0x3000 && seg != 0x4000 && seg != 0xe000 && seg != 0xf000)
+        return ft_fail(e, "maint: peek segment 0x%x not allowed (3000, 4000, "
+                       "e000, f000)", seg);
     if (n == 0 || n > FT_MAINT_MAX_PEEK)
         return ft_fail(e, "maint: peek %u bytes (1..%u allowed)", (unsigned)n,
                        (unsigned)FT_MAINT_MAX_PEEK);

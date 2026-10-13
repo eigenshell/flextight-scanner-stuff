@@ -18,6 +18,11 @@ int main(void)
           0x10, 0x00, 0x00, 0x00 };
     static const unsigned char want_peek_cdb[10] =
         { 0x3c, 0x00, 0x40, 0x00, 0x76, 0x40, 0x00, 0x00, 0x7c, 0 };
+    /* FlexColor's own Faul Pixs read (session traces, ftpoc save_faul) */
+    static const unsigned char want_faul_cdb[10] =
+        { 0x3c, 0x00, 0xe0, 0x00, 0x04, 0x00, 0x00, 0x01, 0x3e, 0 };
+    static const unsigned char want_flash_top_cdb[10] =
+        { 0x3c, 0x00, 0xf0, 0x00, 0xfc, 0x00, 0x00, 0x04, 0x00, 0 };
     static const unsigned char want_peek_max_cdb[10] =
         { 0x3c, 0x00, 0x30, 0x00, 0xfc, 0x00, 0x00, 0x04, 0x00, 0 };
     const unsigned char dword16[4] = { 0x10, 0x00, 0x00, 0x00 };
@@ -70,7 +75,16 @@ int main(void)
     CHECK(memcmp(cdb, want_peek_max_cdb, 10) == 0);
 
     /* peek refusals: other segments, length bounds, segment wrap */
-    CHECK(ft_maint_peek(0xe000, 0x0400, 0x16, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xe000, 0x0400, 0x13e, cdb, &e) == 0);
+    CHECK(memcmp(cdb, want_faul_cdb, 10) == 0);
+    CHECK(ft_maint_peek(0xf000, 0xfc00, 0x400, cdb, &e) == 0);
+    CHECK(memcmp(cdb, want_flash_top_cdb, 10) == 0);
+    /* the C/D device windows (CS0/CS1/CS3) and everything else stay out */
+    CHECK(ft_maint_peek(0xc000, 0x0000, 0x10, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xc800, 0x0000, 0x10, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xd000, 0x0000, 0x10, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xd800, 0x0000, 0x10, cdb, &e) == -1);
+    CHECK(ft_maint_peek(0xe800, 0x0000, 0x10, cdb, &e) == -1);
     CHECK(ft_maint_peek(0x6108, 0x0000, 0x10, cdb, &e) == -1);
     CHECK(ft_maint_peek(0x4000, 0x7640, 0, cdb, &e) == -1);
     CHECK(ft_maint_peek(0x4000, 0x0000, FT_MAINT_MAX_PEEK + 1, cdb, &e) == -1);

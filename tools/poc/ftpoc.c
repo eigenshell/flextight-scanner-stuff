@@ -834,9 +834,71 @@ static int maint_wait_idle(void)
     }
 }
 
+/* maint dump-flash <file>: the boot flash E000:0000..F000:FFFF (128 KiB)
+ * in 1 KiB READ BUFFER pieces, a backup in case the flash is ever damaged.
+ * The first piece is byte for byte FlexColor's "buffer e0/400" read. Reads
+ * only; run it twice and compare the files. */
+static int maint_dump_flash(const char *path)
+{
+    static BYTE img[2 * 0x10000];
+    BYTE cdb[10];
+    unsigned seg, off;
+    unsigned long sum = 0, fnv = 2166136261UL;
+    size_t at = 0, i;
+    ft_err e;
+    FILE *f;
+    int r, v;
+
+    v = poll_once();
+    if (v != 0x0000) {
+        fprintf(stderr, "maint: scanner not idle (%04x %s); refusing\n",
+                v < 0 ? 0 : v, v < 0 ? "poll failed" : poll_name((unsigned)v));
+        return 1;
+    }
+    for (seg = 0xe000; seg <= 0xf000; seg += 0x1000) {
+        for (off = 0; off < 0x10000; off += FT_MAINT_MAX_PEEK) {
+            if (ft_maint_peek(seg, off, FT_MAINT_MAX_PEEK, cdb, &e) < 0) {
+                fprintf(stderr, "%s\n", e.msg);
+                return 1;
+            }
+            r = srb_exec(cdb, 10, SRB_DIR_IN, img + at, FT_MAINT_MAX_PEEK,
+                         TIMEOUT_MS);
+            if (r != FT_MAINT_MAX_PEEK) {
+                printf("%04x:%04x: %s; dump incomplete, nothing written\n",
+                       seg, off, r < 0 ? srb_errstr(r) : "short read");
+                maint_wait_idle();
+                return 1;
+            }
+            at += FT_MAINT_MAX_PEEK;
+            if (off % 0x4000 == 0x3c00)
+                printf("  %04x:%04x done\n", seg, off);
+        }
+    }
+    for (i = 0; i < at; i++) {
+        sum += img[i];
+        fnv = ((fnv ^ img[i]) * 16777619UL) & 0xffffffffUL;
+    }
+    f = fopen(path, "wb");
+    if (!f || fwrite(img, 1, at, f) != at) {
+        perror(path);
+        if (f) fclose(f);
+        return 1;
+    }
+    fclose(f);
+    printf("wrote %s: %lu bytes, sum %08lx, fnv1a %08lx\n", path,
+           (unsigned long)at, sum & 0xffffffffUL, fnv);
+    printf("E000:0400: \"%.16s\" (Faul Pixs header)\n",
+           (const char *)img + 0x400);
+    printf("F000:FFF0:");
+    for (i = 0x1fff0; i < 0x20000; i++) printf(" %02x", img[i]);
+    printf(" (reset vector)\n");
+    return maint_wait_idle();
+}
+
 /* maint io <0x342|0x344> <byte> --confirm
  * maint mem 4000:<off> <hexbytes> --confirm
- * maint peek <3000|4000>:<off> <len>
+ * maint peek <3000|4000|e000|f000>:<off> <len>
+ * maint dump-flash <file>
  * One whitelisted microcode maintenance packet (libft/ft_maint.c), only
  * while the scanner is idle. Writes complete on the bus before the device
  * acts on them, so "send ok" proves nothing: check with peek. */
@@ -850,6 +912,8 @@ static int cmd_maint(int argc, char **argv)
     unsigned seg = 0, off = 0;
     size_t n = 0;
 
+    if (argc == 2 && strcmp(argv[0], "dump-flash") == 0)
+        return maint_dump_flash(argv[1]);
     if (argc == 3 && strcmp(argv[0], "peek") == 0) {
         unsigned long cnt = strtoul(argv[2], NULL, 0);
         if (sscanf(argv[1], "%x:%x", &seg, &off) != 2) {
@@ -883,7 +947,8 @@ static int cmd_maint(int argc, char **argv)
     } else {
         fprintf(stderr, "maint io <0x342|0x344> <byte> --confirm\n"
                         "maint mem 4000:<off> <hexbytes> --confirm\n"
-                        "maint peek <3000|4000>:<off> <len>\n");
+                        "maint peek <3000|4000|e000|f000>:<off> <len>\n"
+                        "maint dump-flash <file>\n");
         return 2;
     }
     if (len < 0) { fprintf(stderr, "%s\n", e.msg); return 2; }
@@ -3151,7 +3216,8 @@ int main(int argc, char **argv)
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  maint io <0x342|0x344> <byte> --confirm\n"
             "  maint mem 4000:<off> <hexbytes> --confirm   (4000:7640..76bb)\n"
-            "  maint peek <3000|4000>:<off> <len>   (len <= 0x400)\n"
+            "  maint peek <3000|4000|e000|f000>:<off> <len>   (len <= 0x400)\n"
+            "  maint dump-flash <file>   boot flash E000..FFFF backup (reads)\n"
             "                     one whitelisted microcode maintenance write or\n"
             "                     memory read, idle only; everything else is\n"
             "                     refused (README: Maintenance writes)\n"
