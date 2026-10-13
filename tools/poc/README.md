@@ -62,7 +62,9 @@ ftpoc crop <ppi> <x> <y> <w> <h> [-b bin] [-n lines] [-h s] [-p ccd,lens]
                        crop 3150 13.0 130.4 7.6 11.4
                      6300 sliver across the frame:
                        crop 6300 4.8 135.65 24 0.9
-ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only
+ftpoc upload MICROCOD.3XX   loader-mode firmware recovery only: refused
+                     unless INQUIRY says "SCSI Loader"; sends FlexColor's
+                     packets (libft/ft_upload.h). Once per power-up.
 ftpoc scanstop       0xdb (kHwiScanStop) — device rejects it (CHECK COND.)
 ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
                      does NOT clear the scanner's scan state
@@ -236,6 +238,55 @@ FindDevices does, and the source of its "first INQUIRYs fail" pattern.
   start line to the holder length at that resolution.
 - Every command has a 5 s timeout (overlapped I/O + `CancelIo`), matching
   FlexColor's own 5 s wait.
+- `maint` sends only the whitelisted packets described below.
+
+## Maintenance writes and memory reads (`maint`)
+
+The uploaded microcode treats WRITE BUFFER (`3b`) data as a maintenance
+packet: a 10-byte header (`[0]` command, `[1..2]` and `[3..4]` big-endian
+words W1/W2, `[9]` flags) followed by a payload. Command `01` writes the
+payload to memory W1:W2, or with flags bit 0 to I/O port W1 (bit 2 keeps
+the port instead of incrementing it). The device copies length − 10
+bytes without checking, acts only once idle, and reports good status
+before it acts. READ BUFFER (`3c`) is a memory read: segment in CDB
+bytes 2–3, offset in 4–5, length in 6–8 (so FlexColor's Faul Pixs "page
+e0 @ 0x400" is memory `E000:0400`).
+
+`ftpoc maint` (built on `libft/ft_maint.c`) can send only:
+
+    ftpoc maint io 0x342 <byte> --confirm        FPGA mode register
+    ftpoc maint io 0x344 <byte> --confirm        FPGA register, meaning under test
+    ftpoc maint mem 4000:<off> <hex> --confirm   timing table 4000:7640..76BB
+    ftpoc maint peek 3000:<off> <len>            microcode, len <= 0x400
+    ftpoc maint peek 4000:<off> <len>            data segment, len <= 0x400
+    ftpoc maint peek c000:<off> <len>            loader ROM C000:0000..7FFF
+    ftpoc maint peek e000|f000:<off> <len>       upper chip select, len <= 0x400
+    ftpoc maint dump-flash <file>                E000..FFFF, then C000..C7FF
+
+`dump-flash` writes the non-volatile memory to one 160 KiB file in READ
+BUFFER reads of 1 KiB, the first identical to FlexColor's own `e0` page
+read: E000:0000..F000:FFFF (parameter flash with the Faul Pixs table at
+E000:0400, the 386EX reset stub at F000:C000), then the loader ROM at
+C000:0000..7FFF (chip select 3; the reset stub jumps to C000:3CDF). It is
+the backup that makes a damaged flash recoverable with a chip
+programmer: take it twice in a row and keep it if both files match.
+C800..D7FF (chip selects 0 and 1, unidentified devices) is never read.
+Keep the dump outside the repo (vendor firmware).
+
+Every other command code is refused: among them `00` (jump), `02` (FPGA
+configuration) and the flash commands `10`/`20`/`30`/`50`. Flash writes
+are the only permanent change the protocol allows. So are every other
+port (the motor DACs, the output latch, the SCSI chip, the 386EX
+peripherals and the FPGA control register `0x340`) and every other
+memory range. Each `maint` call checks that the scanner is idle first and
+polls until it is idle again.
+
+Everything `maint` can change lives in RAM: power-cycling the scanner
+(≥ 10 s off) returns it to the loader, and `ftpoc upload MICROCOD.3XX`
+restores the stock microcode. After any write, read it back with
+`maint peek` and run a short preview before going further. Stop and
+power off on grinding motors, an unexpected eject, a lamp change, an
+unknown poll status or a scan that hangs for more than 30 s.
 
 ## Templates
 
