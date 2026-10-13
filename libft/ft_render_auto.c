@@ -22,6 +22,12 @@
  * floor (4.4 D and beyond in all channels) are metal. */
 #define OPAQUE_T 1e-4           /* 4.0 D */
 #define SLIDE_OPAQUE_T 3.98107e-5 /* 4.4 D */
+/* A single pixel of holder metal reads T ~ 0.001 +- 0.0005, far above the
+ * block-mean limit, so for the range a pixel at T <= 0.003 (2.5 D) in all
+ * three channels marks its block as metal. A negative's densest real
+ * highlight is limited by its red layer (base ~0.25 D + range ~1.5 D:
+ * T ~ 0.018), which leaves ~0.75 D of margin. */
+#define METAL_T 0.003
 #define CLEAR_T 0.9
 #define NO_LIMIT 1e30
 
@@ -31,7 +37,7 @@
  * pixel of the block is not film (T <= dense in all three channels, or
  * T > clear in all three): a block that straddles the edge of a holder or
  * a hole is a mix, not the highlight or the base. */
-static int block_t(const ft_image *m, int x, int y, double dense,
+static int block_t(const ft_image *m, int x, int y, double pdense,
                    double clear, double t[3])
 {
     int i, j, c, bad = 0;
@@ -41,7 +47,7 @@ static int block_t(const ft_image *m, int x, int y, double dense,
             const float *p = m->rgb + 3 * ((size_t)(y + j) * m->w + x + i);
             for (c = 0; c < 3; c++)
                 t[c] += p[c];
-            if ((p[0] <= dense && p[1] <= dense && p[2] <= dense) ||
+            if ((p[0] <= pdense && p[1] <= pdense && p[2] <= pdense) ||
                 (p[0] > clear && p[1] > clear && p[2] > clear))
                 bad = 1;
         }
@@ -83,7 +89,8 @@ static double density(const double t[3], int ch, const float w[3])
  * its own value would pick its noise. Returns the count. */
 static unsigned long histogram(const ft_image *const *im, int n, int ch,
                                const float w[3], int sel, double min,
-                               double dense, double clear, unsigned *h)
+                               double dense, double pdense, double clear,
+                               unsigned *h)
 {
     unsigned long total = 0;
     double npx = 0;
@@ -105,19 +112,19 @@ static unsigned long histogram(const ft_image *const *im, int n, int ch,
             for (x = x0; x + (sel >= 0 ? 3 : 1) * BLOCK <= x1; x += step) {
                 double t[3], d;
                 if (sel >= 0) {
-                    if (block_t(m, x, y, dense, clear, t) ||
+                    if (block_t(m, x, y, pdense, clear, t) ||
                         skipped(t, dense, clear) ||
                         density(t, sel, w) < min)
                         continue;
                     /* neighbour in other scene content: skip it. The
                      * margin is ~5x the block noise, so this hardly
                      * selects on noise */
-                    if (block_t(m, x + 2 * BLOCK, y, dense, clear, t) ||
+                    if (block_t(m, x + 2 * BLOCK, y, pdense, clear, t) ||
                         skipped(t, dense, clear) ||
                         density(t, sel, w) < min - SAME_D)
                         continue;
                 } else {
-                    if (block_t(m, x, y, dense, clear, t) ||
+                    if (block_t(m, x, y, pdense, clear, t) ||
                         skipped(t, dense, clear))
                         continue;
                 }
@@ -162,9 +169,9 @@ int ft_render_base_from_frames(const ft_image *const *im, int n,
         double q;
         if (m == FT_RENDER_SLIDE)
             tot = histogram(im, n, c, NULL, -1, 0, SLIDE_OPAQUE_T,
-                            NO_LIMIT, h);
+                            SLIDE_OPAQUE_T, NO_LIMIT, h);
         else
-            tot = histogram(im, n, c, NULL, -1, 0, 0, CLEAR_T, h);
+            tot = histogram(im, n, c, NULL, -1, 0, 0, 0, CLEAR_T, h);
         if (tot == 0)
             return ft_fail(e, "auto: no pixels for a film base estimate");
         q = quantile(h, tot, m == FT_RENDER_SLIDE ? 0.995 : 0.005);
@@ -193,7 +200,8 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
      * channel would pick each channel's own noise tail, the blue most: a
      * colour cast. */
     sel = bw ? SEL_LUMA : SEL_MEAN;
-    tot = histogram(im, n, sel, r->bw_weights, -1, 0, OPAQUE_T, NO_LIMIT, h);
+    tot = histogram(im, n, sel, r->bw_weights, -1, 0, OPAQUE_T, METAL_T,
+                    NO_LIMIT, h);
     if (tot == 0)
         return ft_fail(e, "auto: no pixels to estimate from");
     min = quantile(h, tot, 0.995) - H_STEP / 2;
@@ -201,13 +209,13 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
         int ch = bw ? SEL_LUMA : c;
         double range;
         tot = histogram(im, n, ch, r->bw_weights, sel, min, OPAQUE_T,
-                        NO_LIMIT, h);
+                        METAL_T, NO_LIMIT, h);
         if (tot == 0) {
             /* a thin highlight with no same-area neighbour to measure:
              * use the channel's own 99.5th percentile instead, slightly
              * noise-biased but better than nothing */
             tot = histogram(im, n, ch, r->bw_weights, -1, 0, OPAQUE_T,
-                            NO_LIMIT, h);
+                            METAL_T, NO_LIMIT, h);
             range = quantile(h, tot, 0.995) - r->base[c];
         } else
             range = quantile(h, tot, 0.5) - r->base[c];

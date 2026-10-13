@@ -4,9 +4,10 @@
  * overridden. Statistics come from the developed frame(s), 2 % in from
  * each edge, as histograms of 4x4 block densities (0.001 D bins), reading
  * at most ~4 M sampled pixels, so no allocation. Blocks that are not film
- * are skipped: blocks with any opaque pixel (holder metal, T <= 1e-4 in
- * every channel) and, for the film base, any clear pixel (open beam,
- * T > 0.9 in every channel), so blocks on an edge are left out too.
+ * are skipped: blocks with any opaque pixel (holder metal, T <= 0.003 in
+ * every channel; the slide base only skips the T floor) and, for the
+ * film base, any clear pixel (open beam, T > 0.9 in every channel), so
+ * blocks on an edge are left out too.
  * Several frames pool their statistics (one setting for a roll). The film
  * base normally comes from the preview (ft_layout.base, job key
  * film_base); ft_render_base_from_frames is the fallback when a scan has

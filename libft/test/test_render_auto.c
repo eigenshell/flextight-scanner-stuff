@@ -18,6 +18,13 @@ static double gauss(void)
     return sqrt(-2 * log(urand())) * cos(6.283185307179586 * urand());
 }
 
+/* one pixel of holder metal as the scanner reads it: T ~ 0.001 +- 0.0005 */
+static float metal(void)
+{
+    double t = 0.001 + 0.0005 * gauss();
+    return (float)(t > 0 ? t : 0);
+}
+
 /* linear Rec.2020 -> CIELAB (D65) */
 static void lab(const double rgb[3], double out[3])
 {
@@ -190,7 +197,7 @@ int main(void)
         CHECK_NEAR(a.range[1], r.range[1], 0.005);
     }
 
-    /* holder metal (T = 0) from x = 102 on, off the 4-px block grid (x0 = 4,
+    /* noisy holder metal from x = 102 on, off the 4-px block grid (x0 = 4,
      * so the block at 100 is half metal, half film): that block is half as
      * transmissive, 0.3 D denser than the uniform film (1.0 D over base),
      * 2 % of the blocks. It must not be taken for the highlight. */
@@ -204,7 +211,7 @@ int main(void)
         for (y = 0; y < 100; y++)
             for (x = 0; x < 200; x++)
                 for (c = 0; c < 3; c++)
-                    mt.rgb[3 * (y * 200 + x) + c] = x >= 102 ? 0 :
+                    mt.rgb[3 * (y * 200 + x) + c] = x >= 102 ? metal() :
                         (float)pow(10, -(BASE[c] + 1.0));
         mp[0] = &mt;
         ft_recipe_default(&t, FT_RENDER_NEG);
@@ -275,7 +282,7 @@ int main(void)
         ft_image_free(&dim);
     }
 
-    /* a holder band (6 % of the width at T = 0, opaque) must not drive
+    /* a noisy holder band (6 % of the width, T ~ 0.001) must not drive
      * the range: the highlight is still the white step */
     negative(&im);
     {
@@ -283,7 +290,7 @@ int main(void)
         for (y = 0; y < H; y++)
             for (x = 0; x < 62; x++)
                 for (c = 0; c < 3; c++)
-                    im.rgb[3 * (y * W + x) + c] = 0;
+                    im.rgb[3 * (y * W + x) + c] = metal();
         ft_recipe_default(&r, FT_RENDER_NEG);
         ft_recipe_set_base(&r, BASE);
         CHECK(ft_render_auto(one, 1, &r, &e) == 0);
