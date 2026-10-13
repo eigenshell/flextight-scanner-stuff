@@ -80,7 +80,10 @@ static int srb_exec(const BYTE *cdb, int cdb_len, BYTE dir,
  * whose INQUIRY names Imacon. Other indexes can be stale or foreign
  * devices that never answer. A fresh handle can fail its first few
  * INQUIRYs with ERROR_IO_DEVICE (FlexColor sees 2-4), so retry briefly. */
-static HANDLE open_scanner(void)
+/* First \\.\ScannerN that answers INQUIRY as Imacon (g_dev set), or
+ * INVALID_HANDLE_VALUE. The loader and the microcode can answer on
+ * different N (seen: Scanner0 loader, Scanner4 microcode). */
+static HANDLE probe_scanner(void)
 {
     static const BYTE inq[6] = { 0x12, 0, 0, 0, 0x60, 0 };
     int i, attempt;
@@ -111,6 +114,14 @@ static HANDLE open_scanner(void)
         CloseHandle(h);
         g_dev = INVALID_HANDLE_VALUE;
     }
+    return INVALID_HANDLE_VALUE;
+}
+
+static HANDLE open_scanner(void)
+{
+    HANDLE h = probe_scanner();
+    if (h != INVALID_HANDLE_VALUE)
+        return h;
     fprintf(stderr,
         "ftpoc: no \\\\.\\ScannerN answered as Imacon. Is the scanner powered,\n"
         "and FlexColor (or anything else holding it) closed?\n");
@@ -1457,19 +1468,43 @@ static int cmd_upload(const char *file)
     printf("trailer: %s\n", r < 0 ? srb_errstr(r) : "ok");
     printf("waiting for firmware commit (poll until idle)\n");
     start = GetTickCount();
-    for (;;) {
-        v = poll_once();
-        if (v == 0x0000) break;
-        if (v != 0x0400 && v >= 0)
-            printf("  ... %04x %s\n", v, poll_name((unsigned)v));
-        if (GetTickCount() - start > 60000) {
-            printf("timed out; upload may have failed\n");
-            return 1;
+    {
+        int last = 0x10000, fails = 0;
+        for (;;) {
+            v = poll_once();
+            if (v == 0x0000) break;
+            if (v != last) {
+                if (v < 0)
+                    printf("  %5lu ms: poll %s\n",
+                           (unsigned long)(GetTickCount() - start),
+                           srb_errstr(v));
+                else
+                    printf("  %5lu ms: %04x %s\n",
+                           (unsigned long)(GetTickCount() - start), v,
+                           poll_name((unsigned)v));
+                last = v;
+            }
+            /* the microcode may answer on another \\.\ScannerN than the
+             * loader did: after 2 s of failed polls, probe again */
+            if (v < 0 && ++fails >= 10) {
+                fails = 0;
+                CloseHandle(g_dev);
+                g_dev = INVALID_HANDLE_VALUE;
+                if (probe_scanner() == INVALID_HANDLE_VALUE)
+                    printf("  no scanner answering yet\n");
+                last = 0x10000;
+            } else if (v >= 0) {
+                fails = 0;
+            }
+            if (GetTickCount() - start > 60000) {
+                printf("timed out; upload may have failed\n");
+                return 1;
+            }
+            Sleep(200);
         }
-        Sleep(200);
     }
-    printf("device idle — upload complete. INQUIRY may keep saying "
-           "SCSI Loader; don't upload again until a power cycle\n");
+    printf("device idle after %lu ms — upload complete. Don't upload again "
+           "until a power cycle\n", (unsigned long)(GetTickCount() - start));
     return 0;
 }
 
