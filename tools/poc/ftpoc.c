@@ -1702,7 +1702,8 @@ static int preview_scan(const ft_preview *m, long keep, DWORD hold,
     if (!pos_ok(ccd, optic))
         return CROP_REFUSED;
     ft_preview_window(&x0, &w, &len);
-    x_out = (long)((ft_mm_to_ccd(x0, scale) - FT_CCD_FIRST) / m->bin + 0.5);
+    x_out = (long)((ft_preview_mm_to_ccd(m, x0) - FT_CCD_FIRST) / m->bin +
+                   0.5);
     px = (long)(w / 25.4 * m->ppi + 0.5);
     if (x_out < 0 || (x_out + px) * m->bin > FT_CCD_PIXELS ||
         px * 6 > 60000) {
