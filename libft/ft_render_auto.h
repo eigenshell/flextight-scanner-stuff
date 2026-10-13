@@ -19,7 +19,8 @@ int ft_render_base_from_frames(const ft_image *const *im, int n,
                                ft_render_mode m, float d[3], ft_err *e);
 /* neg/b&w: range = 99.5th percentile density above base (>= 0.05) and the
  * exposure that puts that highlight at paper white + 0.03 D; slide:
- * exposure 0. Tint is set to 0. r->mode and r->base must be set. */
+ * exposure 0. A channel whose highlight has no usable neighbour block
+ * falls back to its own unfiltered 99.5th percentile. Tint is set to 0. r->mode and r->base must be set. */
 int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
                    ft_err *e);
 

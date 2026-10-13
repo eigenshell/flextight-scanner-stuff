@@ -166,6 +166,29 @@ int main(void)
         CHECK_NEAR(a.range[1], r.range[1], 0.005);
     }
 
+    /* a thin highlight with no usable right neighbour (1.0 D lighter): the
+     * filtered histogram is empty, auto falls back to the unfiltered one */
+    {
+        ft_image st;
+        const ft_image *sp[1];
+        ft_recipe t;
+        int x, y;
+        ft_image_init(&st);
+        CHECK(ft_image_alloc(&st, 200, 100, &e) == 0);
+        for (y = 0; y < 100; y++)
+            for (x = 0; x < 200; x++)
+                for (c = 0; c < 3; c++)
+                    st.rgb[3 * (y * 200 + x) + c] = (float)pow(10,
+                        -(BASE[c] + (x >= 100 && x < 104 ? 2.0 : 1.0)));
+        sp[0] = &st;
+        ft_recipe_default(&t, FT_RENDER_NEG);
+        ft_recipe_set_base(&t, BASE);
+        CHECK(ft_render_auto(sp, 1, &t, &e) == 0);
+        for (c = 0; c < 3; c++)
+            CHECK_NEAR(t.range[c], 2.0, 0.01);
+        ft_image_free(&st);
+    }
+
     /* no pixels: an error, not a crash */
     {
         ft_image empty;

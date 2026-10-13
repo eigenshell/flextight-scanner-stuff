@@ -95,8 +95,12 @@ static unsigned long histogram(const ft_image *const *im, int n, int ch,
 /* density at quantile q (0..1) of the histogram */
 static double quantile(const unsigned *h, unsigned long total, double q)
 {
-    double want = q * (double)(total - 1), cum = 0;
+    double want, cum = 0;
     int b;
+    /* defensive: an empty histogram has no quantile (callers check) */
+    if (total == 0)
+        return H_D0;
+    want = q * (double)(total - 1);
     for (b = 0; b < H_N; b++) {
         cum += h[b];
         if (cum > want)
@@ -147,7 +151,14 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
         int ch = r->mode == FT_RENDER_BW ? SEL_LUMA : c;
         double range;
         tot = histogram(im, n, ch, r->bw_weights, sel, min, h);
-        range = quantile(h, tot, 0.5) - r->base[c];
+        if (tot == 0) {
+            /* a thin highlight with no same-area neighbour to measure:
+             * use the channel's own 99.5th percentile instead, slightly
+             * noise-biased but better than nothing */
+            tot = histogram(im, n, ch, r->bw_weights, -1, 0, h);
+            range = quantile(h, tot, 0.995) - r->base[c];
+        } else
+            range = quantile(h, tot, 0.5) - r->base[c];
         r->range[c] = (float)(range > 0.05 ? range : 0.05);
     }
     /* the highlight (n = 1) at paper white + 0.03 D:
