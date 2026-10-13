@@ -4,6 +4,7 @@ reference it was ported from, on a synthetic scan."""
 import importlib.util
 import shutil
 import struct
+import shlex
 import subprocess
 import sys
 import types
@@ -200,7 +201,7 @@ def test_positive_greys_neutral(ftdev, tmp_path):
     r = subprocess.run([str(ftdev), str(scan), "-f", "positive",
                         "--film", "neg"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "--base 0.2000,0.4500,0.7000" in r.stdout      # from the .txt
+    assert "--base 0.2,0.45,0.7" in r.stdout      # from the .txt
     img = read_png16(tmp_path / "neg_frame02_positive.png").astype(float)
     # image rows are CCD pixels: stripe s is rows 10 s .. 10 s + 9
     means = np.array([img[10 * s + 2:10 * s + 8].mean(axis=(0, 1))
@@ -235,3 +236,103 @@ def test_positive_flags(ftdev, tmp_path):
     assert (tmp_path / "neg_frame02.dng").exists()
     img = read_png16(tmp_path / "neg_frame02_positive.png")
     assert (img[..., 0] == img[..., 1]).all() and (img[..., 1] == img[..., 2]).all()
+
+
+def run_positive(ftdev, scan, *args):
+    return subprocess.run([str(ftdev), str(scan), "-f", "positive", "--film",
+                           "neg", *args], capture_output=True, text=True)
+
+
+def recipe_of(r):
+    line = [l for l in r.stdout.splitlines() if l.startswith("recipe: ")]
+    assert len(line) == 1, r.stdout
+    return line[0][len("recipe: "):]
+
+
+def recipe_exposure(r):
+    t = shlex.split(recipe_of(r))
+    return float(t[t.index("--exposure") + 1])
+
+
+@needs_cc
+def test_positive_strict_flags(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    for args, msg in ((("--exposure", "abc"), "--exposure is stops"),
+                      (("--exposure", "1x"), "--exposure is stops"),
+                      (("--exposure", "nan"), "--exposure is stops"),
+                      (("--grade", "x"), "--grade is a number"),
+                      (("--grade", "inf"), "--grade is a number"),
+                      (("--base", "nan,0,0"), "--base is"),
+                      (("--tint", "inf,0,0"), "--tint is"),
+                      (("--tint", "1,2"), "--tint is")):
+        r = run_positive(ftdev, scan, *args)
+        assert r.returncode == 2 and msg in r.stderr, (args, r.stderr)
+    r = run_positive(ftdev, scan, "--curve", "0,0 0.5")
+    assert r.returncode == 2 and "curve: curve" not in r.stderr
+
+
+@needs_cc
+def test_positive_validates_before_writing(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive,dng",
+                        "--film", "neg", "--grade", "0"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "ftdev:" in r.stderr
+    assert not (tmp_path / "neg_frame02.dng").exists()
+    assert not (tmp_path / "neg_frame02_positive.png").exists()
+
+
+@needs_cc
+def test_positive_overrides(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r = run_positive(ftdev, scan, "--base", "0.3,0.5,0.8")
+    assert r.returncode == 0, r.stderr
+    assert "--base 0.3,0.5,0.8" in r.stdout
+    e0 = recipe_exposure(run_positive(ftdev, scan))
+    r = run_positive(ftdev, scan, "--grade", "3")
+    assert r.returncode == 0, r.stderr
+    assert recipe_exposure(r) != e0                  # grade before auto
+    r = run_positive(ftdev, scan, "--tint", "10,0,0", "--exposure", "1.5")
+    assert r.returncode == 0, r.stderr
+    assert "--exposure 1.5 " in recipe_of(r) + " "
+    assert "--tint 10,0,0 " in recipe_of(r) + " "
+
+
+@needs_cc
+def test_positive_paste_back(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r1 = run_positive(ftdev, scan, "--tint", "3,0,-2", "--grade", "2",
+                      "--curve", "strong", "-o", str(tmp_path / "a"))
+    assert r1.returncode == 0, r1.stderr
+    flags = shlex.split(recipe_of(r1))
+    r2 = subprocess.run([str(ftdev), str(scan), "-f", "positive", "-o",
+                         str(tmp_path / "b"), *flags],
+                        capture_output=True, text=True)
+    assert r2.returncode == 0, r2.stderr
+    assert (tmp_path / "a_positive.png").read_bytes() == \
+        (tmp_path / "b_positive.png").read_bytes()
+
+
+@needs_cc
+def test_positive_dng_unrendered(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "dng", "--film", "neg", "-o",
+                        str(tmp_path / "pl_a")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive,dng", "--film",
+                        "neg", "-o", str(tmp_path / "pl_b")],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    a = (tmp_path / "pl_a.dng").read_bytes()
+    b = (tmp_path / "pl_b.dng").read_bytes()
+    # the header carries a timestamp: compare size and the 120x80x3 pixels
+    assert len(a) == len(b) and a[-120 * 80 * 3 * 2:] == b[-120 * 80 * 3 * 2:]
+
+
+@needs_cc
+def test_render_flags_ignored_without_positive(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "dng", "--grade", "2"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0
+    assert "render flags ignored without -f positive" in r.stderr

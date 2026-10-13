@@ -21,6 +21,7 @@
  * Build: make (Linux/macOS), or with mingw:
  *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c <every libft .c> -lm
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,11 +35,37 @@
 
 static ft_render g_render;              /* ~380 KB of LUTs: not on the stack */
 
-/* "a,b,c" -> v; -1 if malformed */
+/* "a,b,c" -> v; -1 if malformed or not finite */
 static int parse3(const char *s, float v[3])
 {
     char extra;
-    return sscanf(s, "%f,%f,%f%c", &v[0], &v[1], &v[2], &extra) == 3 ? 0 : -1;
+    if (sscanf(s, "%f,%f,%f%c", &v[0], &v[1], &v[2], &extra) != 3)
+        return -1;
+    return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]) ? 0 : -1;
+}
+
+/* a finite number and nothing else -> v; -1 otherwise */
+static int parse1(const char *s, float *v)
+{
+    char *end;
+    double d = strtod(s, &end);
+    if (end == s || *end || !isfinite(d))
+        return -1;
+    *v = (float)d;
+    return 0;
+}
+
+/* the shortest %g text of v that reads back as the same float */
+static const char *fmtf(float v, char *buf, size_t cap)
+{
+    int p;
+    for (p = 6; p < 9; p++) {
+        snprintf(buf, cap, "%.*g", p, (double)v);
+        if (strtof(buf, NULL) == v)
+            return buf;
+    }
+    snprintf(buf, cap, "%.9g", (double)v);
+    return buf;
 }
 
 static void *load_file(const char *path, long *size)
@@ -169,10 +196,16 @@ int main(int argc, char **argv)
             }
             has_tint = 1;
         } else if (strcmp(a, "--exposure") == 0 && i + 1 < argc) {
-            uexp = (float)atof(argv[++i]);
+            if (parse1(argv[++i], &uexp)) {
+                fprintf(stderr, "ftdev: --exposure is stops\n");
+                return 2;
+            }
             has_exp = 1;
         } else if (strcmp(a, "--grade") == 0 && i + 1 < argc) {
-            ugrade = (float)atof(argv[++i]);
+            if (parse1(argv[++i], &ugrade)) {
+                fprintf(stderr, "ftdev: --grade is a number\n");
+                return 2;
+            }
             has_grade = 1;
         } else if (strcmp(a, "--curve") == 0 && i + 1 < argc) {
             curve_arg = argv[++i];
@@ -212,12 +245,28 @@ int main(int argc, char **argv)
                                                         : FT_RENDER_NEG);
         if (curve_arg && ft_curve_preset(curve_arg, &rcp.master) != 0 &&
             ft_curve_parse(curve_arg, &rcp.master, &e) != 0) {
-            fprintf(stderr, "ftdev: --curve: not a preset, and %s\n", e.msg);
+            const char *m = e.msg;
+            int k;
+            fprintf(stderr, "ftdev: --curve: not a preset (");
+            for (k = 0; ft_curve_preset_name(k); k++)
+                fprintf(stderr, "%s%s", k ? " " : "", ft_curve_preset_name(k));
+            fprintf(stderr, ") and not points: %s\n",
+                    strncmp(m, "curve: ", 7) == 0 ? m + 7 : m);
             return 2;
         }
         if (has_grade)
             rcp.grade = ugrade;     /* before auto: exposure depends on it */
-    }
+        if (has_exp)
+            rcp.exposure = uexp;
+        if (has_tint)
+            memcpy(rcp.tint, utint, sizeof rcp.tint);
+        if (ft_recipe_validate(&rcp, &e)) {     /* before any file is written */
+            fprintf(stderr, "ftdev: %s\n", e.msg);
+            return 2;
+        }
+    } else if (has_base || has_exp || has_tint || has_grade || curve_arg)
+        fprintf(stderr, "ftdev: note: render flags ignored without "
+                        "-f positive\n");
     if (!base) {
         size_t n = strlen(scan);
         snprintf(basebuf, sizeof basebuf, "%s", scan);
@@ -314,7 +363,8 @@ int main(int argc, char **argv)
         if (has_base) {
             memcpy(d, ubase, sizeof d);
         } else if (meta_str(meta, "film_base", fb, sizeof fb) &&
-                   sscanf(fb, "%f %f %f", &d[0], &d[1], &d[2]) == 3) {
+                   sscanf(fb, "%f %f %f", &d[0], &d[1], &d[2]) == 3 &&
+                   isfinite(d[0]) && isfinite(d[1]) && isfinite(d[2])) {
             /* from the frames preview, via the job */
         } else {
             if (ft_render_base_from_frames(one, 1, rcp.mode, d, &e)) {
@@ -341,12 +391,17 @@ int main(int argc, char **argv)
             goto out;
         }
         ft_render_image(&g_render, &im);
-        printf("recipe: --film %s --base %.4f,%.4f,%.4f --exposure %.3f "
-               "--tint %g,%g,%g --grade %g --curve \"%s\"\n",
-               bw ? "bw" : film == FT_FILM_SLIDE ? "slide" : "neg",
-               rcp.base[0], rcp.base[1], rcp.base[2], rcp.exposure,
-               rcp.tint[0], rcp.tint[1], rcp.tint[2], rcp.grade,
-               curve_arg ? curve_arg : "linear");
+        {
+            char f[10][32];
+            printf("recipe: --film %s --base %s,%s,%s --exposure %s "
+                   "--tint %s,%s,%s --grade %s --curve \"%s\"\n",
+                   bw ? "bw" : film == FT_FILM_SLIDE ? "slide" : "neg",
+                   fmtf(rcp.base[0], f[0], 32), fmtf(rcp.base[1], f[1], 32),
+                   fmtf(rcp.base[2], f[2], 32), fmtf(rcp.exposure, f[3], 32),
+                   fmtf(rcp.tint[0], f[4], 32), fmtf(rcp.tint[1], f[5], 32),
+                   fmtf(rcp.tint[2], f[6], 32), fmtf(rcp.grade, f[7], 32),
+                   curve_arg ? curve_arg : "linear");
+        }
         snprintf(path, sizeof path, "%s%s", base,
                  ft_writer_find("positive")->ext);
         if (ft_png_write_positive(path, &im, &e)) {
