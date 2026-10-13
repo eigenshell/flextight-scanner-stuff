@@ -18,8 +18,10 @@
 /* Across the film the curve's optics at scale ppi x bin land slightly
  * off the nominal magnification and the ft_geom axis: scale_eff and axis
  * map CCD pixels to holder mm (ft_geom's mm, the 6000-scale frame crops
- * use). Measured 2026-10-13 against the standard preview on four physical
- * edges (holder, hole rows) of one strip, residuals <= 0.03 mm. */
+ * use). Measured 2026-10-13: each mode scanned back to back with a
+ * standard preview (the film moves between longer runs), five edges at
+ * the strip start, residuals <= 6 um; the nominal model read ~0.19 mm
+ * high. */
 typedef struct {
     const char *name;
     double ppi;        /* output pitch along (and nominally across) */

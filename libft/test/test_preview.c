@@ -49,32 +49,32 @@ int main(void)
     /* native: 3x3 boxes of 1500 ppi pixels = 500 ppi; x_out 3034 is where
      * the window's 0.898 mm lands at scale 1500 */
     CHECK(lround((ft_preview_mm_to_ccd(n, x0) - FT_CCD_FIRST) / n->bin) ==
-          3065);
-    ft_preview_axes(n, 3065, &ax);
+          3050);
+    ft_preview_axes(n, 3050, &ax);
     CHECK_NEAR(ax.y_mm_per_line, 25.4 / 500, 1e-12);
     CHECK_NEAR(ax.y_mm0, 4 * 25.4 / 500, 1e-12);
-    CHECK_NEAR(ax.x_mm_per_px, 3 * 25.4 / 1488.0, 1e-9);
-    CHECK_NEAR(ax.x_mm0, x0 + 25.4 / 1488.0, 0.01);  /* centre of 3 px */
+    CHECK_NEAR(ax.x_mm_per_px, 3 * 25.4 / 1491.5, 1e-9);
+    CHECK_NEAR(ax.x_mm0, x0 + 25.4 / 1491.5, 0.01);  /* centre of 3 px */
     /* hires: 2x2 boxes of 1000 ppi pixels = 500 ppi along */
     ft_preview_axes(h, 0, &ax);
     CHECK_NEAR(ax.y_mm_per_line, 25.4 / 500, 1e-12);
     CHECK_NEAR(ax.y_mm0, 3 * 25.4 / 500, 1e-12);
-    CHECK_NEAR(ax.x_mm_per_px, 4 * 25.4 / 1989.4, 1e-9);
+    CHECK_NEAR(ax.x_mm_per_px, 4 * 25.4 / 1992.4, 1e-9);
 
-    /* the hardware fit (2026-10-13): four edges of one strip, measured as
-     * CCD pixels at native and hires (nominal-model mm 2.25/3.42/28.25/
-     * 29.74 and 2.27/3.41/28.31/29.83), land on the standard preview's
-     * 1.71/2.92/27.94/29.43 mm */
+    /* the hardware fit (2026-10-13): edges at the strip start as CCD
+     * pixels in a hires and a native scan, each taken back to back with a
+     * standard preview that put them at these holder mm */
     {
-        const double sd[4] = { 1.71, 2.92, 27.94, 29.43 };
-        const double nm[4] = { 2.25, 3.42, 28.25, 29.74 };
-        const double hm[4] = { 2.27, 3.41, 28.31, 29.83 };
+        const double hc[5] = { 5061.3, 2913.3, 3009.7, 4967.4, 5063.3 };
+        const double hm[5] = { 28.663, 1.276, 2.499, 27.456, 28.681 };
+        const double nc[5] = { 4822.9, 3214.4, 3287.1, 4752.3, 4824.1 };
+        const double nm[5] = { 28.637, 1.248, 2.481, 27.431, 28.663 };
         int i;
-        for (i = 0; i < 4; i++) {
-            CHECK_NEAR(ft_preview_ccd_to_mm(n, ft_mm_to_ccd(nm[i], 1500)),
-                       sd[i], 0.05);
-            CHECK_NEAR(ft_preview_ccd_to_mm(h, ft_mm_to_ccd(hm[i], 2000)),
-                       sd[i], 0.05);
+        for (i = 0; i < 5; i++) {
+            CHECK_NEAR(ft_preview_ccd_to_mm(h, hc[i]), hm[i], 0.01);
+            CHECK_NEAR(ft_preview_ccd_to_mm(n, nc[i]), nm[i], 0.01);
+            /* the nominal model was ~0.19 mm high */
+            CHECK(ft_ccd_to_mm(hc[i], 2000) - hm[i] > 0.1);
         }
         /* standard keeps ft_geom's model exactly */
         CHECK_NEAR(ft_preview_ccd_to_mm(s, 3000), ft_ccd_to_mm(3000, 6300),

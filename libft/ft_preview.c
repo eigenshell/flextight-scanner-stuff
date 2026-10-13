@@ -5,8 +5,8 @@
 
 static const ft_preview MODES[] = {
     { "standard", 525.0, 12, 1, 6300.0, FT_CCD_AXIS },
-    { "hires", 1000.0, 2, 2, 1989.4, 4170.8 },     /* nominal 2000 */
-    { "native", 1500.0, 1, 3, 1488.0, 4149.8 },    /* nominal 1500 */
+    { "hires", 1000.0, 2, 2, 1992.4, 4140.5 },     /* nominal 2000 */
+    { "native", 1500.0, 1, 3, 1491.5, 4132.9 },    /* nominal 1500 */
 };
 
 const ft_preview *ft_preview_find(const char *name)
