@@ -13,6 +13,9 @@ typedef struct {
     ft_frame_type type;
     int include;
     double ppi;
+    int bin;                      /* CCD px per output px; 0 = the fastest
+                                     (ft_bin_for_ppi). Smaller = lower
+                                     magnification, more light, slower */
     double y0, x0, len, width;    /* window, holder mm */
     double tilt_deg;
     int sprockets, straighten, confidence_low, done;
@@ -31,5 +34,7 @@ typedef struct {
 int ft_job_write(const ft_job *j, FILE *out);
 int ft_job_read(ft_job *j, FILE *in, ft_err *e);
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e);
+/* the bin a frame scans with: its own, or the fastest for its ppi */
+int ft_job_bin(const ft_job_frame *f);
 
 #endif

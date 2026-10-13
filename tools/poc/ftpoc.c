@@ -38,6 +38,7 @@
 #include "ft_geom.h"
 #include "ft_holder.h"
 #include "ft_job.h"
+#include "ft_plan.h"
 #include "ft_png.h"
 #include "ft_preview.h"
 
@@ -1385,10 +1386,10 @@ out:
 
 #define WHITE_CLIP 15500.0f   /* raw white this high: R clips (~15860) */
 
-/* Load a hires/native preview as its detection image: flat-fielded and
+/* Load a 1000/1500 ppi preview as its detection image: flat-fielded and
  * defect-fixed at full resolution in chunks of lines, box-averaged by f,
  * then RGB-aligned (k / f lines). The full-size image is never held: a
- * native preview is ~13700 x 1900 px, too big as floats for a 32-bit
+ * 1500 ppi preview is ~13700 x 1900 px, too big as floats for a 32-bit
  * process. Returns (lines/f) x (px/f) x 3 floats, NULL on failure. */
 static float *load_preview_ds(const char *scan, int px, int bin, int x, int f,
                               int *lines_out, int *px_out)
@@ -1554,12 +1555,20 @@ static void load_lens(void)
 #define CROP_X_MAX   32.0        /* mm across: the holder's crop limit */
 struct crop_req {
     double ppi, x, y, w, h;      /* mm */
+    int bin;                     /* 0: the fastest (ft_bin_for_ppi) */
     long ccd, optic, focus_offset;
     int ccd_only;                /* offset on the CCD alone (calibration) */
     long keep;
     DWORD hold;
     const char *out;
 };
+
+static long crop_bin(const struct crop_req *r)
+{
+    if (!r->bin)
+        return ft_bin_for_ppi(r->ppi);
+    return ft_bin_ok(r->ppi, r->bin) ? r->bin : -1;
+}
 
 /* Every check crop_scan makes before it sends anything: 0 with the
  * CCD/lens pair it would use in *ccd / *optic, or CROP_REFUSED (reason
@@ -1588,11 +1597,16 @@ static int crop_check(const struct crop_req *r, long *ccd_out,
                         "scanned (x+w <= 32 mm, y+h <= 231 mm)\n");
         return CROP_REFUSED;
     }
-    /* largest bin dividing 12 (byte 55 = 12 / bin in every capture) that
-     * keeps the optical scale ppi x bin within 6300 */
-    bin = ft_bin_for_ppi(r->ppi);
-    if (bin < 0)
+    /* bin divides 12 (byte 55 = 12 / bin in every capture); by default
+     * the largest that keeps the optical scale ppi x bin within 6300 (the
+     * fastest); a smaller one is a lower magnification (ft_plan.h) */
+    bin = crop_bin(r);
+    if (bin < 0) {
+        fprintf(stderr, "crop: bin %d not usable at %g ppi (the optics ppi x "
+                        "bin must be %.0f..%.0f)\n", r->bin, r->ppi,
+                FT_SCALE_MIN, FT_SCALE_MAX);
         return CROP_REFUSED;
+    }
     scale = r->ppi * bin;
     if ((long)(r->w / 25.4 * r->ppi + 0.5) * 6 > 60000) {
         fprintf(stderr, "crop: line too long for one ReadExt\n");
@@ -1627,7 +1641,7 @@ static int crop_check(const struct crop_req *r, long *ccd_out,
 /* One scan from the captured 2000 ppi crop descriptor (SCAN_2000) with
  * only the decoded fields replaced: @10 ppi, @14/@18 origin and @22/@26
  * size in output pixels/lines, @51 bin, @55 = 12 / bin and the CCD/lens
- * pair. Every synthesized scan (crops, hires/native previews) is built
+ * pair. Every synthesized scan (crops, 1000/1500 ppi previews) is built
  * here, so all of them follow the same proven construction. */
 static int synth_scan(const char *name, const char *what, double ppi,
                       long bin, long x_out, long y_line, long px, long lines,
@@ -1671,7 +1685,7 @@ static int crop_scan(const struct crop_req *r)
 
     if (crop_check(r, &ccd, &optic))
         return CROP_REFUSED;
-    bin = ft_bin_for_ppi(r->ppi);   /* crop_check: valid */
+    bin = crop_bin(r);              /* crop_check: valid */
     scale = r->ppi * bin;
     cx = ft_mm_to_ccd(r->x, scale);
     return synth_scan("crop", "synthesized crop", r->ppi, bin,
@@ -1683,8 +1697,9 @@ static int crop_scan(const struct crop_req *r)
 }
 
 /* A whole-holder preview (libft/ft_preview.h). standard: FlexColor's
- * captured 525 ppi descriptor, as before. hires/native: synthesized over
- * the same window at their lower magnification, on the focus curve. */
+ * captured 525 ppi descriptor, as before. 1000/1500: synthesized over
+ * the same window at the 6000 crop optics (bin 6 / 4), on the focus
+ * curve: the fastest way to those resolutions. */
 static int preview_scan(const ft_preview *m, long keep, DWORD hold,
                         const char *out)
 {
@@ -1702,8 +1717,7 @@ static int preview_scan(const ft_preview *m, long keep, DWORD hold,
     if (!pos_ok(ccd, optic))
         return CROP_REFUSED;
     ft_preview_window(&x0, &w, &len);
-    x_out = (long)((ft_preview_mm_to_ccd(m, x0) - FT_CCD_FIRST) / m->bin +
-                   0.5);
+    x_out = (long)((ft_mm_to_ccd(x0, scale) - FT_CCD_FIRST) / m->bin + 0.5);
     px = (long)(w / 25.4 * m->ppi + 0.5);
     if (x_out < 0 || (x_out + px) * m->bin > FT_CCD_PIXELS ||
         px * 6 > 60000) {
@@ -1723,7 +1737,8 @@ static int cmd_crop(int argc, char **argv)
 
     if (argc < 5) {
         fprintf(stderr, "crop <ppi> <x_mm> <y_mm> <w_mm> <h_mm> "
-                        "[-n lines] [-h s] [-p ccd,lens] [-l lamp] [-o file]\n");
+                        "[-b bin] [-n lines] [-h s] [-p ccd,lens] [-l lamp] "
+                        "[-o file]\n");
         return 2;
     }
     memset(&r, 0, sizeof r);
@@ -1734,6 +1749,7 @@ static int cmd_crop(int argc, char **argv)
     r.out = "crop.raw";
     for (i = 5; i + 1 < argc; i += 2) {
         if (strcmp(argv[i], "-n") == 0) r.keep = atol(argv[i + 1]);
+        else if (strcmp(argv[i], "-b") == 0) r.bin = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "-h") == 0) { if (parse_hold(argv[i + 1], &r.hold)) return 2; }
         else if (strcmp(argv[i], "-o") == 0) r.out = argv[i + 1];
         else if (strcmp(argv[i], "-p") == 0) {
@@ -1987,6 +2003,38 @@ static int write_strip_png(const char *path, const float *t, int lines, int px,
         fprintf(stderr, "%s\n", e.msg);
     free(img);
     return rc;
+}
+
+/* Per included frame: every usable bin at its ppi with the scan time,
+ * light per sample and per-read Dmax estimate (ft_plan.h); totals for
+ * the fastest and the most-light choice. The job's bin key picks one. */
+static void print_options(const ft_job *j)
+{
+    double t_fast = 0, t_light = 0;
+    int i, k, n, b[6], any = 0;
+    printf("\n optics per frame: bin = time, light per sample, Dmax~ "
+           "(job key bin; 0 = fastest)\n");
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        if (!f->include)
+            continue;
+        n = ft_bins_for_ppi(f->ppi, b);
+        if (n < 1)
+            continue;
+        any = 1;
+        printf(" %3d %5g ppi ", f->index, f->ppi);
+        for (k = 0; k < n; k++) {
+            double l = ft_light_rel(&g_lens, f->ppi * b[k]);
+            printf(" %s%d: %3.0f s %.1fx %.2f", k ? "| " : "", b[k],
+                   ft_scan_seconds(f->ppi, b[k], f->len), l, ft_dmax_est(l));
+        }
+        printf("\n");
+        t_fast += ft_scan_seconds(f->ppi, b[0], f->len);
+        t_light += ft_scan_seconds(f->ppi, b[n - 1], f->len);
+    }
+    if (any)
+        printf(" all included frames: ~%.1f min fastest, ~%.1f min most "
+               "light (plus focus crops)\n", t_fast / 60, t_light / 60);
 }
 
 static const char *type_name(ft_frame_type t)
@@ -2267,7 +2315,7 @@ static int cmd_frames(int argc, char **argv)
         else if (strcmp(argv[i], "--preview") == 0) {
             pm = ft_preview_find(argv[i + 1]);
             if (!pm) {
-                fprintf(stderr, "frames: --preview standard|hires|native\n");
+                fprintf(stderr, "frames: --preview standard|1000|1500\n");
                 return 2;
             }
         }
@@ -2360,6 +2408,7 @@ static int cmd_frames(int argc, char **argv)
     rc = write_strip_png(path, t, lines, px, &ax, &j);
     free(t);
     print_job(&j);
+    print_options(&j);
     printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
            base, base, base);
     if (focus_failed)
@@ -2444,6 +2493,7 @@ static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
         y1 = h->scan_len_mm;
     memset(q, 0, sizeof *q);
     q->ppi = fr->ppi;
+    q->bin = fr->bin;
     q->x = x0;
     q->y = y0;
     q->w = x1 - x0;
@@ -2463,7 +2513,7 @@ static void write_crop(const char *out, const ft_job_frame *fr, long off)
     long xs = meta_long(out, "x"), ys = meta_long(out, "y");
     long pxs = meta_long(out, "px"), ls = meta_long(out, "lines");
     long cx, cy, cw, ch, k;
-    int bin = ft_bin_for_ppi(fr->ppi);
+    int bin = ft_job_bin(fr);
     double px_mm = fr->ppi / 25.4;
     FILE *m;
 
@@ -2642,8 +2692,10 @@ static int cmd_scanjob(int argc, char **argv)
         job_window(fr, h, off, &q);
         snprintf(out, sizeof out, "%s_frame%02d.raw", jobbase, fr->index);
         q.out = out;
-        printf("\n=== frame %d: %s, %g ppi, focus offset %ld\n", fr->index,
-               type_name(fr->type), fr->ppi, off);
+        printf("\n=== frame %d: %s, %g ppi, bin %d (~%.0f s), focus offset "
+               "%ld\n", fr->index, type_name(fr->type), fr->ppi,
+               ft_job_bin(fr), ft_scan_seconds(fr->ppi, ft_job_bin(fr), q.h),
+               off);
         rc = crop_scan(&q);
         if (rc == CROP_REFUSED) {
             printf("frame %d: REFUSED (reason above); not scanned, left "
@@ -2878,8 +2930,9 @@ static int scan_args(int argc, char **argv)
             }
         } else {
             size_t k;
-            if (strcmp(a, "hires") == 0 || strcmp(a, "native") == 0) {
-                pm = ft_preview_find(a);
+            if (strcmp(a, "preview1000") == 0 ||
+                strcmp(a, "preview1500") == 0) {
+                pm = ft_preview_find(a + 7);
                 continue;
             }
             for (k = 0; k < sizeof PRESETS / sizeof PRESETS[0]; k++)
@@ -2940,8 +2993,8 @@ int main(int argc, char **argv)
             "  grab <n> [len]     n ReadExt blocks (default len 3996) -> grab.raw\n"
             "  scan [preset] [-n lines] [-y line] [-f frame] [-h hold_s] [-o file]\n"
             "                     presets: preview (525 ppi), 2000, 1000, 3f (630 ppi);\n"
-            "                     hires (1000 ppi) and native (1500 ppi): whole-holder\n"
-            "                     previews at low magnification (-n, -h, -l, -o only)\n"
+            "                     preview1000, preview1500: whole-holder previews at\n"
+            "                     the 6000 crop optics (-n, -h, -l, -o only)\n"
             "                     -n stop after n lines (default: the whole window)\n"
             "                     -y start line along the strip (holder-clamped)\n"
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
@@ -2950,19 +3003,22 @@ int main(int argc, char **argv)
             "                        FlexColor's values, lens - CCD >= 150000)\n"
             "                     -l <0..255> lamp level @76 (scans send 0)\n"
             "                     -> scan.raw (+ .cal 250 calibration lines, .txt)\n"
-            "  crop <ppi> <x> <y> <w> <h> [-n lines] [-h s] [-p ccd,lens] [-l lamp]\n"
-            "       [-o file]\n"
+            "  crop <ppi> <x> <y> <w> <h> [-b bin] [-n lines] [-h s] [-p ccd,lens]\n"
+            "       [-l lamp] [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
+            "                     -b CCD px per output px (default the fastest);\n"
+            "                        smaller = lower magnification, more light\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
             "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no]\n"
-            "         [--preview standard|hires|native] [-h s] [-o strip]\n"
+            "         [--preview standard|1000|1500] [-h s] [-o strip]\n"
             "                     preview (lamp 255), detect frames, 3-point focus\n"
             "                     check -> strip.job (edit it) + strip.png;\n"
             "                     fb.raw* are scratch focus crops\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
-            "                     --preview standard 525 ppi (~40 s), hires 1000 ppi\n"
-            "                       (~7 min), native 1500 ppi (~22 min; every CCD\n"
-            "                       pixel, ~3.9x the light): strip.raw keeps it\n"
+            "                     --preview 525 ppi (standard, ~40 s), 1000 (~2.7\n"
+            "                       min) or 1500 (~5.7 min); strip.raw keeps it\n"
+            "                     prints per-frame optics options (bin: time,\n"
+            "                       light, Dmax); pick one with the job's bin key\n"
             "  scan --job strip.job [-h s]  scan the job's included frames\n"
             "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
             "                     crop, named after the job file)\n"

@@ -4,9 +4,9 @@
 #include "ft_preview.h"
 
 static const ft_preview MODES[] = {
-    { "standard", 525.0, 12, 1, 6300.0, FT_CCD_AXIS },
-    { "hires", 1000.0, 2, 2, 1989.4, 4170.8 },     /* nominal 2000 */
-    { "native", 1500.0, 1, 3, 1488.0, 4149.8 },    /* nominal 1500 */
+    { "standard", 525.0, 12, 1 },
+    { "1000", 1000.0, 6, 2 },
+    { "1500", 1500.0, 4, 3 },
 };
 
 const ft_preview *ft_preview_find(const char *name)
@@ -14,6 +14,8 @@ const ft_preview *ft_preview_find(const char *name)
     size_t i;
     if (!name)
         return NULL;
+    if (strcmp(name, "525") == 0)
+        return &MODES[0];
     for (i = 0; i < sizeof MODES / sizeof MODES[0]; i++)
         if (strcmp(MODES[i].name, name) == 0)
             return &MODES[i];
@@ -30,20 +32,6 @@ void ft_preview_window(double *x0, double *w, double *len)
     *len = FT_PREVIEW_LINES_525 * 25.4 / 525;
 }
 
-/* ft_geom's mapping with this mode's scale and axis */
-double ft_preview_mm_to_ccd(const ft_preview *m, double mm)
-{
-    return m->axis +
-           (mm / 25.4 * 6000.0 + FT_CCD_FIRST - m->axis) * m->scale_eff /
-               6000.0;
-}
-
-double ft_preview_ccd_to_mm(const ft_preview *m, double ccd)
-{
-    return ((ccd - m->axis) * 6000.0 / m->scale_eff + m->axis -
-            FT_CCD_FIRST) * 25.4 / 6000.0;
-}
-
 long ft_preview_lines(const ft_preview *m)
 {
     /* the same rounding as ftpoc's holder-end check */
@@ -58,14 +46,14 @@ int ft_preview_rgb_k(const ft_preview *m)
 void ft_preview_axes(const ft_preview *m, long x_out, ft_axes *ax)
 {
     int f = m->down;
+    double scale = m->ppi * m->bin;
     /* centre of a detection pixel: f output pixels of bin CCD pixels */
     double half = (f * m->bin - 1) / 2.0;
     ax->y_mm_per_line = 25.4 / m->ppi * f;
     ax->y_mm0 = (ft_preview_rgb_k(m) / f) * ax->y_mm_per_line;
-    ax->x_mm0 =
-        ft_preview_ccd_to_mm(m, ft_out_to_ccd(x_out, 0, m->bin) + half);
+    ax->x_mm0 = ft_ccd_to_mm(ft_out_to_ccd(x_out, 0, m->bin) + half, scale);
     ax->x_mm_per_px =
-        ft_preview_ccd_to_mm(m, ft_out_to_ccd(x_out, f, m->bin) + half) -
+        ft_ccd_to_mm(ft_out_to_ccd(x_out, f, m->bin) + half, scale) -
         ax->x_mm0;
 }
 

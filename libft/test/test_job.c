@@ -52,6 +52,45 @@ int main(void)
     CHECK(b.f[1].sprockets && b.f[1].straighten && b.f[1].confidence_low);
     CHECK(b.f[1].focus_offset == -800 && b.f[1].done);
     CHECK(b.f[0].line > 0 && b.f[1].line > b.f[0].line);
+    CHECK(b.f[0].bin == 0 && ft_job_bin(&b.f[0]) == 2);   /* fastest */
+
+    /* bin: per-frame optics; written, read back, options listed */
+    {
+        char buf[4096];
+        size_t n;
+        ft_job c = a;
+        c.f[1].bin = 1;
+        f = tmpfile();
+        CHECK(ft_job_write(&c, f) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        CHECK(strstr(buf, "bin = 0") != NULL && strstr(buf, "bin = 1") != NULL);
+        /* 3150: bins 2 and 1; 2000: 3, 2 and 1 */
+        CHECK(strstr(buf, "# bin options at 3150 ppi") != NULL);
+        CHECK(strstr(buf, "# bin options at 2000 ppi (time, light, Dmax~): "
+                          "3: ") != NULL);
+        rewind(f);
+        CHECK(ft_job_read(&b, f, &e) == 0);
+        fclose(f);
+        CHECK(b.f[0].bin == 0 && b.f[1].bin == 1 && ft_job_bin(&b.f[1]) == 1);
+    }
+    /* a job without bin keys (older files) scans with the fastest bin */
+    f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\n"
+             "window = 50 4 36 24\n");
+    CHECK(ft_job_read(&b, f, &e) == 0);
+    fclose(f);
+    CHECK(b.f[0].bin == 0 && ft_job_bin(&b.f[0]) == 3);
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
+    b.f[0].bin = 1;                           /* optics 2000: usable */
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
+    b.f[0].bin = 6;                           /* optics 12000: no */
+    CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+    CHECK(strstr(e.msg, "bin 6") != NULL);
+    f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\nbin = 13\n"
+             "window = 50 4 36 24\n");
+    CHECK(ft_job_read(&b, f, &e) == -1);
+    fclose(f);
 
     /* parse errors carry the line number */
     f = text("[strip]\nholder = 24x217\nbogus = 1\n");
