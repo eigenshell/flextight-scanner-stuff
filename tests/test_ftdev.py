@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import types
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -143,3 +144,94 @@ def test_defect_map_and_bad_format(ftdev, tmp_path):
     r = subprocess.run([str(ftdev), str(scan), "-f", "fff"],
                        capture_output=True, text=True)
     assert r.returncode == 2 and "unknown format" in r.stderr
+
+
+def read_png16(path):
+    """h x w x 3 uint16 from ft_png's 16-bit RGB PNG (filter 0 rows)."""
+    b = path.read_bytes()
+    assert b[:8] == b"\x89PNG\r\n\x1a\n"
+    pos, idat = 8, b""
+    while pos < len(b):
+        n = struct.unpack(">I", b[pos:pos + 4])[0]
+        kind, data = b[pos + 4:pos + 8], b[pos + 8:pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", data[:10])
+            assert (depth, ctype) == (16, 2)
+        elif kind == b"IDAT":
+            idat += data
+        pos += 12 + n
+    rows = np.frombuffer(zlib.decompress(idat), np.uint8).reshape(h, 1 + 6 * w)
+    assert (rows[:, 0] == 0).all()
+    return rows[:, 1:].copy().view(">u2").reshape(h, w, 3)
+
+
+BASE = (0.2, 0.45, 0.7)                      # orange mask, D
+GAMMA = (0.45, 0.50, 0.55)                   # per dye layer
+
+
+def synth_negative(tmp_path, film_base=True):
+    """A colour negative of 12 grey stripes (exposure 0.01..1) across the
+    CCD line, through per-channel characteristic curves and the orange
+    mask; .txt with the preview's film_base unless film_base=False."""
+    px, lines, binning, x = 120, 80, 3, 25
+    dark = np.full((px, 3), 300)
+    white = np.full((px, 3), 6300)
+    s = np.arange(px) // 10
+    expo = 10.0 ** (-2 + 2 * s / 11)
+    d = np.array(BASE) + np.array(GAMMA) * np.log10(expo[:, None] / 0.002)
+    t = np.broadcast_to(10.0 ** -d, (lines, px, 3))
+    raw = (dark + t * (white - dark)).round().astype("<u2")
+    cal = np.concatenate([np.broadcast_to(dark, (200, px, 3)),
+                          np.broadcast_to(white, (50, px, 3))])
+    scan = tmp_path / "neg_frame02.raw"
+    raw.tofile(scan)
+    cal.astype("<u2").tofile(str(scan) + ".cal")
+    meta = (f"preset=crop\nppi=2000\npx={px}\nx={x}\nlines={lines}\ny=0\n"
+            f"bin={binning}\nkept={lines}\n")
+    if film_base:
+        meta += "film_base=%.4f %.4f %.4f\n" % BASE
+    Path(str(scan) + ".txt").write_text(meta)
+    return scan
+
+
+@needs_cc
+def test_positive_greys_neutral(ftdev, tmp_path):
+    scan = synth_negative(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive",
+                        "--film", "neg"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "--base 0.2000,0.4500,0.7000" in r.stdout      # from the .txt
+    img = read_png16(tmp_path / "neg_frame02_positive.png").astype(float)
+    # image rows are CCD pixels: stripe s is rows 10 s .. 10 s + 9
+    means = np.array([img[10 * s + 2:10 * s + 8].mean(axis=(0, 1))
+                      for s in range(12)]) / 65535
+    assert np.abs(means[:, 0] - means[:, 1]).max() < 0.01
+    assert np.abs(means[:, 2] - means[:, 1]).max() < 0.01
+    assert (np.diff(means[:, 1]) > 0).all()        # more exposure, brighter
+    assert means[-1, 1] > 0.9 and means[0, 1] < 0.35
+
+
+@needs_cc
+def test_positive_flags(ftdev, tmp_path):
+    scan = synth_negative(tmp_path, film_base=False)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "--film" in r.stderr
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive", "--film",
+                        "neg", "--curve", "0,0 0.5"], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "curve" in r.stderr
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive", "--film",
+                        "neg", "--tint", "60,0,0"], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "tint r" in r.stderr
+    # no film_base in the .txt: estimated from the frame, with a note
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive,dng",
+                        "--film", "bw", "--curve", "strong"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "estimated from the frame" in r.stderr
+    assert "--film bw" in r.stdout and '--curve "strong"' in r.stdout
+    assert (tmp_path / "neg_frame02.dng").exists()
+    img = read_png16(tmp_path / "neg_frame02_positive.png")
+    assert (img[..., 0] == img[..., 1]).all() and (img[..., 1] == img[..., 2]).all()
