@@ -155,7 +155,8 @@ float *synth_preview(const synth_spec *s)
             double gain = 1 + s->drift * sin(2 * PI * y / period);
             float *p = t + ((size_t)l * s->px + c) * 3;
             int fr = -1, speck = 0;
-            if (y < s->film_y0 || y >= s->film_y1) {  /* holder outside film */
+            if (y < s->film_y0 || y >= s->film_y1 ||  /* holder outside film */
+                (s->win_x1 > s->win_x0 && (x < s->win_x0 || x >= s->win_x1))) {
                 for (k = 0; k < 3; k++) {
                     double v = s->open_outside ? 1.0 : s->metal > 0 ? s->metal : 0.0005;
                     if (!s->open_outside && s->metal_noise > 0)
