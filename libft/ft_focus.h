@@ -48,7 +48,9 @@ int ft_positions_ok(long ccd, long optic);
 int ft_optics_focus(const ft_lens *l, double scale, long off, long *ccd,
                     long *optic);
 
-/* rms log-gradient along rows of a w x h single-channel image */
+/* sharpness of a w x h single-channel linear image: rms Sobel gradient
+ * of the 3x3-box-denoised image over its mean (~relative step per pixel;
+ * gain-free). 0 when w or h < 5 or the mean is 0; NaN out of memory. */
 double ft_sharpness(const float *g, int w, int h);
 /* x must be ascending; -1 also if any y is not finite.
  * parabola peak through the maximum and its neighbours: 0 ok, 1 maximum

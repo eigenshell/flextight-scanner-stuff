@@ -91,15 +91,49 @@ int main(void)
     }
     /* sharpness: a crisp pattern beats a blurred one, flat is zero */
     {
-        float crisp[64], soft[64], flat[64];
+        float crisp[128], soft[128], flat[128], ramp[128], dim[128];
         int i;
-        for (i = 0; i < 64; i++) {
+        for (i = 0; i < 128; i++) {
             crisp[i] = (i / 4) % 2 ? 0.8f : 0.2f;
             soft[i] = 0.5f + 0.15f * (float)sin(i * 3.14159 / 4);
             flat[i] = 0.5f;
+            ramp[i] = 0.1f + 0.001f * (i % 16);
+            dim[i] = crisp[i] * 0.01f;
         }
-        CHECK(ft_sharpness(crisp, 16, 4) > ft_sharpness(soft, 16, 4));
-        CHECK_NEAR(ft_sharpness(flat, 16, 4), 0, 1e-12);
+        CHECK(ft_sharpness(crisp, 16, 8) > ft_sharpness(soft, 16, 8));
+        CHECK_NEAR(ft_sharpness(flat, 16, 8), 0, 1e-12);
+        /* relative gradient per pixel: 0.001 / ~0.1075 */
+        CHECK_NEAR(ft_sharpness(ramp, 16, 8), 0.001 / 0.1075, 0.0005);
+        /* gain-free: a denser frame or a dimmer lamp scores the same */
+        CHECK_NEAR(ft_sharpness(dim, 16, 8), ft_sharpness(crisp, 16, 8), 1e-5);
+        CHECK(ft_sharpness(crisp, 4, 32) == 0);         /* too small */
+    }
+    /* sharpness on a dense slide (hardware 2026-10-13): transmittance
+     * ~0.01 with sensor noise as large as the detail. The crisp edge
+     * pattern must still clearly beat the same pattern defocused; a
+     * per-pixel log gradient is noise-dominated here (B2: 8 % contrast
+     * over a whole focus sweep, against 73 % for this metric). */
+    {
+        enum { W = 96, H = 48 };
+        static float crisp[W * H], soft[W * H], clean[W];
+        unsigned st = 12345;
+        int x, y, k;
+        for (x = 0; x < W; x++)
+            clean[x] = (x / 12) % 2 ? 0.014f : 0.006f;
+        for (y = 0; y < H; y++)
+            for (x = 0; x < W; x++) {
+                double u, v, n, sm = 0;
+                for (k = -5; k <= 5; k++)    /* defocus: 11-px box */
+                    sm += clean[(x + k + W) % W];
+                st = st * 1103515245u + 12345u;
+                u = (((st >> 8) & 0xffffff) + 0.5) / 16777216.0;
+                st = st * 1103515245u + 12345u;
+                v = ((st >> 8) & 0xffffff) / 16777216.0;
+                n = 0.003 * sqrt(-2 * log(u)) * cos(2 * 3.14159265 * v);
+                crisp[y * W + x] = (float)(clean[x] + n);
+                soft[y * W + x] = (float)(sm / 11 + n);
+            }
+        CHECK(ft_sharpness(crisp, W, H) > 1.3 * ft_sharpness(soft, W, H));
     }
 
     /* focus file round trip */

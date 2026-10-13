@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 #include "ft_focus.h"
 
@@ -63,21 +64,44 @@ int ft_positions_ok(long ccd, long optic)
            optic >= FT_OPTIC_MIN && optic <= FT_OPTIC_MAX && ccd < optic;
 }
 
+/* Tenengrad on a 3x3-box-denoised image, over its mean: sobel x and y
+ * on the smoothed pixels with full box support, rms magnitude / 8 (a
+ * ramp's per-pixel step) / mean. Dividing by the window mean, not by
+ * each pixel (log gradient), keeps dense film from inflating its noise:
+ * on a dense slide the log gradient was flat across a whole focus sweep
+ * (hardware 2026-10-13). */
 double ft_sharpness(const float *g, int w, int h)
 {
-    double s = 0;
+    int sw = w - 2, sh = h - 2, x, y, i, j;
+    float *b;
+    double sum = 0, t = 0, mean;
     long n = 0;
-    int x, y;
-    for (y = 0; y < h; y++) {
-        const float *r = g + (long)y * w;
-        for (x = 1; x < w; x++) {
-            double a = log(r[x - 1] > 1e-3f ? r[x - 1] : 1e-3);
-            double b = log(r[x] > 1e-3f ? r[x] : 1e-3);
-            s += (b - a) * (b - a);
+
+    if (w < 5 || h < 5)
+        return 0;
+    b = malloc((size_t)sw * sh * sizeof *b);
+    if (!b)
+        return NAN;
+    for (y = 0; y < sh; y++)               /* b[y][x] = box at g[y+1][x+1] */
+        for (x = 0; x < sw; x++) {
+            double a = 0;
+            for (j = 0; j < 3; j++)
+                for (i = 0; i < 3; i++)
+                    a += g[(long)(y + j) * w + x + i];
+            b[(long)y * sw + x] = (float)(a / 9);
+            sum += a / 9;
+        }
+    mean = sum / ((double)sw * sh);
+    for (y = 1; y < sh - 1; y++)
+        for (x = 1; x < sw - 1; x++) {
+            const float *u = b + (long)(y - 1) * sw + x, *m = u + sw, *d = m + sw;
+            double gx = (u[1] + 2.0 * m[1] + d[1]) - (u[-1] + 2.0 * m[-1] + d[-1]);
+            double gy = (d[-1] + 2.0 * d[0] + d[1]) - (u[-1] + 2.0 * u[0] + u[1]);
+            t += gx * gx + gy * gy;
             n++;
         }
-    }
-    return n ? sqrt(s / n) : 0;
+    free(b);
+    return mean > 0 ? sqrt(t / n) / (8 * mean) : 0;
 }
 
 int ft_peak(const long *x, const double *y, int n, double *peak)
