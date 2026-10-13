@@ -280,6 +280,12 @@ def test_positive_validates_before_writing(ftdev, tmp_path):
     assert r.returncode == 2 and "ftdev:" in r.stderr
     assert not (tmp_path / "neg_frame02.dng").exists()
     assert not (tmp_path / "neg_frame02_positive.png").exists()
+    r = subprocess.run([str(ftdev), str(scan), "-f", "positive,dng",
+                        "--film", "neg", "--base", "5,5,5"],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "ftdev:" in r.stderr
+    assert not (tmp_path / "neg_frame02.dng").exists()
+    assert not (tmp_path / "neg_frame02_positive.png").exists()
 
 
 @needs_cc
@@ -311,6 +317,18 @@ def test_positive_paste_back(ftdev, tmp_path):
     assert r2.returncode == 0, r2.stderr
     assert (tmp_path / "a_positive.png").read_bytes() == \
         (tmp_path / "b_positive.png").read_bytes()
+    # b&w, with a quoted points curve
+    r1 = subprocess.run([str(ftdev), str(scan), "-f", "positive", "--film",
+                         "bw", "--curve", "0,0 0.4,0.3 1,1", "--grade",
+                         "2.25", "-o", str(tmp_path / "c")],
+                        capture_output=True, text=True)
+    assert r1.returncode == 0, r1.stderr
+    r2 = subprocess.run([str(ftdev), str(scan), "-f", "positive", "-o",
+                         str(tmp_path / "d"), *shlex.split(recipe_of(r1))],
+                        capture_output=True, text=True)
+    assert r2.returncode == 0, r2.stderr
+    assert (tmp_path / "c_positive.png").read_bytes() == \
+        (tmp_path / "d_positive.png").read_bytes()
 
 
 @needs_cc
@@ -323,10 +341,9 @@ def test_positive_dng_unrendered(ftdev, tmp_path):
                         "neg", "-o", str(tmp_path / "pl_b")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    a = (tmp_path / "pl_a.dng").read_bytes()
-    b = (tmp_path / "pl_b.dng").read_bytes()
-    # the header carries a timestamp: compare size and the 120x80x3 pixels
-    assert len(a) == len(b) and a[-120 * 80 * 3 * 2:] == b[-120 * 80 * 3 * 2:]
+    _, pa = read_dng(tmp_path / "pl_a.dng")
+    _, pb = read_dng(tmp_path / "pl_b.dng")
+    assert np.array_equal(pa, pb)
 
 
 @needs_cc

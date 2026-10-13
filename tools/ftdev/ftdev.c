@@ -260,6 +260,8 @@ int main(int argc, char **argv)
             rcp.exposure = uexp;
         if (has_tint)
             memcpy(rcp.tint, utint, sizeof rcp.tint);
+        if (has_base)                   /* auto never changes the base */
+            ft_recipe_set_base(&rcp, ubase);
         if (ft_recipe_validate(&rcp, &e)) {     /* before any file is written */
             fprintf(stderr, "ftdev: %s\n", e.msg);
             return 2;
@@ -372,8 +374,8 @@ int main(int argc, char **argv)
                 rc = 1;
                 goto out;
             }
-            fprintf(stderr, "ftdev: note: no film_base in the .txt; film base "
-                            "estimated from the frame itself\n");
+            fprintf(stderr, "ftdev: note: no usable film_base in the .txt; "
+                            "film base estimated from the frame itself\n");
         }
         ft_recipe_set_base(&rcp, d);
         if (ft_render_auto(one, 1, &rcp, &e)) {
