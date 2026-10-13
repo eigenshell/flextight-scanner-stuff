@@ -53,10 +53,14 @@ void ft_recipe_default(ft_recipe *r, ft_render_mode m);
 /* -1 with e naming the field if any value is out of range */
 int ft_recipe_validate(const ft_recipe *r, ft_err *e);
 /* set base from per-channel film densities; b&w: folds them to the
- * luminance density of r->bw_weights and stores it in all three */
+ * luminance density of r->bw_weights and stores it in all three. If any
+ * d[c] is not finite, r->base is left unchanged. */
 void ft_recipe_set_base(ft_recipe *r, const float d[3]);
 
-/* LUT sizes: input LUT nodes are the floats whose bits >> 13 run from
+/* Accuracy: the compiled path is within 2/65535 (sRGB-encoded) of
+ * ft_render_direct for grade/range up to ~25; up to ~15/65535 at the
+ * validated extreme (grade 5, range 0.05): invisible at 8 bits.
+ * LUT sizes: input LUT nodes are the floats whose bits >> 13 run from
  * FT_RENDER_IN_K0 (10^-4.5) to that of FT_RENDER_T_MAX, 1024 per octave */
 #define FT_RENDER_IN_SHIFT 13
 #define FT_RENDER_IN_K0 114725u
@@ -74,8 +78,9 @@ typedef struct {
 
 /* validates r, then builds c; -1 with e filled on a bad recipe */
 int ft_render_compile(const ft_recipe *r, ft_render *c, ft_err *e);
-/* npx interleaved RGB pixels; in == out is allowed. NaN/inf in -> the
- * density floor; never fails, never writes NaN */
+/* npx interleaved RGB pixels; in == out is allowed. NaN, -inf and values
+ * below the floor -> the floor; +inf and values above FT_RENDER_T_MAX ->
+ * T_MAX. Never fails, never writes NaN */
 void ft_render_apply(const ft_render *c, const float *in, float *out,
                      size_t npx);
 /* the same pipeline in double, one pixel; r must be valid */

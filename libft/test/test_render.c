@@ -39,6 +39,22 @@ static double lut_error(const ft_recipe *r, int n)
                 worst = d;
         }
     }
+    {
+        static const float odd[] = { 0, -1, 1e-6f, 1.26f, 1.3f, 2,
+                                     (float)INFINITY };
+        for (i = 0; i < (int)(sizeof odd / sizeof *odd); i++) {
+            float t[3], a[3], b[3];
+            for (c = 0; c < 3; c++)
+                t[c] = odd[i];
+            ft_render_apply(&cr, t, a, 1);
+            ft_render_direct(r, t, b);
+            for (c = 0; c < 3; c++) {
+                double d = fabs(ft_srgb_encode(a[c]) - ft_srgb_encode(b[c]));
+                if (d > worst)
+                    worst = d;
+            }
+        }
+    }
     return worst;
 }
 
@@ -136,6 +152,12 @@ int main(void)
         /* neutral grey stays neutral (matrix rows sum to 1) */
         CHECK_NEAR(px(&r, g0, g1, g2, 0), px(&r, g0, g1, g2, 1), 1e-5);
         CHECK_NEAR(px(&r, g0, g1, g2, 2), px(&r, g0, g1, g2, 1), 1e-5);
+        /* pinned by hand: mid grey is u = 0, s = 0.5, P = 1.0 -> 0.1 */
+        CHECK_NEAR(px(&r, g0, g1, g2, 1), 0.1, 1e-6);
+        /* film base: n = 0, u = 0.5, s = 1/(1+exp(-3)), P = 2 s */
+        CHECK_NEAR(px(&r, (float)pow(10, -0.25), (float)pow(10, -0.6),
+                      (float)pow(10, -0.9), 1),
+                   pow(10, -2 / (1 + exp(-3))), 1e-6);
         /* + red tint = redder */
         q = r; q.tint[0] = 20;
         CHECK(px(&q, g0, g1, g2, 0) / px(&q, g0, g1, g2, 1) > 1.2);
@@ -187,6 +209,13 @@ int main(void)
         ft_recipe_set_base(&r, d);
         CHECK_NEAR(r.base[0], 0.3, 1e-5);
         CHECK_NEAR(r.base[2], 0.3, 1e-5);
+        {
+            float nd[3] = { 0.5f, (float)NAN, 0.7f };
+            ft_recipe_set_base(&r, nd);          /* non-finite: unchanged */
+            CHECK_NEAR(r.base[0], 0.3, 1e-5);
+            CHECK_NEAR(r.base[1], 0.3, 1e-5);
+            CHECK_NEAR(r.base[2], 0.3, 1e-5);
+        }
         CHECK(ft_render_compile(&r, &cr, &e) == 0);
         for (i = 0; i < 1000; i++) {
             float t[3], o[3];

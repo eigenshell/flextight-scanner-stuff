@@ -57,7 +57,7 @@ void ft_recipe_default(ft_recipe *r, ft_render_mode m)
 }
 
 /* lo <= v <= hi, false for NaN */
-static int in(double v, double lo, double hi)
+static int within(double v, double lo, double hi)
 {
     return v >= lo && v <= hi;
 }
@@ -79,32 +79,32 @@ int ft_recipe_validate(const ft_recipe *r, ft_err *e)
     if ((int)r->mode < FT_RENDER_NEG || (int)r->mode > FT_RENDER_BW)
         return ft_fail(e, "recipe: unknown mode %d", (int)r->mode);
     for (c = 0; c < 3; c++) {
-        if (!in(r->base[c], 0, 4.5))
+        if (!within(r->base[c], 0, 4.5))
             return ft_fail(e, "recipe: base %c = %g (0..4.5 D)", CH[c],
                            r->base[c]);
         if (r->mode == FT_RENDER_SLIDE && r->base[c] < 0.1)
             return ft_fail(e, "recipe: base %c = %g: a slide's black is "
                               ">= 0.1 D", CH[c], r->base[c]);
-        if (!in(r->range[c], 0.05, 4.5))
+        if (!within(r->range[c], 0.05, 4.5))
             return ft_fail(e, "recipe: range %c = %g (0.05..4.5 D)", CH[c],
                            r->range[c]);
-        if (!in(r->tint[c], -50, 50))
+        if (!within(r->tint[c], -50, 50))
             return ft_fail(e, "recipe: tint %c = %g (-50..50 CC)", CH[c],
                            r->tint[c]);
         if (r->mode == FT_RENDER_BW && r->tint[c] != 0)
             return ft_fail(e, "recipe: tint must be 0 for b&w");
-        if (!in(r->bw_weights[c], 0, 1))
+        if (!within(r->bw_weights[c], 0, 1))
             return ft_fail(e, "recipe: bw weight %c = %g (0..1)", CH[c],
                            r->bw_weights[c]);
         sum += r->bw_weights[c];
     }
-    if (!in(sum, 1 - 1e-3, 1 + 1e-3))
+    if (!within(sum, 1 - 1e-3, 1 + 1e-3))
         return ft_fail(e, "recipe: bw weights sum to %g, not 1", sum);
-    if (!in(r->exposure, -6, 6))
+    if (!within(r->exposure, -6, 6))
         return ft_fail(e, "recipe: exposure %g (-6..6 stops)", r->exposure);
-    if (!in(r->grade, 0.2, 5))
+    if (!within(r->grade, 0.2, 5))
         return ft_fail(e, "recipe: grade %g (0.2..5)", r->grade);
-    if (!in(r->paper_white, 0, 4) || !in(r->paper_black, 0, 4) ||
+    if (!within(r->paper_white, 0, 4) || !within(r->paper_black, 0, 4) ||
         !(r->paper_black > r->paper_white))
         return ft_fail(e, "recipe: paper white %g, black %g (0 <= white < "
                           "black <= 4 D)", r->paper_white, r->paper_black);
@@ -122,6 +122,9 @@ int ft_recipe_validate(const ft_recipe *r, ft_err *e)
 void ft_recipe_set_base(ft_recipe *r, const float d[3])
 {
     int c;
+    for (c = 0; c < 3; c++)
+        if (!isfinite(d[c]))
+            return;
     if (r->mode == FT_RENDER_BW) {
         double t = 0;
         float y;
@@ -200,6 +203,13 @@ int ft_render_compile(const ft_recipe *r, ft_render *c, ft_err *e)
     memcpy(c->m, r->matrix, sizeof c->m);
     for (ch = 0; ch < 3; ch++) {
         int src = r->mode == FT_RENDER_BW ? 1 : ch;
+        /* b&w: apply reads only channel 1's tables; zero the rest so the
+         * struct contents stay deterministic */
+        if (r->mode == FT_RENDER_BW && ch != 1) {
+            memset(c->in[ch], 0, sizeof c->in[ch]);
+            memset(c->out[ch], 0, sizeof c->out[ch]);
+            continue;
+        }
         for (i = 0; i < FT_RENDER_IN_N; i++) {
             uint32_t b = (FT_RENDER_IN_K0 + (uint32_t)i) << FT_RENDER_IN_SHIFT;
             float t;
