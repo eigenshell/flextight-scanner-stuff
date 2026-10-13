@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Output formats. Every writer takes the same developed ft_image, so a new
- * format (FlexColor 3F/.fff, TIFF) is one function and one table entry. */
+ * format (TIFF, say) is one function and one table entry. */
 #ifndef FT_OUT_H
 #define FT_OUT_H
 #include "ft.h"

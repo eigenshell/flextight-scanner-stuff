@@ -3,12 +3,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ft_dng.h"
+#include "ft_fff.h"
 #include "ft_out.h"
 #include "ft_png.h"
 
 static const ft_writer WRITERS[] = {
     { "dng", ".dng", "linear 16-bit DNG (darktable, RawTherapee, Lightroom)",
       ft_dng_write },
+    { "fff", ".fff", "FlexColor 3F, 16-bit linear (LibRaw-verified)",
+      ft_fff_write },
     { "png", ".png", "8-bit preview, gamma 2.2, not inverted",
       ft_png_write_preview },
     { NULL, NULL, NULL, NULL },

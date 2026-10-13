@@ -140,6 +140,25 @@ def test_defect_map_and_bad_format(ftdev, tmp_path):
     mid = (got[11].astype(np.int64) + got[13]) / 2
     assert np.abs(row - mid).max() <= 1
 
-    r = subprocess.run([str(ftdev), str(scan), "-f", "fff"],
+    r = subprocess.run([str(ftdev), str(scan), "-f", "tiff"],
                        capture_output=True, text=True)
     assert r.returncode == 2 and "unknown format" in r.stderr
+
+
+@needs_cc
+def test_fff_matches_fff_py(ftdev, tmp_path):
+    """The C 3F writer is byte for byte src/flextight/fff.py."""
+    rawpy = pytest.importorskip("rawpy")
+    from flextight.fff import write_fff
+    scan, *_ = synth_scan(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan), "-f", "dng,fff"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _, px = read_dng(tmp_path / "neg_frame01.dng")
+    want = tmp_path / "want.fff"
+    write_fff(want, np.ascontiguousarray(px), px.shape[1], px.shape[0],
+              metadata={"make": "Imacon", "model": "Flextight Precision II"})
+    got = tmp_path / "neg_frame01.fff"
+    assert got.read_bytes() == want.read_bytes()
+    with rawpy.imread(str(got)) as im:
+        assert (im.sizes.raw_height, im.sizes.raw_width) == px.shape[:2]
