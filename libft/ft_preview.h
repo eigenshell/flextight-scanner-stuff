@@ -4,7 +4,7 @@
  * 12). The others are synthesized at a lower magnification, which puts
  * ~1/(1+m)^2 more light on every sample (2026-10-13):
  *   hires   1000 ppi, optics 2000, bin 2  (~3.5x the light)
- *   native  1500 ppi, optics 1500, bin 1  (~4.4x; every CCD pixel used)
+ *   native  1500 ppi, optics 1500, bin 1  (3.9x measured; every CCD px)
  * All cover the standard preview's window. Frame detection runs on a copy
  * box-averaged by `down` to ~500 ppi, near the 525 ppi it is tuned on. */
 #ifndef FT_PREVIEW_H
