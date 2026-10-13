@@ -59,3 +59,6 @@ notes/ssh-askpass.sh
 
 # Claude Code instructions (local)
 CLAUDE.md
+
+# ftdev build output
+tools/ftdev/ftdev
