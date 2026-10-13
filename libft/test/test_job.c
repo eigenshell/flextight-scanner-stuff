@@ -75,6 +75,36 @@ int main(void)
         fclose(f);
         CHECK(b.f[0].bin == 0 && b.f[1].bin == 1 && ft_job_bin(&b.f[1]) == 1);
     }
+    /* film_base: written with the strip, read back; absent = not set */
+    {
+        ft_job c = a;
+        c.has_film_base = 1;
+        c.film_base[0] = 0.2512; c.film_base[1] = 0.6;
+        c.film_base[2] = 0.9177;
+        f = tmpfile();
+        CHECK(ft_job_write(&c, f) == 0);
+        rewind(f);
+        CHECK(ft_job_read(&b, f, &e) == 0);
+        fclose(f);
+        CHECK(b.has_film_base);
+        CHECK_NEAR(b.film_base[0], 0.2512, 1e-9);
+        CHECK_NEAR(b.film_base[2], 0.9177, 1e-9);
+        f = tmpfile();
+        CHECK(ft_job_write(&a, f) == 0);           /* a has none */
+        rewind(f);
+        CHECK(ft_job_read(&b, f, &e) == 0);
+        fclose(f);
+        CHECK(!b.has_film_base);
+        f = text("[strip]\nholder = 24x217\nfilm_base = 0.2 0.5\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);       /* two values */
+        fclose(f);
+        f = text("[strip]\nholder = 24x217\nfilm_base = 0.2 0.5 5\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);       /* above 4.5 D */
+        fclose(f);
+        f = text("[strip]\nholder = 24x217\nfilm_base = 0.2 0.5 0.9 1\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);       /* four values */
+        fclose(f);
+    }
     /* a job without bin keys (older files) scans with the fastest bin */
     f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\n"
              "window = 50 4 36 24\n");

@@ -1096,6 +1096,11 @@ void ft_layout_to_job(const ft_layout *L, const ft_holder *h, ft_film film,
     snprintf(j->holder, sizeof j->holder, "%s", h->name);
     j->film = film;
     j->focus = FT_FOCUS_SHIFTED;
+    /* the render's film base (negative) or black (slide), as density */
+    for (i = 0; i < 3; i++)
+        j->film_base[i] = -log10(L->base[i] > FT_T_FLOOR ? L->base[i]
+                                                         : FT_T_FLOOR);
+    j->has_film_base = 1;
     for (i = 0; i < L->nframes && i < FT_MAX_FRAMES; i++) {
         const ft_det_frame *d = &L->f[i];
         ft_job_frame *f = &j->f[j->nframes++];

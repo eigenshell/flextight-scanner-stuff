@@ -97,6 +97,10 @@ int main(void)
         ft_layout_to_job(&L, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 0, &j);
         CHECK_NEAR(j.f[0].x0, L.f[0].x0, 1e-9);
         CHECK(j.focus == FT_FOCUS_SHIFTED && j.f[0].ppi == 2000);
+        /* the film base goes to the job as density */
+        CHECK(j.has_film_base);
+        CHECK_NEAR(j.film_base[0], -log10(L.base[0]), 1e-9);
+        CHECK_NEAR(j.film_base[2], -log10(L.base[2]), 1e-9);
     }
 
     /* real preview axes (x 0.92..33.14 mm) with the film shifted so the

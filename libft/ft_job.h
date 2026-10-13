@@ -27,6 +27,10 @@ typedef struct {
     ft_film film;
     ft_focus_mode focus;
     long focus_offset;            /* shifted mode: CCD steps on the curve */
+    int has_film_base;
+    double film_base[3];          /* D of unexposed film per channel, from
+                                     the preview (ft_layout.base): the
+                                     negative's base or the slide's black */
     int nframes;
     ft_job_frame f[FT_MAX_FRAMES];
 } ft_job;

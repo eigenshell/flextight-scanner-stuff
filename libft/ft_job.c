@@ -43,6 +43,9 @@ int ft_job_write(const ft_job *j, FILE *out)
             j->film == FT_FILM_SLIDE ? "slide" : "negative",
             j->focus == FT_FOCUS_PER_FRAME ? "per-frame" : "shifted",
             j->focus_offset);
+    if (j->has_film_base)
+        fprintf(out, "film_base = %.4f %.4f %.4f   # D r g b: unexposed film\n",
+                j->film_base[0], j->film_base[1], j->film_base[2]);
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
@@ -93,7 +96,9 @@ static int lnum(const char *v, long *out)
     return end != v && *trim(end) == 0 && errno != ERANGE ? 0 : -1;
 }
 
-static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset" };
+static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset",
+    "film_base" };
+#define N_STRIP_KEYS 5
 static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
     "sprockets", "straighten", "confidence", "focus_offset", "done",
     "bin" };
@@ -187,7 +192,7 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
         k = trim(s);
         v = trim(v);
         if (in_strip)
-            ki = key_index(STRIP_KEYS, 4, k);
+            ki = key_index(STRIP_KEYS, N_STRIP_KEYS, k);
         else if (f)
             ki = key_index(FRAME_KEYS, N_FRAME_KEYS, k);
         else
@@ -211,8 +216,16 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                 if (strcmp(v, "shifted") == 0) j->focus = FT_FOCUS_SHIFTED;
                 else if (strcmp(v, "per-frame") == 0) j->focus = FT_FOCUS_PER_FRAME;
                 else bad = 1;
-            } else {
+            } else if (ki == 3) {
                 bad = lnum(v, &j->focus_offset);
+            } else {
+                double *d = j->film_base;
+                char extra;
+                bad = sscanf(v, "%lf %lf %lf %c", &d[0], &d[1], &d[2],
+                             &extra) != 3 ||
+                      !(d[0] >= 0 && d[0] <= 4.5 && d[1] >= 0 &&
+                        d[1] <= 4.5 && d[2] >= 0 && d[2] <= 4.5);
+                j->has_film_base = !bad;
             }
         } else {
             switch (ki) {
