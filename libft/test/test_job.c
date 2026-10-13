@@ -69,14 +69,14 @@ int main(void)
     /* validation: holder, ppi, window, optics */
     CHECK(ft_job_validate(&a, &ft_lens_default, &e) == 0);
     b = a;
-    b.f[0].ppi = 3500;
+    b.f[0].ppi = 6400;
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
     CHECK(strstr(e.msg, "frame 1") != NULL);
     b = a;
     b.f[0].y0 = 200;                          /* runs past 231 mm */
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
     b = a;
-    b.f[1].ppi = 3500;                        /* excluded frames are skipped */
+    b.f[1].ppi = 6400;                        /* excluded frames are skipped */
     CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
     b = a;
     strcpy(b.holder, "60x180");

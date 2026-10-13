@@ -39,6 +39,7 @@
 #include "ft_holder.h"
 #include "ft_job.h"
 #include "ft_png.h"
+#include "ft_preview.h"
 
 #define IOCTL_SRB 0x190012
 
@@ -353,7 +354,7 @@ static const struct preset {
 /* 3f autoframe start lines for frames 1-6 of the 24x36x6 holder */
 static const long F3_Y[6] = { 50, 967, 1910, 2852, 3795, 4737 };
 /* holder length in lines at 525 ppi (preview @26); scales with resolution */
-#define HOLDER_LINES_525 4795L
+#define HOLDER_LINES_525 FT_PREVIEW_LINES_525
 
 /* Lens and CCD positions (BE u32, motor steps; 2026-10-12 sweep): moving
  * either one changes magnification and focus, and with them the white
@@ -1382,6 +1383,114 @@ out:
     return t;
 }
 
+#define WHITE_CLIP 15500.0f   /* raw white this high: R clips (~15860) */
+
+/* Load a hires/native preview as its detection image: flat-fielded and
+ * defect-fixed at full resolution in chunks of lines, box-averaged by f,
+ * then RGB-aligned (k / f lines). The full-size image is never held: a
+ * native preview is ~13700 x 1900 px, too big as floats for a 32-bit
+ * process. Returns (lines/f) x (px/f) x 3 floats, NULL on failure. */
+static float *load_preview_ds(const char *scan, int px, int bin, int x, int f,
+                              int *lines_out, int *px_out)
+{
+    char path[300], *faul;
+    long ncal = 0, nfaul = 0, total, cl, done, n, lo, po, i;
+    unsigned short *cal = NULL, *buf = NULL;
+    float *dark = NULL, *white = NULL, *tf = NULL, *t = NULL;
+    int pixs[3][FT_FAUL_MAX], cnt[3] = { 0, 0, 0 }, have_faul = 0, ok = 0;
+    long chunk = 64L * f;
+    FILE *fr = NULL;
+    ft_err e;
+
+    if (px < 1 || px > 20000 || bin < 1 || bin > 12 || f < 1 ||
+        (12 / bin) % f) {
+        fprintf(stderr, "%s: bad geometry (px %d, bin %d, f %d)\n", scan, px,
+                bin, f);
+        return NULL;
+    }
+    if (snprintf(path, sizeof path, "%s.cal", scan) >= (int)sizeof path) {
+        fprintf(stderr, "%s: name too long\n", scan);
+        return NULL;
+    }
+    cal = load_file(path, &ncal);
+    dark = malloc((size_t)px * 3 * sizeof *dark);
+    white = malloc((size_t)px * 3 * sizeof *white);
+    cl = ncal / ((long)px * 6);
+    if (!cal || !dark || !white || cl < 1) {
+        fprintf(stderr, "%s: cannot load the calibration lines\n", scan);
+        goto out;
+    }
+    if (ft_split_cal(cal, (int)cl, px, dark, white, &e)) {
+        fprintf(stderr, "%s: %s\n", scan, e.msg);
+        goto out;
+    }
+    for (i = 0; i < (long)px * 3; i++)
+        if (white[i] >= WHITE_CLIP) {
+            printf("WARNING: white reference at %.0f counts (clips at "
+                   "~15860): open areas may clip; dim the lamp (-l)\n",
+                   white[i]);
+            break;
+        }
+    snprintf(path, sizeof path, "%s.faul", scan);
+    faul = load_file(path, &nfaul);
+    if (faul) {
+        ft_faul_parse(faul, (size_t)nfaul, pixs, cnt);
+        free(faul);
+        have_faul = 1;
+    } else {
+        printf("note: no %s; defective pixels left as they are\n", path);
+    }
+    fr = fopen(scan, "rb");
+    if (!fr || fseek(fr, 0, SEEK_END) != 0 || (total = ftell(fr)) < 0 ||
+        fseek(fr, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "%s: cannot read the scan\n", scan);
+        goto out;
+    }
+    total /= (long)px * 6;
+    lo = total / f;
+    po = px / f;
+    if (lo < 1 || po < 1 || total > 1000000) {
+        fprintf(stderr, "%s: cannot load scan data\n", scan);
+        goto out;
+    }
+    t = malloc((size_t)lo * po * 3 * sizeof *t);
+    buf = malloc((size_t)chunk * px * 3 * sizeof *buf);
+    tf = malloc((size_t)chunk * px * 3 * sizeof *tf);
+    if (!t || !buf || !tf) {
+        fprintf(stderr, "%s: out of memory\n", scan);
+        goto out;
+    }
+    for (done = 0; done < lo * f; done += n) {
+        n = lo * f - done < chunk ? lo * f - done : chunk;  /* multiple of f */
+        if (fread(buf, (size_t)px * 6, (size_t)n, fr) != (size_t)n) {
+            fprintf(stderr, "%s: short read\n", scan);
+            goto out;
+        }
+        ft_flatfield(buf, (int)n, px, dark, white, tf);
+        if (have_faul && ft_faul_fix(tf, (int)n, px, pixs, cnt, x, bin)) {
+            fprintf(stderr, "%s: defective pixel fix failed\n", scan);
+            goto out;
+        }
+        ft_box_down(tf, (int)n, px, f, t + (size_t)(done / f) * po * 3);
+    }
+    *lines_out = ft_align_rgb(t, (int)lo, (int)po, 12 / bin / f);
+    *px_out = (int)po;
+    ok = 1;
+out:
+    if (fr)
+        fclose(fr);
+    free(cal);
+    free(dark);
+    free(white);
+    free(buf);
+    free(tf);
+    if (!ok) {
+        free(t);
+        t = NULL;
+    }
+    return t;
+}
+
 /* sharpness of the green channel of a lines x px RGB image; NaN when out
  * of memory (ft_peak refuses non-finite values) */
 static double green_sharpness(const float *t, int lines, int px)
@@ -1515,40 +1624,95 @@ static int crop_check(const struct crop_req *r, long *ccd_out,
     return 0;
 }
 
-static int crop_scan(const struct crop_req *r)
+/* One scan from the captured 2000 ppi crop descriptor (SCAN_2000) with
+ * only the decoded fields replaced: @10 ppi, @14/@18 origin and @22/@26
+ * size in output pixels/lines, @51 bin, @55 = 12 / bin and the CCD/lens
+ * pair. Every synthesized scan (crops, hires/native previews) is built
+ * here, so all of them follow the same proven construction. */
+static int synth_scan(const char *name, const char *what, double ppi,
+                      long bin, long x_out, long y_line, long px, long lines,
+                      long ccd, long optic, long keep, DWORD hold,
+                      const char *out)
 {
-    static const struct preset crop = { "crop", CROP_SCAN, CROP_END,
-                                        "synthesized crop" };
-    long bin, ccd, optic;
-    double scale, cx;
+    static struct preset sp;
     int i, rc;
 
-    if (crop_check(r, &ccd, &optic))
-        return CROP_REFUSED;
-    bin = ft_bin_for_ppi(r->ppi);   /* crop_check: valid */
-    scale = r->ppi * bin;
-    cx = ft_mm_to_ccd(r->x, scale);
     memcpy(CROP_SCAN, SCAN_2000, 84);
-    put_be32(CROP_SCAN, POS_OFF, (long)(r->ppi * 10000 + 0.5));
-    put_be32(CROP_SCAN, F_X, (long)((cx - FT_CCD_FIRST) / bin + 0.5));
-    put_be32(CROP_SCAN, F_Y, (long)(r->y / 25.4 * r->ppi + 0.5));
-    put_be32(CROP_SCAN, F_PX, (long)(r->w / 25.4 * r->ppi + 0.5));
-    put_be32(CROP_SCAN, F_LINES, (long)(r->h / 25.4 * r->ppi + 0.5));
+    put_be32(CROP_SCAN, POS_OFF, (long)(ppi * 10000 + 0.5));
+    put_be32(CROP_SCAN, F_X, x_out);
+    put_be32(CROP_SCAN, F_Y, y_line);
+    put_be32(CROP_SCAN, F_PX, px);
+    put_be32(CROP_SCAN, F_LINES, lines);
     put_be32(CROP_SCAN, F_CCD, ccd);
     put_be32(CROP_SCAN, F_OPTIC, optic);
     CROP_SCAN[F_BIN] = (BYTE)bin;
     CROP_SCAN[55] = (BYTE)(12 / bin);
     memcpy(CROP_END, CROP_SCAN, 84);
     memset(CROP_END + 8, 0, 53 - 8);
-    printf("crop descriptor:");
+    printf("%s descriptor:", name);
     for (i = 0; i < 84; i++)
         printf("%s%02x", i % 28 ? " " : "\n  ", CROP_SCAN[i]);
     printf("\n");
+    sp.name = name;
+    sp.what = what;
+    sp.scan = CROP_SCAN;
+    sp.end = CROP_END;
     g_ccd = ccd;                 /* cmd_scan applies these to scan + end */
     g_optic = optic;
-    rc = cmd_scan(&crop, -1, r->keep, r->hold, r->out);
+    rc = cmd_scan(&sp, -1, keep, hold, out);
     g_ccd = g_optic = -1;
     return rc ? 1 : 0;
+}
+
+static int crop_scan(const struct crop_req *r)
+{
+    long bin, ccd, optic;
+    double scale, cx;
+
+    if (crop_check(r, &ccd, &optic))
+        return CROP_REFUSED;
+    bin = ft_bin_for_ppi(r->ppi);   /* crop_check: valid */
+    scale = r->ppi * bin;
+    cx = ft_mm_to_ccd(r->x, scale);
+    return synth_scan("crop", "synthesized crop", r->ppi, bin,
+                      (long)((cx - FT_CCD_FIRST) / bin + 0.5),
+                      (long)(r->y / 25.4 * r->ppi + 0.5),
+                      (long)(r->w / 25.4 * r->ppi + 0.5),
+                      (long)(r->h / 25.4 * r->ppi + 0.5), ccd, optic,
+                      r->keep, r->hold, r->out);
+}
+
+/* A whole-holder preview (libft/ft_preview.h). standard: FlexColor's
+ * captured 525 ppi descriptor, as before. hires/native: synthesized over
+ * the same window at their lower magnification, on the focus curve. */
+static int preview_scan(const ft_preview *m, long keep, DWORD hold,
+                        const char *out)
+{
+    static char what[80];
+    double x0, w, len, scale = m->ppi * m->bin;
+    long ccd, optic, x_out, px;
+
+    if (m->bin == 12)
+        return cmd_scan(&PRESETS[0], -1, keep, hold, out);
+    if (ft_optics_for(&g_lens, scale, &ccd, &optic)) {
+        fprintf(stderr, "preview %s: no focus for optical scale %.0f\n",
+                m->name, scale);
+        return CROP_REFUSED;
+    }
+    if (!pos_ok(ccd, optic))
+        return CROP_REFUSED;
+    ft_preview_window(&x0, &w, &len);
+    x_out = (long)((ft_mm_to_ccd(x0, scale) - FT_CCD_FIRST) / m->bin + 0.5);
+    px = (long)(w / 25.4 * m->ppi + 0.5);
+    if (x_out < 0 || (x_out + px) * m->bin > FT_CCD_PIXELS ||
+        px * 6 > 60000) {
+        fprintf(stderr, "preview %s: window runs off the CCD\n", m->name);
+        return CROP_REFUSED;
+    }
+    snprintf(what, sizeof what, "%g ppi preview, whole holder (optics %.0f, "
+             "bin %d)", m->ppi, scale, m->bin);
+    return synth_scan(m->name, what, m->ppi, m->bin, x_out, 0, px,
+                      ft_preview_lines(m), ccd, optic, keep, hold, out);
 }
 
 static int cmd_crop(int argc, char **argv)
@@ -1889,17 +2053,6 @@ static double textured_band(const float *t, int lines, int px,
 
 #define TEXTURE_MIN 0.01    /* preview sharpness below this: featureless */
 
-/* preview axes: k = 1 line dropped by the RGB alignment; across from
- * output pixel 2 (SCAN_WIN @14), bin 12, at the preview's 6300 scale */
-static void preview_axes(ft_axes *ax)
-{
-    ax->y_mm_per_line = 25.4 / 525;
-    ax->y_mm0 = 1 * ax->y_mm_per_line;
-    ax->x_mm0 = ft_ccd_to_mm(ft_out_to_ccd(2, 0, 12) + 5.5, 6300);
-    ax->x_mm_per_px = ft_ccd_to_mm(ft_out_to_ccd(2, 1, 12) + 5.5, 6300) -
-                      ax->x_mm0;
-}
-
 /* Across reach (mm) of a crop at ppi: crop_scan's holder limit
  * (0..CROP_X_MAX) intersected with the CCD at the optical scale ppi x bin
  * (crop_scan refuses a window that runs off it). -1 for an unusable ppi. */
@@ -1950,10 +2103,10 @@ static int focus_span(double ppi, double x0, double x1, double *lo,
 /* One check point on frame fr: 0 with *off, FB_NO_PEAK when the frame
  * cannot give one (no texture, outside the crop area, no peak), -1 on a
  * scan or file failure. */
-static int focus_point(const float *t, int lines, const ft_axes *ax,
+static int focus_point(const float *t, int lines, int px, const ft_axes *ax,
                        double ppi, const ft_job_frame *fr, long *off)
 {
-    double score, x0, x1, yc = textured_band(t, lines, 666, ax, fr, &score);
+    double score, x0, x1, yc = textured_band(t, lines, px, ax, fr, &score);
     if (!(score >= TEXTURE_MIN)) {
         printf("frame %d: no texture for focus\n", fr->index);
         return FB_NO_PEAK;
@@ -1972,7 +2125,7 @@ static int focus_point(const float *t, int lines, const ft_axes *ax,
  * that gives no peak moves to the next whole frame once, then is dropped.
  * Sets j->focus / focus_offset. Returns -1 on a scan or file failure
  * (j untouched), else 0. */
-static int focus_check(const float *t, int lines, const ft_axes *ax,
+static int focus_check(const float *t, int lines, int px, const ft_axes *ax,
                        double ppi, ft_job *j)
 {
     int cand[FT_MAX_FRAMES], used[FT_MAX_FRAMES], nc = 0, np = 0, npt = 0;
@@ -1998,7 +2151,8 @@ static int focus_check(const float *t, int lines, const ft_axes *ax,
                 continue;
             used[i] = 1;
             tried++;
-            rc = focus_point(t, lines, ax, ppi, &j->f[cand[i]], &off[np]);
+            rc = focus_point(t, lines, px, ax, ppi, &j->f[cand[i]],
+                             &off[np]);
             if (rc < 0)
                 return -1;
             if (rc == 0) {
@@ -2075,8 +2229,9 @@ static int cmd_frames(int argc, char **argv)
     char raw[260], path[260];
     ft_film film = FT_FILM_NEGATIVE;
     double ppi = 2000;
-    int sprockets = 0, i, lines = 0, rc, focus_failed;
+    int sprockets = 0, i, lines = 0, px = 0, rc, focus_failed;
     const ft_holder *h = ft_holder_find("24x217");
+    const ft_preview *pm = ft_preview_find("standard");
     static ft_layout L;
     static ft_job j;
     ft_axes ax;
@@ -2108,6 +2263,13 @@ static int cmd_frames(int argc, char **argv)
         else if (strcmp(argv[i], "-h") == 0) {
             if (parse_hold(argv[i + 1], &g_first_hold)) return 2;
         }
+        else if (strcmp(argv[i], "--preview") == 0) {
+            pm = ft_preview_find(argv[i + 1]);
+            if (!pm) {
+                fprintf(stderr, "frames: --preview standard|hires|native\n");
+                return 2;
+            }
+        }
         else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
         else {
             fprintf(stderr, "frames: unknown option %s\n", argv[i]);
@@ -2130,20 +2292,36 @@ static int cmd_frames(int argc, char **argv)
 
     g_lamp = 255;                    /* the lamp level persists: set it */
     /* the preview is the run's first scan: it holds g_first_hold (-h) */
-    if (cmd_scan(&PRESETS[0], -1, 0, g_first_hold, raw))
+    if (preview_scan(pm, 0, g_first_hold, raw))
         return 1;
-    /* the axes below assume SCAN_WIN's geometry: 666 px from pixel 2 */
-    if (meta_long(raw, "px") != 666 || meta_long(raw, "x") != 2) {
-        fprintf(stderr, "frames: %s.txt: expected px=666 x=2 (got %ld, %ld)\n",
-                raw, meta_long(raw, "px"), meta_long(raw, "x"));
-        return 1;
+    if (pm->bin == 12) {
+        /* the axes below assume SCAN_WIN's geometry: 666 px from pixel 2 */
+        if (meta_long(raw, "px") != FT_PREVIEW_PX ||
+            meta_long(raw, "x") != FT_PREVIEW_X_OUT) {
+            fprintf(stderr, "frames: %s.txt: expected px=666 x=2 (got %ld, "
+                            "%ld)\n", raw, meta_long(raw, "px"),
+                    meta_long(raw, "x"));
+            return 1;
+        }
+        px = FT_PREVIEW_PX;
+        t = load_corrected(raw, px, 12, FT_PREVIEW_X_OUT, &lines);
+    } else {
+        long mpx = meta_long(raw, "px"), mx = meta_long(raw, "x");
+        if (meta_long(raw, "bin") != pm->bin || mpx < 1 || mpx > 20000 ||
+            mx < 0) {
+            fprintf(stderr, "frames: %s.txt: unexpected geometry (px %ld, "
+                            "x %ld, bin %ld)\n", raw, mpx, mx,
+                    meta_long(raw, "bin"));
+            return 1;
+        }
+        t = load_preview_ds(raw, (int)mpx, pm->bin, (int)mx, pm->down,
+                            &lines, &px);
     }
-    t = load_corrected(raw, 666, 12, 2, &lines);
     if (!t)
         return 1;
 
-    preview_axes(&ax);
-    if (ft_detect(t, lines, 666, &ax, film, h, &L, &e)) {
+    ft_preview_axes(pm, meta_long(raw, "x"), &ax);
+    if (ft_detect(t, lines, px, &ax, film, h, &L, &e)) {
         fprintf(stderr, "frames: %s\n", e.msg);
         free(t);
         return 1;
@@ -2159,7 +2337,7 @@ static int cmd_frames(int argc, char **argv)
                L.nblank_end);
     ft_layout_to_job(&L, h, film, ppi, sprockets, &j);
 
-    focus_failed = focus_check(t, lines, &ax, ppi, &j) != 0;
+    focus_failed = focus_check(t, lines, px, &ax, ppi, &j) != 0;
     if (focus_failed) {
         j.focus = FT_FOCUS_SHIFTED;
         j.focus_offset = 0;
@@ -2178,7 +2356,7 @@ static int cmd_frames(int argc, char **argv)
         return 1;
     }
     snprintf(path, sizeof path, "%s.png", base);
-    rc = write_strip_png(path, t, lines, 666, &ax, &j);
+    rc = write_strip_png(path, t, lines, px, &ax, &j);
     free(t);
     print_job(&j);
     printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
@@ -2674,6 +2852,7 @@ static int cmd_calibrate_focus(int argc, char **argv)
 static int scan_args(int argc, char **argv)
 {
     const struct preset *p = &PRESETS[0];
+    const ft_preview *pm = NULL;
     long keep = 0, y = -1;
     int frame = -1, i, rc = 0;
     DWORD hold = 10000;
@@ -2698,6 +2877,10 @@ static int scan_args(int argc, char **argv)
             }
         } else {
             size_t k;
+            if (strcmp(a, "hires") == 0 || strcmp(a, "native") == 0) {
+                pm = ft_preview_find(a);
+                continue;
+            }
             for (k = 0; k < sizeof PRESETS / sizeof PRESETS[0]; k++)
                 if (strcmp(a, PRESETS[k].name) == 0) break;
             if (k == sizeof PRESETS / sizeof PRESETS[0]) {
@@ -2706,6 +2889,15 @@ static int scan_args(int argc, char **argv)
             }
             p = &PRESETS[k];
         }
+    }
+    if (pm) {
+        if (y >= 0 || frame >= 0 || g_ccd >= 0) {
+            fprintf(stderr, "scan %s: -y, -f and -p do not apply (whole "
+                            "holder, optics from the focus curve)\n",
+                    pm->name);
+            return 2;
+        }
+        return preview_scan(pm, keep, hold, out) ? 1 : 0;
     }
     if (frame >= 0 && strcmp(p->name, "3f") != 0) {
         fprintf(stderr, "scan: -f only applies to the 3f preset\n");
@@ -2746,7 +2938,9 @@ int main(int argc, char **argv)
             "  pages              read the standard ReadBuffer pages\n"
             "  grab <n> [len]     n ReadExt blocks (default len 3996) -> grab.raw\n"
             "  scan [preset] [-n lines] [-y line] [-f frame] [-h hold_s] [-o file]\n"
-            "                     presets: preview (525 ppi), 2000, 1000, 3f (630 ppi)\n"
+            "                     presets: preview (525 ppi), 2000, 1000, 3f (630 ppi);\n"
+            "                     hires (1000 ppi) and native (1500 ppi): whole-holder\n"
+            "                     previews at low magnification (-n, -h, -l, -o only)\n"
             "                     -n stop after n lines (default: the whole window)\n"
             "                     -y start line along the strip (holder-clamped)\n"
             "                     -f 3f frame 1-6, or 0 = whole strip (frameN.raw)\n"
@@ -2759,11 +2953,15 @@ int main(int argc, char **argv)
             "       [-o file]\n"
             "                     SYNTHESIZED window in mm at any ppi (525..6300)\n"
             "                     -> crop.raw (+ .cal .faul .txt)\n"
-            "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no] [-h s] [-o strip]\n"
+            "  frames [--film neg|slide] [--ppi n] [--sprockets yes|no]\n"
+            "         [--preview standard|hires|native] [-h s] [-o strip]\n"
             "                     preview (lamp 255), detect frames, 3-point focus\n"
             "                     check -> strip.job (edit it) + strip.png;\n"
             "                     fb.raw* are scratch focus crops\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
+            "                     --preview standard 525 ppi (~40 s), hires 1000 ppi\n"
+            "                       (~2.5 min), native 1500 ppi (~5 min; every CCD\n"
+            "                       pixel, ~4x the light): strip.raw keeps it\n"
             "  scan --job strip.job [-h s]  scan the job's included frames\n"
             "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
             "                     crop, named after the job file)\n"

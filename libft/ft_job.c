@@ -257,7 +257,7 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
         where(w, sizeof w, f);
         if (!isfinite(f->ppi) || !ft_ppi_supported(f->ppi))
             return ft_fail(e, "%s: ppi %g not supported "
-                              "(525, 634..3150, 3800..6300)", w, f->ppi);
+                              "(525..6300)", w, f->ppi);
         if (!(f->len > 0 && f->width > 0 && f->y0 >= 0 && f->x0 >= 0 &&
               f->y0 + f->len <= h->scan_len_mm &&
               f->x0 + f->width <= h->scan_width_mm))
