@@ -49,8 +49,9 @@ static int chunk(FILE *f, const char *type, const unsigned char *data, size_t n)
            fwrite(tail, 1, 4, f) == 4 ? 0 : -1;
 }
 
-int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
-                      ft_err *e)
+/* px: h rows of 3 * w samples, depth 8 (bytes) or 16 (big-endian pairs) */
+static int write_png(const char *path, const unsigned char *px, int w, int h,
+                     int depth, ft_err *e)
 {
     static const unsigned char sig[8] = { 137, 80, 78, 71, 13, 10, 26, 10 };
     size_t row, raw, nblk, pos = 0;
@@ -61,7 +62,7 @@ int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
 
     if (w <= 0 || h <= 0)
         return ft_fail(e, "png: empty image");
-    row = 3 * (size_t)w + 1;               /* filter byte + pixels */
+    row = 3 * (size_t)w * (depth / 8) + 1; /* filter byte + pixels */
     raw = row * (size_t)h;
     nblk = (raw + 65534) / 65535;
     z = malloc(2 + raw + 5 * nblk + 4);
@@ -80,7 +81,7 @@ int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
         *p++ = (unsigned char)(nlen >> 8);
         for (i = 0; i < len; i++, pos++) {
             size_t r = pos / row, c = pos % row;
-            unsigned char v = c == 0 ? 0 : rgb[r * 3 * (size_t)w + c - 1];
+            unsigned char v = c == 0 ? 0 : px[r * (row - 1) + c - 1];
             *p++ = v;
             a = (a + v) % 65521;
             b = (b + a) % 65521;
@@ -91,7 +92,7 @@ int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
 
     put32(ihdr, (unsigned long)w);
     put32(ihdr + 4, (unsigned long)h);
-    ihdr[8] = 8;                           /* bit depth */
+    ihdr[8] = (unsigned char)depth;        /* bit depth */
     ihdr[9] = 2;                           /* colour type RGB */
     ihdr[10] = ihdr[11] = ihdr[12] = 0;
 
@@ -106,4 +107,31 @@ int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
     ok = fclose(f) == 0 && ok;
     free(z);
     return ok ? 0 : ft_fail(e, "png: write error on %s", path);
+}
+
+int ft_png_write_rgb8(const char *path, const unsigned char *rgb, int w, int h,
+                      ft_err *e)
+{
+    return write_png(path, rgb, w, h, 8, e);
+}
+
+int ft_png_write_rgb16(const char *path, const unsigned short *rgb, int w,
+                       int h, ft_err *e)
+{
+    size_t n, i;
+    unsigned char *be;
+    int rc;
+    if (w <= 0 || h <= 0)
+        return ft_fail(e, "png: empty image");
+    n = 3 * (size_t)w * h;
+    be = malloc(2 * n);
+    if (!be)
+        return ft_fail(e, "png: out of memory");
+    for (i = 0; i < n; i++) {               /* PNG samples are big-endian */
+        be[2 * i] = (unsigned char)(rgb[i] >> 8);
+        be[2 * i + 1] = (unsigned char)(rgb[i] & 0xff);
+    }
+    rc = write_png(path, be, w, h, 16, e);
+    free(be);
+    return rc;
 }

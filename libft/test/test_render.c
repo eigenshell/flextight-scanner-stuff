@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <stdint.h>
 #include <string.h>
+#include "ft_out.h"
 #include "ft_render.h"
 #include "test/ftest.h"
 
@@ -254,6 +255,25 @@ int main(void)
         ft_render_image(&cr, &im);
         CHECK_NEAR(im.xyz_to_rgb[0], 1.7166511880, 1e-9);
         CHECK(im.rgb[0] > 0 && im.rgb[0] < 1);
+
+        /* the positive writer: grey 0.18 (Rec.2020) -> sRGB 0.4614 */
+        {
+            const ft_writer *w = ft_writer_find("positive");
+            unsigned char b[64];
+            const char *path = "test/positive_out.png";
+            FILE *f;
+            CHECK(w != NULL && strcmp(w->ext, "_positive.png") == 0);
+            for (i = 0; i < 24; i++)
+                im.rgb[i] = 0.18f;
+            CHECK(w->write(path, &im, &e) == 0);
+            f = fopen(path, "rb");
+            CHECK(f != NULL && fread(b, 1, sizeof b, f) == sizeof b);
+            fclose(f);
+            remove(path);
+            CHECK(b[24] == 16);                       /* 16-bit */
+            CHECK_NEAR(b[49] << 8 | b[50], ft_srgb_encode(0.18) * 65535, 1.5);
+            CHECK((b[49] << 8 | b[50]) == (b[51] << 8 | b[52]));  /* grey */
+        }
         ft_image_free(&im);
     }
     return TEST_DONE();
