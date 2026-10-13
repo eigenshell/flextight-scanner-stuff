@@ -20,10 +20,11 @@ FLOOD = re.compile(r"\[flood: (\d+) reads in (\d+) ms; (\d+) full, (\d+) short")
 
 
 def parse_flood(text):
-    m = FLOOD.search(text)
-    if not m:
+    # the last flood is the image read; dark and white calibration come first
+    found = FLOOD.findall(text)
+    if not found:
         raise ValueError("no [flood: ...] line")
-    reads, ms, full, short = map(int, m.groups())
+    reads, ms, full, short = map(int, found[-1])
     return {"reads": reads, "ms": ms, "full": full, "short": short}
 
 

@@ -16,6 +16,18 @@ def test_parse_flood_line():
     assert f == {"reads": 412, "ms": 4120, "full": 300, "short": 112}
 
 
+def test_parse_flood_takes_the_image_read():
+    # a scan log has the dark and white calibration floods first
+    log = ("calibration: 200 lines\n"
+           "  [flood: 200 reads in 250 ms; 200 full, 0 short (0 bytes)]\n"
+           "calibration: 50 lines\n"
+           "  [flood: 2750 reads in 1622 ms; 50 full, 2700 short (0 bytes)]\n"
+           "reading 300 lines -> w04.raw\n"
+           "  [flood: 21130 reads in 9454 ms; 300 full, 20830 short (0 bytes)]\n")
+    f = ftlinetime.parse_flood(log)
+    assert f == {"reads": 21130, "ms": 9454, "full": 300, "short": 20830}
+
+
 def test_parse_flood_missing():
     with pytest.raises(ValueError):
         ftlinetime.parse_flood("no flood here\n")
