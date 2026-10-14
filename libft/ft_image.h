@@ -20,6 +20,11 @@ typedef struct {
      * default treats scanner RGB as linear sRGB until the scanner is
      * profiled from an IT8 target. */
     double xyz_to_rgb[9];
+    /* the NoiseProfile (ft_noise_model.h): var_c(T) = S_c T + O_c in these
+     * pixels' transmittance units, as S_r O_r S_g O_g S_b O_b */
+    int has_noise;
+    double noise[6];
+
     char make[32], model[32];
     char desc[256];          /* free text: scan settings, job, frame */
 } ft_image;

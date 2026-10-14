@@ -67,7 +67,11 @@ FlexColor software — first on Windows, then on Linux.
   `ftdev cut` and `ftdev export`): a low-magnification scan per window of
   frames, a working DNG per frame, and a 2000 px JPEG in sRGB, Display P3
   or Adobe RGB with soft gamut compression and an embedded ICC profile
-  (`libft/ft_output.h`; `export` needs libjpeg-turbo).
+  (`libft/ft_output.h`; `export` needs libjpeg-turbo). Export reduces
+  sensor noise from the scan's own calibration (`--nr-sensor`, the DNG's
+  NoiseProfile tag; `libft/ft_nr.h`), film grain on request
+  (`--nr-grain`) and sharpens after the resize (`--sharpen`;
+  `libft/ft_sharpen.h`).
 - `src/flextight/` — the Python package for the Linux (SG_IO) stack.
 - `tools/spti_logger/` — the DeviceIoControl tracer used to observe the
   protocol.

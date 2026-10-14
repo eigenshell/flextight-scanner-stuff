@@ -19,7 +19,9 @@
  *   working raw sidecar, <frame>.dng.txt, written by ftdev cut:
  *     frame= type= film= ppi= share= hf_half_res= film_base= (optional)
  *     box=<x> <y> <w> <h>  (the frame in the DNG, px, without bleed)
- *     export_scale=<s>  estimated=0|1  shift_mm=<along> */
+ *     export_scale=<s>  estimated=0|1  shift_mm=<along>
+ *     noise_profile=<S r> <O r> <S g> <O g> <S b> <O b>  (optional; the
+ *     DNG's NoiseProfile, ft_noise_model.h) */
 #ifndef FT_SHARE_CUT_H
 #define FT_SHARE_CUT_H
 #include <stddef.h>
@@ -67,6 +69,9 @@ typedef struct {
 
 typedef struct {
     int detect_ok;             /* 0: detection failed, all estimated */
+    int noise_rc;              /* ft_noise_model: 0, 1 clamped, -1 none */
+    ft_err noise_err;          /* its note when noise_rc != 0 */
+    double noise[6];
     int n;
     ft_share_cut_frame f[FT_MAX_FRAMES];
 } ft_share_cut_result;
@@ -90,11 +95,15 @@ typedef struct {
     int has_film_base;
     double film_base[3];
     int box[4];
+    int has_noise;             /* noise_profile=, all finite, S >= 0, O > 0 */
+    double noise[6];
 } ft_share_sidecar;
 
 int ft_share_sidecar_write(FILE *out, const ft_share_meta *m,
                            const ft_share_cut_frame *c);
-/* -1 with e naming the key if box or export_scale is missing or bad */
+/* -1 with e naming the key if box or export_scale is missing or bad, or
+ * noise_profile has not six numbers; a noise_profile out of range reads as
+ * none (has_noise 0) */
 int ft_share_sidecar_parse(const char *text, size_t n, ft_share_sidecar *s,
                            ft_err *e);
 

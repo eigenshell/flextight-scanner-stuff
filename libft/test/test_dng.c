@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -211,6 +212,50 @@ int main(void)
     CHECK(strstr(e.msg, "too large") != NULL);
     CHECK(b.rgb == NULL);
     CHECK(ft_dng_read("test/no_such_file.dng", &b, &e) == -1);
+
+    /* NoiseProfile (51041, 6 doubles): none without a profile, an exact
+     * round trip with one, and a bad value reads as none */
+    CHECK(entry_of(buf, 51041) == 0);
+    {
+        static const double np[6] = { 1.5e-4, 3e-8, 1.4e-4, 3.2e-8,
+                                      1.6e-4, 2.8e-8 };
+        size_t m, at;
+        unsigned char *nb;
+        double neg = -1;
+        uint64_t u;
+        a.has_noise = 1;
+        memcpy(a.noise, np, sizeof np);
+        CHECK(ft_dng_write(path, &a, &e) == 0);
+        nb = slurp(path, &m);
+        k = entry_of(nb, 51041);
+        CHECK(k != 0);
+        CHECK((nb[k + 2] | nb[k + 3] << 8) == 12);         /* DOUBLE */
+        CHECK(nb[k + 4] == 6 && nb[k + 5] == 0);
+        ft_image_init(&b);
+        CHECK(ft_dng_parse(nb, m, &b, &e) == 0);
+        CHECK(b.has_noise);
+        for (i = 0; i < 6; i++)
+            CHECK(b.noise[i] == np[i]);
+        ft_image_free(&b);
+        /* S_r = -1 */
+        at = nb[k + 8] | nb[k + 9] << 8 | (size_t)nb[k + 10] << 16 |
+             (size_t)nb[k + 11] << 24;
+        memcpy(&u, &neg, 8);
+        for (i = 0; i < 8; i++)
+            nb[at + i] = (unsigned char)(u >> 8 * i);
+        ft_image_init(&b);
+        CHECK(ft_dng_parse(nb, m, &b, &e) == 0);
+        CHECK(!b.has_noise);
+        ft_image_free(&b);
+        free(nb);
+        /* the writer drops an unusable profile */
+        a.noise[1] = 0;
+        CHECK(ft_dng_write(path, &a, &e) == 0);
+        nb = slurp(path, &m);
+        CHECK(entry_of(nb, 51041) == 0);
+        free(nb);
+        a.has_noise = 0;
+    }
     CHECK(strstr(e.msg, "no_such_file") != NULL);
     free(buf);
     free(bad);

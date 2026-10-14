@@ -37,7 +37,7 @@ def read_dng(path):
     assert b[:4] == b"II*\x00"
     ifd = struct.unpack_from("<I", b, 4)[0]
     n = struct.unpack_from("<H", b, ifd)[0]
-    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 10: 8}
+    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 10: 8, 12: 8}
     tags = {}
     for i in range(n):
         tag, typ, cnt, val = struct.unpack_from("<HHII", b, ifd + 2 + 12 * i)
@@ -529,3 +529,100 @@ def test_share_export_limits(ftdev, tmp_path):
     r = subprocess.run([str(ftdev), "export", str(dng), "--film", "neg"],
                        capture_output=True, text=True)
     assert r.returncode == 0 and "exporting at full size" in r.stderr
+
+
+@needs_cc
+def test_export_nr_flags_refused(ftdev, tmp_path):
+    win = share_window(tmp_path)
+    subprocess.run([str(ftdev), "cut", str(win)], check=True,
+                   capture_output=True)
+    dng = tmp_path / "job_frame01.dng"
+    for flag, val in [("--nr-sensor", "4.1"), ("--nr-chroma", "8.1"),
+                      ("--nr-grain", "4.1"), ("--sharpen", "3.1"),
+                      ("--nr-sensor", "-1"), ("--sharpen", "x")]:
+        r = subprocess.run([str(ftdev), "export", str(dng), flag, val],
+                           capture_output=True, text=True)
+        assert r.returncode == 2 and flag in r.stderr, (flag, r.stderr)
+
+
+def synth_noisy_scan(tmp_path, ndark=200):
+    """A scan with real sensor noise: Poisson-like shot noise on the signal
+    above the black level plus read noise, in the .cal lines and the
+    image alike. Three flat bands across (T 0.5 | 0.2 | 0.08); the
+    developed image has them as rows 0-31, 32-63, 64-95."""
+    rng = np.random.default_rng(11)
+    px, lines, binning, x, rd, g = 96, 160, 3, 25, 3.0, 1.5
+    dark = 290 + rng.integers(0, 20, (px, 3))
+    span = 5500 + rng.integers(0, 1000, (px, 3))
+
+    def dn(level, sig):
+        return np.clip(np.rint(level + rng.normal(0, 1, level.shape) * sig),
+                       0, 65535).astype("<u2")
+    cal = np.concatenate([
+        dn(np.broadcast_to(dark, (ndark, px, 3)).astype(float), rd),
+        dn(np.broadcast_to(dark + span, (50, px, 3)).astype(float),
+           np.sqrt(g * span + rd * rd))])
+    # three bands across: the base (thinnest), a mid tone, a dense one
+    t = np.select([np.arange(px) < 32, np.arange(px) < 64], [0.5, 0.2], 0.08)
+    t = np.broadcast_to(t[None, :, None], (lines, px, 3))
+    raw = dn(dark + t * span, np.sqrt(g * t * span + rd * rd))
+    scan = tmp_path / "noisy_frame01.raw"
+    raw.tofile(scan)
+    cal.tofile(str(scan) + ".cal")
+    Path(str(scan) + ".txt").write_text(
+        f"preset=crop\nppi=2000\npx={px}\nx={x}\nlines={lines}\ny=0\n"
+        f"bin={binning}\nkept={lines}\n")
+    return scan
+
+
+def flat_std(ftdev, dng, out, *extra):
+    cv2 = pytest.importorskip("cv2")
+    r = subprocess.run([str(ftdev), "export", str(dng), "--film", "neg",
+                        "-o", str(out), *extra], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    img = cv2.imread(str(out), cv2.IMREAD_COLOR).astype(float)
+    mid = img[38:58, 8:-8, 1]                   # inside the mid-tone band
+    assert 20 < mid.mean() < 235                # not clipped
+    return mid.std(), r.stderr
+
+
+@needs_cc
+def test_export_noise_reduction_e2e(ftdev, tmp_path):
+    pytest.importorskip("cv2")
+    scan = synth_noisy_scan(tmp_path)
+    r = subprocess.run([str(ftdev), str(scan)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    dng = tmp_path / "noisy_frame01.dng"
+    tags, _ = read_dng(dng)
+    typ, cnt, raw = tags[51041]                 # NoiseProfile
+    assert (typ, cnt) == (12, 6)
+    s_r, o_r = struct.unpack("<6d", raw)[:2]
+    # g / span and read^2 / span^2 (+1/12 DN^2 rounding), span ~6000
+    assert 1.5 / 6500 < s_r < 1.5 / 5500
+    assert 9.08 / 6500 ** 2 < o_r < 9.1 / 5500 ** 2
+    on, err = flat_std(ftdev, dng, tmp_path / "on.jpg")
+    assert "no noise profile" not in err
+    off, _ = flat_std(ftdev, dng, tmp_path / "off.jpg", "--nr-sensor", "0")
+    assert on < 0.5 * off, (on, off)    # measured 1.55 vs 6.48 code values
+    grain, _ = flat_std(ftdev, dng, tmp_path / "gr.jpg", "--nr-sensor", "0",
+                        "--nr-grain", "2")
+    assert grain < off
+
+
+@needs_cc
+def test_export_no_profile_warns_and_estimates(ftdev, tmp_path):
+    pytest.importorskip("cv2")
+    scan = synth_noisy_scan(tmp_path, ndark=30)  # too few dark lines
+    r = subprocess.run([str(ftdev), str(scan)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    assert "noise profile: 30 dark" in r.stderr
+    dng = tmp_path / "noisy_frame01.dng"
+    tags, _ = read_dng(dng)
+    assert 51041 not in tags
+    _, err = flat_std(ftdev, dng, tmp_path / "e.jpg")
+    assert "warning: no noise profile, estimated" in err
+    _, err = flat_std(ftdev, dng, tmp_path / "z.jpg", "--nr-sensor", "0")
+    assert "no noise profile" not in err

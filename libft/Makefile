@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 CC ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic
-SRC = ft.c ft_geom.c ft_holder.c ft_focus.c ft_calib.c ft_job.c ft_png.c ft_detect.c ft_preview.c ft_plan.c ft_maint.c ft_upload.c ft_image.c ft_develop.c ft_dng.c ft_out.c ft_curve.c ft_render.c ft_render_auto.c ft_share.c ft_share_cut.c ft_output.c ft_icc.c ft_resize.c
+SRC = ft.c ft_geom.c ft_holder.c ft_focus.c ft_calib.c ft_job.c ft_png.c ft_detect.c ft_preview.c ft_plan.c ft_maint.c ft_upload.c ft_image.c ft_develop.c ft_dng.c ft_out.c ft_curve.c ft_render.c ft_render_auto.c ft_share.c ft_share_cut.c ft_output.c ft_icc.c ft_resize.c ft_atrous.c ft_noise_model.c ft_nr.c ft_sharpen.c
 OBJ = $(SRC:.c=.o)
-TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_share test/test_share_cut test/test_dng test/test_output test/test_icc test/test_resize test/test_jpeg
+TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_share test/test_share_cut test/test_dng test/test_output test/test_icc test/test_resize test/test_jpeg test/test_atrous test/test_noise_model test/test_nr test/test_sharpen
 # the render core, the share planner and the output colour units also
 # build for the browser (WASM): libm and mem* only
-PURE = ft_curve.o ft_render.o ft_render_auto.o ft_plan.o ft_share.o ft_output.o ft_icc.o ft_resize.o
+PURE = ft_curve.o ft_render.o ft_render_auto.o ft_plan.o ft_share.o ft_output.o ft_icc.o ft_resize.o ft_atrous.o ft_noise_model.o ft_nr.o ft_sharpen.o
 # lcms2 is a test oracle only: libft itself never links it
 LCMS_LIBS ?= $(shell pkg-config --libs lcms2 2>/dev/null || echo -llcms2)
 # ft_jpeg.c is not in libft.a (libft has no dependencies): built here and

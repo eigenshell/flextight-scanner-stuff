@@ -34,6 +34,7 @@
 #include <string.h>
 #include "ft_develop.h"
 #include "ft_image.h"
+#include "ft_noise_model.h"
 #include "ft_out.h"
 #include "ft_render.h"
 #include "render_flags.h"
@@ -114,6 +115,8 @@ static void usage(void)
                     "[--space srgb|p3|adobe]\n"
                     "             [--gamut soft|clip] [--crop x,y,w,h] "
                     "[--long-edge px] [--quality q]\n"
+                    "             [--nr-sensor k] [--nr-chroma k] "
+                    "[--nr-grain k] [--sharpen a]\n"
                     "             [--raw-too] [-o out.jpg]\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
@@ -269,6 +272,13 @@ int main(int argc, char **argv)
     }
     free(raw);
     raw = NULL;
+    /* the NoiseProfile rides in the DNG; without one export estimates */
+    {
+        int nr = ft_noise_model(cal, (int)cl, (int)px, im.noise, &e);
+        im.has_noise = nr >= 0;
+        if (nr)
+            fprintf(stderr, "ftdev: note: %s\n", e.msg);
+    }
     rc = 0;
     /* the developed image first (DNG, PNG preview), then the render */
     for (i = 0; i < nwr; i++) {
