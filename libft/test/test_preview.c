@@ -9,6 +9,14 @@
 
 int main(void)
 {
+    /* the 3150-optics preview of 3150 detailed scans: 525 ppi, bin 6 */
+    {
+        const ft_preview *o = ft_preview_find("o3150");
+        CHECK(o != NULL && o->ppi == 525.0 && o->bin == 6 && o->down == 1);
+        CHECK(o->ppi * o->bin == 3150.0);
+        CHECK(ft_preview_lines(o) == 4795);
+        CHECK(ft_preview_rgb_k(o) == 2);
+    }
     const ft_preview *s = ft_preview_find("standard");
     const ft_preview *h = ft_preview_find("1000");
     const ft_preview *n = ft_preview_find("1500");

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Whole-holder previews: fast, for framing and detection. "standard" is
- * FlexColor's captured 525 ppi preview (6300 optics, bin 12). "1000" and
+ * FlexColor's captured 525 ppi preview (6300 optics, bin 12). "o3150" is
+ * 525 ppi at the 3150 optics (bin 6): a detailed scan's preview is taken
+ * at the scan's own optics, so its light level and Dmax match the scan
+ * (6300 scans preview with "standard"). "1000" and
  * "1500" are synthesized at the 6000 optics FlexColor's crops use (bin 6
  * and 4), the fastest way to those resolutions: the stock firmware costs
  * ~84k output px/s for the full line (7992 / bin px) whatever the window,
@@ -23,7 +26,7 @@ typedef struct {
     int down;          /* box factor to the detection grid */
 } ft_preview;
 
-/* "standard" (or "525"), "1000", "1500"; NULL: unknown */
+/* "standard" (or "525"), "o3150", "1000", "1500"; NULL: unknown */
 const ft_preview *ft_preview_find(const char *name);
 /* window in holder mm: across x0..x0+w (the standard preview's span),
  * along 0..len */
