@@ -9,7 +9,10 @@
 
 typedef struct {
     int w, h;
-    float *rgb;              /* h rows of w RGB floats, 0..1 */
+    float *rgb;              /* h rows of w RGB floats, 0..1; after
+                                ft_render_image a positive in linear Rec.2020,
+                                no longer transmittance (write transmittance
+                                formats before rendering) */
     double ppi;              /* output resolution; 0 = unknown */
     int film;                /* ft_film, or -1 = unknown */
     int frame;               /* job frame number; 0 = none */

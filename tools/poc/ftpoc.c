@@ -2642,6 +2642,11 @@ static int cmd_frames(int argc, char **argv)
         printf("note: %d blank frame(s) of unexposed film at the strip ends\n",
                L.nblank_end);
     ft_layout_to_job(&L, h, film, ppi, sprockets, &j);
+    printf("film %s: D %.3f %.3f %.3f (%s)\n",
+           film == FT_FILM_SLIDE ? "black" : "base", j.film_base[0],
+           j.film_base[1], j.film_base[2],
+           L.has_holes ? "rebate between the holes"
+                       : "estimated: no hole rows, extreme film pixels");
 
     focus_failed = focus_check(t, lines, px, &ax, ppi, &j) != 0;
     if (focus_failed) {
@@ -2764,7 +2769,8 @@ static void job_window(const ft_job_frame *fr, const ft_holder *h, long off,
  * (origin and size from <out>.txt), to <out>.txt. Rows count in the
  * RGB-aligned image (ftraw.py, load_corrected): row r is green row
  * r + k of the scan, k = 12 / bin lines dropped at each end. */
-static void write_crop(const char *out, const ft_job_frame *fr, long off)
+static void write_crop(const char *out, const ft_job *j,
+                       const ft_job_frame *fr, long off)
 {
     char meta[300];
     long xs = meta_long(out, "x"), ys = meta_long(out, "y");
@@ -2809,6 +2815,9 @@ static void write_crop(const char *out, const ft_job_frame *fr, long off)
         fprintf(m, "crop_x=%ld\ncrop_y=%ld\ncrop_w=%ld\ncrop_h=%ld\n"
                    "tilt=%.3f\nstraighten=%d\nfocus_offset=%ld\n",
                 cx, cy, cw, ch, fr->tilt_deg, fr->straighten, off);
+        if (j->has_film_base)           /* the render's base (ftdev) */
+            fprintf(m, "film_base=%.4f %.4f %.4f\n", j->film_base[0],
+                    j->film_base[1], j->film_base[2]);
         if (fclose(m) != 0)
             m = NULL;
     }
@@ -2969,7 +2978,7 @@ static int cmd_scanjob(int argc, char **argv)
             return 1;
         }
         nscan++;
-        write_crop(out, fr, off);
+        write_crop(out, &j, fr, off);
         fr->done = 1;
         if (save_job(path, &j))
             return 1;

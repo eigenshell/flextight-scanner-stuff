@@ -97,6 +97,28 @@ int main(void)
         ft_layout_to_job(&L, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 0, &j);
         CHECK_NEAR(j.f[0].x0, L.f[0].x0, 1e-9);
         CHECK(j.focus == FT_FOCUS_SHIFTED && j.f[0].ppi == 2000);
+        /* the film base goes to the job as density */
+        CHECK(j.has_film_base);
+        CHECK_NEAR(j.film_base[0], -log10(L.base[0]), 1e-9);
+        CHECK_NEAR(j.film_base[2], -log10(L.base[2]), 1e-9);
+        /* a base above 1 or at the floor stays within what the reader takes */
+        {
+            ft_layout M = L;
+            ft_job k;
+            ft_err e2;
+            FILE *g = tmpfile();
+            M.base[0] = 1.02; M.base[1] = 0.3; M.base[2] = 0.1;
+            ft_layout_to_job(&M, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 0, &k);
+            CHECK(k.film_base[0] == 0);
+            CHECK(ft_job_write(&k, g) == 0);
+            rewind(g);
+            CHECK(ft_job_read(&k, g, &e2) == 0 && k.has_film_base);
+            fclose(g);
+            M.base[0] = FT_T_FLOOR / 2; M.base[1] = FT_T_FLOOR / 10; M.base[2] = 0;
+            ft_layout_to_job(&M, ft_holder_find("24x217"), FT_FILM_NEGATIVE, 2000, 0, &k);
+            CHECK(k.film_base[0] == 4.5 && k.film_base[1] == 4.5 &&
+                  k.film_base[2] == 4.5);
+        }
     }
 
     /* real preview axes (x 0.92..33.14 mm) with the film shifted so the
