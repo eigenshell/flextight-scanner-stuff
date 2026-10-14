@@ -6,7 +6,7 @@ OBJ = $(SRC:.c=.o)
 TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_share test/test_share_cut test/test_dng test/test_output test/test_icc test/test_resize test/test_jpeg test/test_atrous test/test_noise_model test/test_nr test/test_sharpen
 # the render core, the share planner and the output colour units also
 # build for the browser (WASM): libm and mem* only
-PURE = ft_curve.o ft_render.o ft_render_auto.o ft_plan.o ft_share.o ft_output.o ft_icc.o ft_resize.o
+PURE = ft_curve.o ft_render.o ft_render_auto.o ft_plan.o ft_share.o ft_output.o ft_icc.o ft_resize.o ft_atrous.o ft_noise_model.o ft_nr.o ft_sharpen.o
 # lcms2 is a test oracle only: libft itself never links it
 LCMS_LIBS ?= $(shell pkg-config --libs lcms2 2>/dev/null || echo -llcms2)
 # ft_jpeg.c is not in libft.a (libft has no dependencies): built here and
