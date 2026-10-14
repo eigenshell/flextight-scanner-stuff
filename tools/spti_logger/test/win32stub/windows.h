@@ -179,4 +179,13 @@ BOOL WINAPI SetConsoleCtrlHandler(PHANDLER_ROUTINE, BOOL);
 #define MOVEFILE_REPLACE_EXISTING 0x1
 BOOL WINAPI MoveFileExA(LPCSTR, LPCSTR, DWORD);
 
+/* --- names used by tools/detail/ring.c and ftpoc's detailed scans --- */
+BOOL WINAPI SetEvent(HANDLE);
+HANDLE WINAPI CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T,
+                           LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
+typedef union { struct { DWORD LowPart, HighPart; } u;
+                unsigned long long QuadPart; } ULARGE_INTEGER;
+BOOL WINAPI GetDiskFreeSpaceExA(LPCSTR, ULARGE_INTEGER *, ULARGE_INTEGER *,
+                                ULARGE_INTEGER *);
+
 #endif /* FT_WIN32STUB_WINDOWS_H */
