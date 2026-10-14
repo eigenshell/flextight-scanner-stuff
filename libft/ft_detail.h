@@ -34,7 +34,9 @@ typedef struct {
     ft_dscan scan;                /* the pass as sent */
     ft_film film;
     ft_detail_out out;            /* NEG or POS */
-    ft_detail_fmt fmt;            /* NEG: DNG or TIFF (POS: TIFF) */
+    ft_detail_fmt fmt;            /* NEG: DNG or TIFF (POS: TIFF); a
+                                     negative TIFF carries a linear ICC
+                                     profile of the scanner RGB (ft_icc) */
     ft_detail_bw bw;              /* POS: OFF (colour), MONO, RGB */
     double film_base[3];          /* POS: D of the film base per channel */
     double margin_mm;             /* kept around each frame box */

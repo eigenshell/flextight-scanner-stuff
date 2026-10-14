@@ -3,7 +3,7 @@ CC ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic
 SRC = ft.c ft_geom.c ft_holder.c ft_focus.c ft_calib.c ft_job.c ft_png.c ft_detect.c ft_preview.c ft_plan.c ft_maint.c ft_upload.c ft_image.c ft_develop.c ft_dng.c ft_tiff_ifd.c ft_tiff.c ft_out.c ft_curve.c ft_render.c ft_render_auto.c ft_density.c ft_stream.c ft_dplan.c ft_detail.c ft_share.c ft_share_cut.c ft_output.c ft_icc.c ft_resize.c
 OBJ = $(SRC:.c=.o)
-TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_tiff test/test_density test/test_stream test/test_dplan test/test_detail test/test_share test/test_share_cut test/test_dng test/test_output test/test_icc test/test_resize test/test_jpeg
+TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_tiff test/test_density test/test_stream test/test_dplan test/test_detail test/test_share test/test_share_cut test/test_dng test/test_output test/test_icc test/test_resize test/test_jpeg test/test_icc_linear
 # the render core, the 2b encoders, the share planner and the output
 # colour units also build for the browser (WASM): libm and mem* only
 PURE = ft_curve.o ft_render.o ft_render_auto.o ft_density.o ft_dplan.o \
@@ -39,6 +39,9 @@ test/window_dump: test/window_dump.c test/synth.c test/synth.h libft.a
 
 test/test_icc: test/test_icc.c test/ftest.h libft.a
 	$(CC) $(CFLAGS) -I. -o $@ test/test_icc.c libft.a $(LCMS_LIBS) -lm
+
+test/test_icc_linear: test/test_icc_linear.c test/ftest.h libft.a
+	$(CC) $(CFLAGS) -I. -o $@ test/test_icc_linear.c libft.a $(LCMS_LIBS) -lm
 
 test/test_jpeg: test/test_jpeg.c test/ftest.h ft_jpeg.c ft_jpeg.h libft.a
 	$(CC) $(CFLAGS) -I. -o $@ test/test_jpeg.c ft_jpeg.c libft.a $(JPEG_LIBS) -lm

@@ -362,6 +362,15 @@ int main(void)
         CHECK(strstr(slurp(BASE "_pass01.raw.txt"), "bin=12\n") != NULL);
         CHECK(exists(BASE "_pass01.raw.cal"));
         CHECK(exists(BASE "_frame01.tif"));            /* TIFF negative */
+        {   /* with the linear scanner-RGB profile (ft_icc_build_linear) */
+            TIFF *t = TIFFOpen(BASE "_frame01.tif", "r");
+            uint32_t n = 0;
+            void *pr = NULL;
+            CHECK(t != NULL);
+            CHECK(TIFFGetField(t, TIFFTAG_ICCPROFILE, &n, &pr) && n == 500);
+            CHECK(memcmp((char *)pr + 12, "mntrRGB XYZ ", 12) == 0);
+            TIFFClose(t);
+        }
     }
     o.keep_raw = 0;
     cleanup(2);
@@ -400,6 +409,14 @@ int main(void)
         g_im = &im;
         g_r = rr;
         CHECK(compare(r.f[i].path, r.f[i].w, r.f[i].h, 3, pos_px) == 0);
+    }
+    {   /* density is not colorimetric: no profile on a positive */
+        TIFF *t = TIFFOpen(BASE "_frame01.tif", "r");
+        uint32_t n = 0;
+        void *pr = NULL;
+        CHECK(t != NULL);
+        CHECK(!TIFFGetField(t, TIFFTAG_ICCPROFILE, &n, &pr));
+        TIFFClose(t);
     }
     {
         char *txt = slurp(BASE "_frame01.tif.txt");

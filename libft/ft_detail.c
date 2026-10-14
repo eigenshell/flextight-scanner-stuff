@@ -7,6 +7,7 @@
 #include "ft_density.h"
 #include "ft_detail.h"
 #include "ft_detect.h"
+#include "ft_icc.h"
 #include "ft_stream.h"
 #include "ft_tiff.h"
 
@@ -28,6 +29,8 @@ struct ft_detail {
     char path[FT_MAX_FRAMES][600];
     FILE *raw;                    /* keep_raw */
     char raw_path[600];
+    unsigned char icc[FT_ICC_MAX];  /* negative TIFFs: linear scanner RGB */
+    size_t icc_n;
 };
 
 int ft_detail_path(const char *base, int index, int tiff, char *buf,
@@ -148,6 +151,15 @@ ft_detail *ft_detail_open(const ft_detail_opts *o, const unsigned short *cal,
         ft_dens_weights(var, d->w);
     }
 
+    if (kind_of(o) == FT_TIFF_RGB && o->out == FT_DETAIL_NEG) {
+        d->icc_n = ft_icc_build_linear(o->meta->xyz_to_rgb,
+                                       "Flextight scanner RGB, linear "
+                                       "(flextight)", d->icc, sizeof d->icc);
+        if (!d->icc_n) {
+            ft_fail(e, "detail: the scanner colour matrix is singular");
+            goto fail;
+        }
+    }
     for (i = 0; i < o->nframes; i++) {
         const ft_detail_frame *fr = &o->f[i];
         ft_tiff_opts to;
@@ -185,6 +197,8 @@ ft_detail *ft_detail_open(const ft_detail_opts *o, const unsigned short *cal,
         to.w = d->r[i][1] - d->r[i][0];
         to.h = d->r[i][3] - d->r[i][2];
         to.meta = &meta;
+        to.icc = d->icc_n ? d->icc : NULL;
+        to.icc_n = d->icc_n;
         snprintf(partial, sizeof partial, "%s.partial", d->path[i]);
         d->tw[i] = ft_tiffw_open(partial, &to, e);
         if (!d->tw[i])
