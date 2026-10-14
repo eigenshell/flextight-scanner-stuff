@@ -3,7 +3,7 @@ CC ?= cc
 CFLAGS ?= -std=c99 -O2 -Wall -Wextra -Wpedantic
 SRC = ft.c ft_geom.c ft_holder.c ft_focus.c ft_calib.c ft_job.c ft_png.c ft_detect.c ft_preview.c ft_plan.c ft_maint.c ft_upload.c ft_image.c ft_develop.c ft_dng.c ft_out.c ft_curve.c ft_render.c ft_render_auto.c ft_share.c ft_share_cut.c
 OBJ = $(SRC:.c=.o)
-TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_share test/test_share_cut
+TESTS = test/test_ft test/test_geom test/test_focus test/test_calib test/test_job test/test_png test/test_detect test/test_preview test/test_plan test/test_maint test/test_upload test/test_develop test/test_curve test/test_render test/test_render_auto test/test_share test/test_share_cut test/test_dng
 # the render core, the share planner and the output colour units also
 # build for the browser (WASM): libm and mem* only
 PURE = ft_curve.o ft_render.o ft_render_auto.o ft_plan.o ft_share.o
