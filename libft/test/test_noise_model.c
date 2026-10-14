@@ -94,6 +94,33 @@ int main(void)
         }
     }
 
+    /* a real .cal at bin 1 (2026-10-14): a half-lit lamp-transition line
+     * inside the 10 % dark band, a partly lit one after the whites, and
+     * the lamp warming over the white lines. None of it is pixel noise:
+     * S and O stay within 3 %. */
+    make_cal(ND, NW);
+    for (i = 0; i < PX * 3; i++) {
+        int l;
+        cal[(size_t)(ND - 1) * PX * 3 + i] =
+            dn(dark[i] + (i / 3 < PX / 2 ? 0.08 : 0.02) * span[i], RD);
+        for (l = ND; l < ND + NW; l++)
+            cal[(size_t)l * PX * 3 + i] += (unsigned short)(l - ND) / 5;
+    }
+    CHECK(ft_noise_model(cal, ND + NW, PX, prof, &e) == 0);
+    for (c = 0; c < 3; c++) {
+        double isp = 0, isp2 = 0, s, o;
+        for (i = c; i < PX * 3; i += 3) {
+            isp += 1 / span[i];
+            isp2 += 1 / (span[i] * span[i]);
+        }
+        isp /= PX;
+        isp2 /= PX;
+        s = G * isp;
+        o = (RD * RD + 1 / 12.0) * (1 + 1.0 / (ND - 1)) * isp2;
+        CHECK_NEAR(prof[2 * c], s, 0.03 * s);
+        CHECK_NEAR(prof[2 * c + 1], o, 0.03 * o);
+    }
+
     /* too few dark lines: no profile */
     make_cal(40, NW);
     CHECK(ft_noise_model(cal, 40 + NW, PX, prof, &e) == -1);
