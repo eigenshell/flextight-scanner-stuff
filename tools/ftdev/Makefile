@@ -6,8 +6,8 @@ DETAIL = ../detail
 # ftdev export writes JPEGs: libjpeg (libjpeg-turbo). libft.a itself has
 # no dependencies; ft_jpeg.c is built here.
 JPEG_LIBS ?= $(shell pkg-config --libs libjpeg 2>/dev/null || echo -ljpeg)
-SRC = ftdev.c detail.c util.c render_flags.c share.c $(LIBFT)/ft_jpeg.c \
-	$(DETAIL)/ring.c $(DETAIL)/worker.c
+SRC = ftdev.c detail.c util.c render_flags.c share.c stock.c \
+	$(LIBFT)/ft_jpeg.c $(DETAIL)/ring.c $(DETAIL)/worker.c
 
 ftdev: $(SRC) *.h $(DETAIL)/ring.h $(DETAIL)/worker.h $(LIBFT)/ft_jpeg.h \
 		$(LIBFT)/libft.a

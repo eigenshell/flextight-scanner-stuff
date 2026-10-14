@@ -101,12 +101,16 @@ int rflags_parse(rflags *f, int argc, char **argv, int *i)
     return 1;
 }
 
+ft_render_mode rflags_mode(const rflags *f)
+{
+    return f->bw ? FT_RENDER_BW
+         : f->film == FT_FILM_SLIDE ? FT_RENDER_SLIDE : FT_RENDER_NEG;
+}
+
 int rflags_recipe(const rflags *f, ft_recipe *r)
 {
     ft_err e;
-    ft_recipe_default(r, f->bw ? FT_RENDER_BW
-                         : f->film == FT_FILM_SLIDE ? FT_RENDER_SLIDE
-                                                    : FT_RENDER_NEG);
+    ft_recipe_default(r, rflags_mode(f));
     if (f->curve && ft_curve_preset(f->curve, &r->master) != 0 &&
         ft_curve_parse(f->curve, &r->master, &e) != 0) {
         const char *m = e.msg;
@@ -133,6 +137,9 @@ int rflags_recipe(const rflags *f, ft_recipe *r)
     return 0;
 }
 
+static const char *NO_BASE = "ftdev: note: no film_base given; "
+                              "film base estimated from the frame itself\n";
+
 int rflags_render(const rflags *f, ft_recipe *r, const double *base_d,
                   ft_image *im, ft_render *g)
 {
@@ -151,8 +158,7 @@ int rflags_render(const rflags *f, ft_recipe *r, const double *base_d,
             fprintf(stderr, "ftdev: %s\n", e.msg);
             return 1;
         }
-        fprintf(stderr, "ftdev: note: no film_base given; "
-                        "film base estimated from the frame itself\n");
+        fputs(NO_BASE, stderr);
     }
     ft_recipe_set_base(r, d);
     if (ft_render_auto(one, 1, r, &e)) {
@@ -180,4 +186,72 @@ int rflags_render(const rflags *f, ft_recipe *r, const double *base_d,
                f->curve ? f->curve : "linear");
     }
     return 0;
+}
+
+int look_render(const ft_stock *s, const ft_taste *t, ft_render_mode m,
+                const double *base_d, ft_image *im, ft_recipe *r,
+                ft_render *g)
+{
+    const ft_image *one[1];
+    float d[3];
+    ft_err e;
+    one[0] = im;
+    if (base_d) {
+        d[0] = (float)base_d[0];
+        d[1] = (float)base_d[1];
+        d[2] = (float)base_d[2];
+    } else {
+        fputs(NO_BASE, stderr);
+    }
+    if (ft_look_recipe(s, t, m, base_d ? d : NULL, one, 1, r, &e)) {
+        fprintf(stderr, "ftdev: %s\n", e.msg);
+        return strncmp(e.msg, "recipe:", 7) == 0 ? 2 : 1;
+    }
+    if (ft_render_compile(r, g, &e)) {
+        fprintf(stderr, "ftdev: %s\n", e.msg);
+        return 2;
+    }
+    ft_render_image(g, im);
+    return 0;
+}
+
+int recipe_text(char *buf, size_t cap, const char *look, int frame,
+                const ft_recipe *r, const char *const curve[4],
+                const ft_look_detail *d)
+{
+    static const char *CK[4] = { "curve", "curve_r", "curve_g", "curve_b" };
+    char s[3][32];
+    size_t n = 0;
+    int k, w;
+#define APP(...) do { \
+        w = snprintf(buf + (n < cap ? n : cap), n < cap ? cap - n : 0, \
+                     __VA_ARGS__); \
+        if (w > 0) \
+            n += (size_t)w; \
+    } while (0)
+#define F3(v) fmtf((v)[0], s[0], 32), fmtf((v)[1], s[1], 32), \
+              fmtf((v)[2], s[2], 32)
+    APP("look=%s\n", look);
+    if (frame >= 0)
+        APP("frame=%d\n", frame);
+    APP("film=%s\n", r->mode == FT_RENDER_BW ? "bw"
+                     : r->mode == FT_RENDER_SLIDE ? "slide" : "neg");
+    APP("base=%s %s %s\n", F3(r->base));
+    APP("range=%s %s %s\n", F3(r->range));
+    APP("exposure=%s\n", fmtf(r->exposure, s[0], 32));
+    APP("tint=%s %s %s\n", F3(r->tint));
+    APP("grade=%s\n", fmtf(r->grade, s[0], 32));
+    APP("paper_black=%s\n", fmtf(r->paper_black, s[0], 32));
+    APP("paper_white=%s\n", fmtf(r->paper_white, s[0], 32));
+    if (r->mode == FT_RENDER_BW)
+        APP("bw_weights=%s %s %s\n", F3(r->bw_weights));
+    APP("curve=%s\n", curve[0] ? curve[0] : "linear");
+    for (k = 1; k < 4; k++)
+        if (curve[k])
+            APP("%s=%s\n", CK[k], curve[k]);
+    APP("nr_sensor=%g\nnr_chroma=%g\nnr_grain=%g\nsharpen=%g\n",
+        d->nr_sensor, d->nr_chroma, d->nr_grain, d->sharpen);
+#undef F3
+#undef APP
+    return (int)n;
 }

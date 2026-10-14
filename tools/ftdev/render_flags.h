@@ -4,6 +4,7 @@
 #ifndef RENDER_FLAGS_H
 #define RENDER_FLAGS_H
 #include "ft_image.h"
+#include "ft_look.h"
 #include "ft_render.h"
 
 typedef struct {
@@ -28,5 +29,20 @@ int rflags_recipe(const rflags *f, ft_recipe *r);
  * flags to paste back. 0 ok, 1 error, 2 bad recipe (messages printed). */
 int rflags_render(const rflags *f, ft_recipe *r, const double *base_d,
                   ft_image *im, ft_render *g);
+/* the render mode of the flags' film (film must be set) */
+ft_render_mode rflags_mode(const rflags *f);
+/* render im in place from a roll edit's stock (NULL: none) and a frame's
+ * resolved taste (ft_look.h); base_d as rflags_render. 0 ok, 1 error, 2
+ * bad recipe (messages printed). */
+int look_render(const ft_stock *s, const ft_taste *t, ft_render_mode m,
+                const double *base_d, ft_image *im, ft_recipe *r,
+                ft_render *g);
+/* the resolved recipe as key=value lines (the export's .txt and JPEG
+ * comment): look name, frame (< 0: none), the recipe, the curves' text
+ * (NULL: linear / not set), the detail settings. Returns snprintf's
+ * length. */
+int recipe_text(char *buf, size_t cap, const char *look, int frame,
+                const ft_recipe *r, const char *const curve[4],
+                const ft_look_detail *d);
 
 #endif
