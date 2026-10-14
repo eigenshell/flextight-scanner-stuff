@@ -2732,7 +2732,6 @@ static int cmd_frames(int argc, char **argv)
                 return 2;
             }
         }
-        else if (strcmp(argv[i], "--select") == 0) select = argv[i + 1];
         else if (strcmp(argv[i], "--hf-half-res") == 0) {
             if (strcmp(argv[i + 1], "on") == 0) hf_half_res = 1;
             else if (strcmp(argv[i + 1], "off") == 0) hf_half_res = 0;
@@ -2746,8 +2745,12 @@ static int cmd_frames(int argc, char **argv)
             return 2;
         }
     }
-    if (!(share > 0) && (select || hf_half_res >= 0)) {
-        fprintf(stderr, "frames: --select and --hf-half-res need --share\n");
+    if (hf_half_res >= 0 && !(share > 0)) {
+        fprintf(stderr, "frames: --hf-half-res needs --share\n");
+        return 2;
+    }
+    if (detail == FT_DETAIL_NONE && !(share > 0) && select) {
+        fprintf(stderr, "frames: --select needs --detail neg|pos or --share\n");
         return 2;
     }
     if (!ft_ppi_supported(ppi)) {
@@ -2755,8 +2758,8 @@ static int cmd_frames(int argc, char **argv)
         return 2;
     }
     if (detail == FT_DETAIL_NONE &&
-        (select || dbw != FT_BW_OFF || keep_raw || dfmt != FT_DFMT_DNG)) {
-        fprintf(stderr, "frames: --select/--fmt/--bw/--keep-raw need "
+        (dbw != FT_BW_OFF || keep_raw || dfmt != FT_DFMT_DNG)) {
+        fprintf(stderr, "frames: --fmt/--bw/--keep-raw need "
                         "--detail neg|pos\n");
         return 2;
     }
