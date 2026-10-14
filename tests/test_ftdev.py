@@ -529,3 +529,17 @@ def test_share_export_limits(ftdev, tmp_path):
     r = subprocess.run([str(ftdev), "export", str(dng), "--film", "neg"],
                        capture_output=True, text=True)
     assert r.returncode == 0 and "exporting at full size" in r.stderr
+
+
+@needs_cc
+def test_export_nr_flags_refused(ftdev, tmp_path):
+    win = share_window(tmp_path)
+    subprocess.run([str(ftdev), "cut", str(win)], check=True,
+                   capture_output=True)
+    dng = tmp_path / "job_frame01.dng"
+    for flag, val in [("--nr-sensor", "4.1"), ("--nr-chroma", "8.1"),
+                      ("--nr-grain", "4.1"), ("--sharpen", "3.1"),
+                      ("--nr-sensor", "-1"), ("--sharpen", "x")]:
+        r = subprocess.run([str(ftdev), "export", str(dng), flag, val],
+                           capture_output=True, text=True)
+        assert r.returncode == 2 and flag in r.stderr, (flag, r.stderr)

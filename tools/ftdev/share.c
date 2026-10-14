@@ -25,9 +25,11 @@
 #include "ft_dng.h"
 #include "ft_icc.h"
 #include "ft_jpeg.h"
+#include "ft_nr.h"
 #include "ft_output.h"
 #include "ft_resize.h"
 #include "ft_share_cut.h"
+#include "ft_sharpen.h"
 #include "render_flags.h"
 #include "share.h"
 
@@ -227,7 +229,51 @@ static void export_usage(void)
     fprintf(stderr, "usage: ftdev export <frame.dng> [render flags] "
                     "[--space srgb|p3|adobe] [--gamut soft|clip]\n"
                     "         [--crop x,y,w,h] [--long-edge px] "
-                    "[--quality q] [--raw-too] [-o out.jpg]\n");
+                    "[--quality q] [--raw-too] [-o out.jpg]\n"
+                    "         [--nr-sensor 0..4 (1)] [--nr-chroma 0..8 (2)] "
+                    "[--nr-grain 0..4 (0)] [--sharpen 0..3 (0.5)]\n");
+}
+
+/* an export strength flag: 1 parsed, 0 not this flag, -1 bad (printed) */
+static int strength(const char *a, const char *v, const char *name,
+                    double hi, double *out)
+{
+    char *end;
+    double d;
+    if (strcmp(a, name) != 0)
+        return 0;
+    d = strtod(v, &end);
+    if (end == v || *end || !(d >= 0 && d <= hi)) {
+        fprintf(stderr, "ftdev: %s is 0..%g\n", name, hi);
+        return -1;
+    }
+    *out = d;
+    return 1;
+}
+
+/* the frame's noise profile for sensor NR: the DNG's NoiseProfile, else
+ * the sidecar's, else measured on the pixels (with a warning) */
+static void export_profile(const ft_image *im, const ft_share_sidecar *sc,
+                           const ft_image *cut, double prof[6],
+                           void *scratch)
+{
+    int i;
+    if (im->has_noise) {
+        memcpy(prof, im->noise, 6 * sizeof *prof);
+        if (sc && sc->has_noise)
+            for (i = 0; i < 6; i++)
+                if (fabs(sc->noise[i] - prof[i]) > 1e-6 * fabs(prof[i])) {
+                    fprintf(stderr, "ftdev: warning: sidecar noise_profile "
+                                    "disagrees with the DNG; using the "
+                                    "DNG's\n");
+                    break;
+                }
+    } else if (sc && sc->has_noise) {
+        memcpy(prof, sc->noise, 6 * sizeof *prof);
+    } else {
+        ft_nr_estimate(cut->rgb, cut->w, cut->h, prof, scratch);
+        fprintf(stderr, "ftdev: warning: no noise profile, estimated\n");
+    }
 }
 
 int ftdev_export(int argc, char **argv)
@@ -245,6 +291,8 @@ int ftdev_export(int argc, char **argv)
     rflags rf;
     ft_image im, cut;
     float *small = NULL, *scratch = NULL;
+    void *nrs = NULL;
+    double nr_sensor = 1, nr_chroma = 2, nr_grain = 0, sharpen = 0.5;
     unsigned char *px8 = NULL, icc[FT_ICC_MAX];
     size_t icc_n;
     ft_err e;
@@ -259,6 +307,16 @@ int ftdev_export(int argc, char **argv)
             return 2;
         if (r > 0)
             continue;
+        if (i + 1 < argc &&
+            ((r = strength(a, argv[i + 1], "--nr-sensor", 4, &nr_sensor)) ||
+             (r = strength(a, argv[i + 1], "--nr-chroma", 8, &nr_chroma)) ||
+             (r = strength(a, argv[i + 1], "--nr-grain", 4, &nr_grain)) ||
+             (r = strength(a, argv[i + 1], "--sharpen", 3, &sharpen)))) {
+            if (r < 0)
+                return 2;
+            i++;
+            continue;
+        }
         if (strcmp(a, "--space") == 0 && i + 1 < argc) {
             if (ft_space_find(argv[++i], &space) ||
                 space == FT_SPACE_REC2020) {
@@ -382,6 +440,24 @@ int ftdev_export(int argc, char **argv)
                im.rgb + ((size_t)(crop[1] + i) * im.w + crop[0]) * 3,
                (size_t)crop[2] * 3 * sizeof *cut.rgb);
     cut.ppi = im.ppi;
+    /* noise reduction on the transmittance, before the render */
+    if (nr_sensor > 0 || nr_grain > 0) {
+        nrs = malloc(ft_nr_scratch_bytes(cut.w, cut.h));
+        if (!nrs) {
+            fprintf(stderr, "ftdev: out of memory\n");
+            goto out;
+        }
+    }
+    if (nr_sensor > 0) {
+        double prof[6];
+        export_profile(&im, has_side ? &sc : NULL, &cut, prof, nrs);
+        ft_nr_sensor(cut.rgb, cut.w, cut.h, prof, nr_sensor,
+                     nr_sensor * nr_chroma, nrs);
+    }
+    if (nr_grain > 0)
+        ft_nr_grain(cut.rgb, cut.w, cut.h, nr_grain, nrs);
+    free(nrs);
+    nrs = NULL;
     ft_image_free(&im);
     {
         int r = rflags_render(&rf, &rcp,
@@ -404,6 +480,20 @@ int ftdev_export(int argc, char **argv)
         ft_output_compile(space, gamut, &g_output, &e)) {
         fprintf(stderr, "ftdev: %s\n", e.msg);
         goto out;
+    }
+    /* output sharpening, after the resize: its scratch reuses the resize
+     * scratch when that is big enough */
+    if (sharpen > 0) {
+        size_t need = ft_sharpen_scratch_bytes(ow, oh);
+        if (need > ft_resize_scratch_bytes(cut.w, cut.h, ow, oh)) {
+            float *s2 = realloc(scratch, need);
+            if (!s2) {
+                fprintf(stderr, "ftdev: out of memory\n");
+                goto out;
+            }
+            scratch = s2;
+        }
+        ft_sharpen(small, ow, oh, sharpen, (double)ow / cut.w, scratch);
     }
     for (i = 0; i < oh; i++) {
         float *row = small + (size_t)i * ow * 3;
@@ -454,6 +544,7 @@ out:
     ft_image_free(&cut);
     free(small);
     free(scratch);
+    free(nrs);
     free(px8);
     free(side);
     return rc;

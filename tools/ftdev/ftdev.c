@@ -115,6 +115,8 @@ static void usage(void)
                     "[--space srgb|p3|adobe]\n"
                     "             [--gamut soft|clip] [--crop x,y,w,h] "
                     "[--long-edge px] [--quality q]\n"
+                    "             [--nr-sensor k] [--nr-chroma k] "
+                    "[--nr-grain k] [--sharpen a]\n"
                     "             [--raw-too] [-o out.jpg]\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
