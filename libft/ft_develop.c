@@ -99,17 +99,19 @@ int ft_crop_orient(const float *t, int lines, int px, const ft_develop_opts *o,
     return 0;
 }
 
-int ft_develop(const unsigned short *raw, int lines, int px,
-               const unsigned short *cal, int cal_lines,
-               const char *faul, size_t faul_n, const ft_develop_opts *o,
-               ft_image *im, ft_err *e)
+float *ft_develop_t(const unsigned short *raw, int lines, int px,
+                    const unsigned short *cal, int cal_lines,
+                    const char *faul, size_t faul_n,
+                    const ft_develop_opts *o, int *lines_out, ft_err *e)
 {
     float *dark, *white, *t = NULL;
-    int rc = -1;
+    int ok = 0;
 
-    if (lines < 1 || px < 1 || o->bin < 1 || o->bin > 12)
-        return ft_fail(e, "develop: bad geometry (%d lines, %d px, bin %d)",
-                       lines, px, o->bin);
+    if (lines < 1 || px < 1 || o->bin < 1 || o->bin > 12) {
+        ft_fail(e, "develop: bad geometry (%d lines, %d px, bin %d)",
+                lines, px, o->bin);
+        return NULL;
+    }
     dark = malloc((size_t)px * 3 * sizeof *dark);
     white = malloc((size_t)px * 3 * sizeof *white);
     if (dark && white)
@@ -124,11 +126,29 @@ int ft_develop(const unsigned short *raw, int lines, int px,
     if (ft_fix_defects(t, lines, px, faul, faul_n, o->defects, o->x, o->bin,
                        e))
         goto out;
-    lines = ft_align_rgb(t, lines, px, 12 / o->bin);
-    rc = ft_crop_orient(t, lines, px, o, im, e);
+    *lines_out = ft_align_rgb(t, lines, px, 12 / o->bin);
+    ok = 1;
 out:
     free(dark);
     free(white);
+    if (!ok) {
+        free(t);
+        t = NULL;
+    }
+    return t;
+}
+
+int ft_develop(const unsigned short *raw, int lines, int px,
+               const unsigned short *cal, int cal_lines,
+               const char *faul, size_t faul_n, const ft_develop_opts *o,
+               ft_image *im, ft_err *e)
+{
+    int n, rc;
+    float *t = ft_develop_t(raw, lines, px, cal, cal_lines, faul, faul_n, o,
+                            &n, e);
+    if (!t)
+        return -1;
+    rc = ft_crop_orient(t, n, px, o, im, e);
     free(t);
     return rc;
 }
