@@ -4,6 +4,7 @@
  * values over 4 bytes after the IFD (word-aligned), then the strips. */
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,16 @@
 #include "ft_tiff_ifd.h"
 
 #define STRIP_BYTES 262144L
+
+/* a usable NoiseProfile: finite, S >= 0, O > 0 */
+static int noise_ok(const double *v)
+{
+    int i;
+    for (i = 0; i < 6; i++)
+        if (!isfinite(v[i]) || v[i] < 0 || (i % 2 && v[i] == 0))
+            return 0;
+    return 1;
+}
 
 int ft_dng_write(const char *path, const ft_image *im, ft_err *e)
 {
@@ -44,6 +55,8 @@ int ft_dng_write(const char *path, const ft_image *im, ft_err *e)
                                  : (unsigned long)im->h - s * rps;
             ft_le32(p + 4 * s, rows * row_bytes);
         }
+    if (im->has_noise && noise_ok(im->noise))
+        ft_ifd_doubles(&d, 51041, im->noise, 6);  /* NoiseProfile */
     if (d.oom) {
         ft_fail(e, "dng: out of memory");
         goto out;
@@ -97,7 +110,8 @@ static unsigned long rd16(const unsigned char *p)
 static size_t type_size(unsigned type)
 {
     return type == FT_T_SHORT ? 2 : type == FT_T_LONG ? 4 :
-           type == FT_T_RATIONAL || type == FT_T_SRATIONAL ? 8 : 1;
+           type == FT_T_RATIONAL || type == FT_T_SRATIONAL ||
+           type == FT_T_DOUBLE ? 8 : 1;
 }
 
 static unsigned long rd32(const unsigned char *p)
@@ -111,7 +125,8 @@ typedef struct {
 
 /* the tags the reader looks at */
 static const unsigned WANT[] = { 256, 257, 258, 259, 262, 270, 271, 272, 273,
-                                 277, 278, 279, 282, 284, 50706, 50721 };
+                                 277, 278, 279, 282, 284, 50706, 50721,
+                                 51041 };
 #define NWANT (sizeof WANT / sizeof WANT[0])
 
 static int want(unsigned long tag)
@@ -228,6 +243,24 @@ int ft_dng_parse(const unsigned char *b, size_t n, ft_image *im, ft_err *e)
         const tag_ref *x = find(tags, 282);
         if (x && x->type == FT_T_RATIONAL && rd32(b + x->at + 4))
             im->ppi = (double)rd32(b + x->at) / rd32(b + x->at + 4);
+    }
+    {
+        /* a bad NoiseProfile reads as none (export then estimates) */
+        const tag_ref *np = find(tags, 51041);
+        if (np && np->type == FT_T_DOUBLE && np->count == 6) {
+            double v[6];
+            int k;
+            for (i = 0; i < 6; i++) {
+                uint64_t u = 0;
+                for (k = 7; k >= 0; k--)
+                    u = u << 8 | b[np->at + 8 * i + k];
+                memcpy(&v[i], &u, 8);
+            }
+            if (noise_ok(v)) {
+                memcpy(im->noise, v, sizeof v);
+                im->has_noise = 1;
+            }
+        }
     }
     {
         const tag_ref *cm = find(tags, 50721);

@@ -94,6 +94,15 @@ int main(void)
     CHECK(ft_share_cut(s.raw, s.lines, s.cal, s.cal_lines, NULL, 0, NULL, &m,
                        &r, &e) == 0);
     CHECK(r.detect_ok && r.n == 3);
+    /* the synthetic .cal is noiseless: a clamped profile (S 0, O at the
+     * 0.25 DN^2 floor over the 4700 DN span), on every frame */
+    CHECK(r.noise_rc == 1);
+    for (i = 0; i < r.n; i++) {
+        CHECK(r.f[i].im.has_noise);
+        CHECK(r.f[i].im.noise[0] == 0);
+        CHECK_NEAR(r.f[i].im.noise[1], 0.25 / (4700.0 * 4700.0), 1e-15);
+    }
+
     for (i = 0; i < 2; i++) {
         ft_share_cut_frame *c = &r.f[i];
         double px_mm = w.ppi / 25.4;
@@ -289,6 +298,35 @@ int main(void)
         CHECK(strstr(e.msg, "box") != NULL);
         CHECK(ft_share_sidecar_parse("box=1 2 3 4\nexport_scale=1.5\n", 29,
                                      &sc, &e) == -1);
+        CHECK(!sc.has_noise);
+
+        /* noise_profile: round trip; not six numbers is an error; a
+         * negative value reads as none */
+        c.im.has_noise = 1;
+        c.im.noise[0] = 1.234567891e-4;
+        c.im.noise[1] = 2.5e-8;
+        c.im.noise[2] = c.im.noise[4] = 1e-4;
+        c.im.noise[3] = c.im.noise[5] = 3e-8;
+        f = tmpfile();
+        CHECK(ft_share_sidecar_write(f, &m, &c) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        fclose(f);
+        CHECK(strstr(buf, "noise_profile=") != NULL);
+        CHECK(ft_share_sidecar_parse(buf, n, &sc, &e) == 0);
+        CHECK(sc.has_noise);
+        CHECK(sc.noise[0] == 1.234567891e-4 && sc.noise[1] == 2.5e-8);
+        {
+            static const char few[] =
+                "box=1 2 3 4\nexport_scale=0.5\nnoise_profile=1 2 3\n";
+            static const char neg[] = "box=1 2 3 4\nexport_scale=0.5\n"
+                                      "noise_profile=1e-4 -1 1e-4 1 1e-4 1\n";
+            CHECK(ft_share_sidecar_parse(few, sizeof few - 1, &sc, &e) == -1);
+            CHECK(strstr(e.msg, "noise_profile") != NULL);
+            CHECK(ft_share_sidecar_parse(neg, sizeof neg - 1, &sc, &e) == 0);
+            CHECK(!sc.has_noise);
+        }
     }
     return TEST_DONE();
 }

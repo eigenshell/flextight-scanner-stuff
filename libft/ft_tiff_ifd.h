@@ -10,7 +10,8 @@
 #include "ft_image.h"
 
 enum { FT_T_BYTE = 1, FT_T_ASCII = 2, FT_T_SHORT = 3, FT_T_LONG = 4,
-       FT_T_RATIONAL = 5, FT_T_UNDEFINED = 7, FT_T_SRATIONAL = 10 };
+       FT_T_RATIONAL = 5, FT_T_UNDEFINED = 7, FT_T_SRATIONAL = 10,
+       FT_T_DOUBLE = 12 };
 
 #define FT_IFD_MAX_TAGS 40
 
@@ -44,6 +45,8 @@ void ft_ifd_bytes(ft_ifd *d, unsigned tag, unsigned type,
 /* signed or unsigned rationals over a fixed denominator */
 void ft_ifd_rationals(ft_ifd *d, unsigned tag, unsigned type,
                       const double *v, int n, long den);
+/* IEEE 754 doubles, little-endian whatever the host */
+void ft_ifd_doubles(ft_ifd *d, unsigned tag, const double *v, int n);
 ft_ifd_entry *ft_ifd_find(ft_ifd *d, unsigned tag);
 
 /* The tags every file of ours carries: size, 16-bit samples, no

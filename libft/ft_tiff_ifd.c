@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -8,7 +9,8 @@
 static size_t type_size(unsigned type)
 {
     return type == FT_T_SHORT ? 2 : type == FT_T_LONG ? 4 :
-           type == FT_T_RATIONAL || type == FT_T_SRATIONAL ? 8 : 1;
+           type == FT_T_RATIONAL || type == FT_T_SRATIONAL ||
+           type == FT_T_DOUBLE ? 8 : 1;
 }
 
 void ft_le16(unsigned char *p, unsigned long v)
@@ -81,6 +83,18 @@ void ft_ifd_rationals(ft_ifd *d, unsigned tag, unsigned type,
         long num = (long)floor(v[i] * den + 0.5);
         ft_le32(p + 8 * i, (unsigned long)num);
         ft_le32(p + 8 * i + 4, (unsigned long)den);
+    }
+}
+
+void ft_ifd_doubles(ft_ifd *d, unsigned tag, const double *v, int n)
+{
+    unsigned char *p = ft_ifd_add(d, tag, FT_T_DOUBLE, (unsigned long)n);
+    int i, k;
+    for (i = 0; p && i < n; i++) {
+        uint64_t u;
+        memcpy(&u, &v[i], 8);
+        for (k = 0; k < 8; k++)
+            p[8 * i + k] = (unsigned char)(u >> 8 * k);
     }
 }
 

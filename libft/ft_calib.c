@@ -6,7 +6,7 @@
 #include "ft_geom.h"
 
 /* each line dark (-1), white (1) or neither (0) by its mean level: within
- * 10 % of the darkest or brightest line mean */
+ * FT_CAL_BAND of the range from the darkest or brightest line mean */
 static int classify(const unsigned short *cal, int lines, long n3,
                     signed char *cls)
 {
@@ -26,7 +26,7 @@ static int classify(const unsigned short *cal, int lines, long n3,
         if (lm[l] < lo) lo = lm[l];
         if (lm[l] > hi) hi = lm[l];
     }
-    band = 0.1 * (hi - lo);
+    band = FT_CAL_BAND * (hi - lo);
     for (l = 0; l < lines; l++)
         cls[l] = lm[l] < lo + band ? -1 : lm[l] > hi - band ? 1 : 0;
     free(lm);
