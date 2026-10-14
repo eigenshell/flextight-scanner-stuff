@@ -160,6 +160,19 @@ static const double M2[9] = {
     0.0259040371, 0.7827717662, -0.8086757660,
 };
 
+/* the exact inverses of M1 and M2 above (computed once, in rational
+ * arithmetic, then rounded to double) */
+static const double M1I[9] = {
+    1.2268798683314697, -0.55781499359524622, 0.28139105244024526,
+    -0.040575747350531759, 1.1122868053781236, -0.071711058134508787,
+    -0.076372944091338227, -0.42149332243093923, 1.5869240173438854,
+};
+static const double M2I[9] = {
+    0.9999999984505199, 0.39633779217376786, 0.21580375806075877,
+    1.0000000088817607, -0.10556134232365634, -0.063854174771705893,
+    1.0000000546724108, -0.089484182094965753, -1.2914855378640917,
+};
+
 void ft_xyz_to_oklab(const double xyz[3], double lab[3])
 {
     double lms[3];
@@ -172,33 +185,36 @@ void ft_xyz_to_oklab(const double xyz[3], double lab[3])
 
 void ft_oklab_to_xyz(const double lab[3], double xyz[3])
 {
-    double m1i[9], m2i[9], lms[3];
-    ft_mat3_inv(M1, m1i);
-    ft_mat3_inv(M2, m2i);
-    apply3(m2i, lab, lms);
+    double lms[3];
+    apply3(M2I, lab, lms);
     lms[0] = lms[0] * lms[0] * lms[0];
     lms[1] = lms[1] * lms[1] * lms[1];
     lms[2] = lms[2] * lms[2] * lms[2];
-    apply3(m1i, lms, xyz);
+    apply3(M1I, lms, xyz);
 }
 
-/* largest chroma at (L, h) inside the gamut of from_xyz, by bisection */
+/* largest chroma at (L, h) inside the gamut of from_xyz, by bisection.
+ * The slack scales with the luminance (Y ~ L^3): an absolute one would
+ * stretch the edge by tens of percent near black. */
 static double boundary(const double from_xyz[9], double L, double h)
 {
-    double lo = 0, hi = 0.6;
+    double lo = 0, hi = 0.6, ch = cos(h), sh = sin(h);
+    double tol = 1e-7 * L * L * L;
     int i, k;
     if (L <= 0 || L >= 1)
         return 0;
+    if (tol < 1e-12)
+        tol = 1e-12;
     for (i = 0; i < 40; i++) {
         double c = 0.5 * (lo + hi), lab[3], xyz[3], rgb[3];
         int in = 1;
         lab[0] = L;
-        lab[1] = c * cos(h);
-        lab[2] = c * sin(h);
+        lab[1] = c * ch;
+        lab[2] = c * sh;
         ft_oklab_to_xyz(lab, xyz);
         apply3(from_xyz, xyz, rgb);
         for (k = 0; k < 3; k++)
-            in &= rgb[k] >= -1e-7 && rgb[k] <= 1 + 1e-7;
+            in &= rgb[k] >= -tol && rgb[k] <= 1 + tol;
         if (in)
             lo = c;
         else
@@ -251,6 +267,8 @@ static double table(const float t[FT_OUTPUT_NL + 1][FT_OUTPUT_NH + 1],
 {
     double x = L * FT_OUTPUT_NL, y = h / (2 * PI) * FT_OUTPUT_NH, fx, fy;
     int i, j;
+    if (x - x != 0 || y - y != 0)
+        return 0;
     y -= floor(y / FT_OUTPUT_NH) * FT_OUTPUT_NH;
     if (x < 0) x = 0;
     if (x > FT_OUTPUT_NL) x = FT_OUTPUT_NL;
@@ -290,6 +308,12 @@ static void clamp3(float rgb[3])
 void ft_output_gamut(const ft_output *o, float rgb[3])
 {
     double v[3], xyz[3], lab[3], L, C, h, cm, cs, k;
+    /* NaN or inf in: black (x - x is 0 only for finite x) */
+    if (rgb[0] - rgb[0] != 0 || rgb[1] - rgb[1] != 0 ||
+        rgb[2] - rgb[2] != 0) {
+        rgb[0] = rgb[1] = rgb[2] = 0;
+        return;
+    }
     if (o->gamut == FT_GAMUT_CLIP || o->space == FT_SPACE_REC2020) {
         clamp3(rgb);
         return;
@@ -301,7 +325,12 @@ void ft_output_gamut(const ft_output *o, float rgb[3])
     ft_xyz_to_oklab(xyz, lab);
     C = sqrt(lab[1] * lab[1] + lab[2] * lab[2]);
     h = atan2(lab[2], lab[1]);
-    L = lab[0] < 0 ? 0 : lab[0] > 1 ? 1 : lab[0];
+    /* a huge float overflows the cube root's range: also black */
+    if (C - C != 0 || h - h != 0 || lab[0] - lab[0] != 0) {
+        rgb[0] = rgb[1] = rgb[2] = 0;
+        return;
+    }
+    L = lab[0] > 0 ? (lab[0] < 1 ? lab[0] : 1) : 0;
     cm = table(o->cmax, L, h);
     k = FT_OUTPUT_KNEE * cm;
     if (C <= k || C <= FT_OUTPUT_C_EPS) {   /* untouched if it fits */

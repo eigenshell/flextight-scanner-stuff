@@ -255,12 +255,13 @@ int main(void)
     {
         const ft_output *outs[3] = { &out_s, &out_p3, &out_a };
         double worst_h = 0, worst_l = 0;
+        int nsoft = 0;
         for (k = 0; k < 3; k++) {
             int li, hi;
             for (li = 1; li < 20; li++)
                 for (hi = 0; hi < 72; hi++) {
                     double L = li / 20.0, h = 2 * PI * hi / 72, prev = -1;
-                    double cmax2020 = 0;
+                    double cmax2020 = 0, prev_in = -1, bc;
                     int ci;
                     /* the Rec.2020 boundary at (L, h) */
                     for (ci = 1; ci <= 400; ci++) {
@@ -271,15 +272,29 @@ int main(void)
                             break;
                         cmax2020 = ci * 0.001;
                     }
+                    bc = boundary_c(outs[k], L, h);
                     for (ci = 0; ci <= 100; ci++) {
-                        double C = cmax2020 * ci / 100, lch[3];
+                        double C = cmax2020 * ci / 100, lch[3], lin[3];
                         float r[3], v[3];
                         rec2020_of(L, C, h, r);
                         to_target(outs[k], r, v);
+                        lch_of(outs[k], v, lin);
                         ft_output_gamut(outs[k], v);
-                        CHECK(v[0] >= 0 && v[0] <= 1 && v[1] >= 0 &&
-                              v[1] <= 1 && v[2] >= 0 && v[2] <= 1);
                         lch_of(outs[k], v, lch);
+                        /* soft: the Rec.2020 edge is mapped onto (nearly)
+                         * the target's edge, not onto the knee */
+                        if (ci == 100 && cmax2020 > 1.02 * bc)
+                            CHECK(lch[1] >= 0.9 * bc);
+                        /* above the knee the slope is at most 1, and a
+                         * colour inside the target is pulled in */
+                        if (prev >= 0 && lin[1] > FT_OUTPUT_KNEE * bc)
+                            CHECK(lch[1] - prev <= lin[1] - prev_in + 1e-4);
+                        if (cmax2020 > 1.02 * bc && lin[1] > 0.85 * bc &&
+                            lin[1] < 0.98 * bc) {
+                            CHECK(lch[1] < lin[1]);
+                            nsoft++;
+                        }
+                        prev_in = lin[1];
                         CHECK(lch[1] >= prev - 2e-4);        /* monotone */
                         CHECK(prev < 0 || lch[1] - prev < 0.02);
                         if (C > 0.02 && lch[1] > 0.02 &&
@@ -291,8 +306,30 @@ int main(void)
                     }
                 }
         }
+        CHECK(nsoft > 100);             /* the pull-in check ran */
         CHECK(worst_h < 2 * PI / 180);                  /* < 2 degrees */
         CHECK(worst_l < 0.01);
+    }
+    /* huge and NaN input never fails: finite, in range, black for NaN */
+    {
+        static const float BAD[3][3] = { { 3e38f, 0, 0 },
+                                         { -3e38f, 3e38f, 0 },
+                                         { 1e30f, 1e30f, 1e30f } };
+        const ft_output *all[4] = { &out_s, &out_p3, &out_a, &out_clip };
+        ft_output rec;
+        float nan3[3] = { NAN, 0.5f, 0.5f };
+        int j, c;
+        CHECK(ft_output_compile(FT_SPACE_REC2020, FT_GAMUT_SOFT, &rec,
+                                &e) == 0);
+        for (k = 0; k < 5; k++)
+            for (j = 0; j < 3; j++) {
+                float o[3];
+                ft_output_apply(k < 4 ? all[k] : &rec, BAD[j], o, 1);
+                for (c = 0; c < 3; c++)
+                    CHECK(o[c] >= 0 && o[c] <= 1);
+            }
+        ft_output_gamut(&out_s, nan3);
+        CHECK(nan3[0] == 0 && nan3[1] == 0 && nan3[2] == 0);
     }
     /* clip: a plain per-channel clamp */
     {
