@@ -53,3 +53,52 @@ def test_png_writer_decodes_with_zlib(tmp_path):
     assert zlib.decompress(chunks[1][1]) == bytes(
         [0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
          0, 10, 20, 30, 40, 50, 60, 70, 80, 90])
+
+
+import re
+
+TOOLS = LIBFT.parent / "tools"
+BUILD_BAT = TOOLS / "poc" / "build.bat"
+PROJECT_SYM = re.compile(r"(?:ft|ring|worker)_\w+")
+needs_nm = pytest.mark.skipif(
+    shutil.which("cc") is None or shutil.which("nm") is None,
+    reason="needs a C compiler and nm")
+
+
+def _bat_sources(line):
+    root = {"LIBFT": LIBFT, "DETAIL": TOOLS / "detail"}
+    return sorted({root[d] / f for d, f in
+                   re.findall(r"%(LIBFT|DETAIL)%\\(\w+\.c)", line)})
+
+
+@needs_nm
+def test_build_bat_links(tmp_path):
+    """build.bat lists ftpoc's sources by hand and only the box builds it,
+    so compile its list here and require every project symbol to resolve."""
+    lines = [l for l in BUILD_BAT.read_text().splitlines()
+             if "ftpoc.c" in l and not l.lstrip().upper().startswith("REM")]
+    assert len(lines) == 2   # cl and mingw
+    srcs = _bat_sources(lines[0])
+    assert srcs == _bat_sources(lines[1])
+    objs = []
+    for s in srcs:
+        o = tmp_path / (s.stem + ".o")
+        r = subprocess.run(["cc", "-std=c99", "-c", "-I", str(LIBFT),
+                            "-I", str(TOOLS / "detail"), "-o", str(o), str(s)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        objs.append(str(o))
+
+    def syms(*flags):
+        r = subprocess.run(["nm", *flags, *objs], capture_output=True,
+                           text=True, check=True)
+        return {f.split()[-1] for f in r.stdout.splitlines()
+                if f.strip() and not f.endswith(":")}
+
+    # ftpoc.c needs <windows.h>: take its calls from the source text.
+    poc = (TOOLS / "poc" / "ftpoc.c").read_text()
+    wanted = syms("-u") | set(re.findall(r"\b(%s)\s*\(" % PROJECT_SYM.pattern,
+                                         poc))
+    missing = {s for s in wanted - syms("--defined-only")
+               if PROJECT_SYM.fullmatch(s)}
+    assert not missing, f"build.bat lacks the sources of {sorted(missing)}"
