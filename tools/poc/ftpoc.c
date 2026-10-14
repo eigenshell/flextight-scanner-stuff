@@ -42,6 +42,8 @@
 #include "ft_plan.h"
 #include "ft_png.h"
 #include "ft_preview.h"
+#include "ft_share.h"
+#include "ft_share_cut.h"
 #include "ft_upload.h"
 
 #define IOCTL_SRB 0x190012
@@ -2529,13 +2531,67 @@ static void warn_job(const ft_job *j, const char *path)
         printf("  %s\n", all.msg);
 }
 
+/* frames --share: pick the frames, price every bin (ft_share.h), keep
+ * the most light, write the plan into the job. Focus: the curve as is
+ * (offset 0). The share optics have the deepest depth of field, and the
+ * 3-point check would bracket at another magnification (the fastest bin
+ * at the job's ppi). -1 on a bad selection (message printed). */
+static int plan_share(ft_job *j, const ft_holder *h, double share, int hf,
+                      const char *select)
+{
+    static ft_share_frame sel[FT_MAX_FRAMES];
+    static ft_share_est c[6];
+    ft_share_opts o;
+    ft_err e;
+    int n, nc, k, i, w;
+
+    ft_share_opts_default(&o, h->scan_len_mm);
+    o.target_px = share;
+    o.hf_half_res = hf;
+    if (ft_share_select(j, select, sel, &n, &e)) {
+        fprintf(stderr, "frames: %s\n", e.msg);
+        return -1;
+    }
+    nc = ft_share_candidates(sel, n, &o, &g_lens, c, &e);
+    if (nc < 1) {
+        fprintf(stderr, "frames: %s\n", e.msg);
+        return -1;
+    }
+    k = ft_share_pick_max_dmax(c, nc);
+    ft_share_apply(j, sel, n, &o, &c[k]);
+    j->focus = FT_FOCUS_SHIFTED;
+    j->focus_offset = 0;
+    printf("\n share: %g px on each frame's long side%s, %d frame(s)\n"
+           "   bin   ppi  optics win    scan   focus   total  light  Dmax~\n",
+           share, hf ? " (half frames at the FF ppi)" : "", n);
+    for (i = 0; i < nc; i++)
+        printf(" %s %3d %5.0f %7.0f %3d %5.1f m %5.1f m %5.1f m %5.1fx  %.2f\n",
+               i == k ? "*" : " ", c[i].bin, c[i].ppi, c[i].scale, c[i].nwin,
+               c[i].scan_s / 60, c[i].focus_s / 60, c[i].seconds / 60,
+               c[i].light, c[i].dmax);
+    printf(" * chosen (most light); windows (job key group):\n");
+    for (w = 0; w < c[k].nwin; w++) {
+        const ft_share_window *x = &c[k].win[w];
+        printf("   %d: frame %d", w + 1, sel[x->first].index);
+        if (x->last > x->first)
+            printf(" to %d (%d selected)", sel[x->last].index,
+                   x->last - x->first + 1);
+        printf(", %.1f..%.1f mm\n", x->y0, x->y0 + x->len);
+    }
+    printf(" focus: the curve as is (offset 0); share optics need no "
+           "bracket\n");
+    return 0;
+}
+
 static int cmd_frames(int argc, char **argv)
 {
     const char *base = "strip";
     char raw[260], path[260];
     ft_film film = FT_FILM_NEGATIVE;
-    double ppi = 2000;
-    int sprockets = 0, i, lines = 0, px = 0, rc, focus_failed;
+    double ppi = 2000, share = 0;
+    int sprockets = 0, i, lines = 0, px = 0, rc, focus_failed = 0;
+    int hf_half_res = -1;
+    const char *select = NULL;
     const ft_holder *h = ft_holder_find("24x217");
     const ft_preview *pm = ft_preview_find("standard");
     static ft_layout L;
@@ -2577,10 +2633,31 @@ static int cmd_frames(int argc, char **argv)
             }
         }
         else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
+        else if (strcmp(argv[i], "--share") == 0) {
+            share = atof(argv[i + 1]);
+            if (!(share == 0 || (share >= 100 && share <= 20000))) {
+                fprintf(stderr, "frames: --share px on the frame's long side "
+                                "(100..20000; 0 = off)\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--select") == 0) select = argv[i + 1];
+        else if (strcmp(argv[i], "--hf-half-res") == 0) {
+            if (strcmp(argv[i + 1], "on") == 0) hf_half_res = 1;
+            else if (strcmp(argv[i + 1], "off") == 0) hf_half_res = 0;
+            else {
+                fprintf(stderr, "frames: --hf-half-res on|off\n");
+                return 2;
+            }
+        }
         else {
             fprintf(stderr, "frames: unknown option %s\n", argv[i]);
             return 2;
         }
+    }
+    if (!(share > 0) && (select || hf_half_res >= 0)) {
+        fprintf(stderr, "frames: --select and --hf-half-res need --share\n");
+        return 2;
     }
     if (!ft_ppi_supported(ppi)) {
         fprintf(stderr, "frames: ppi %g not supported\n", ppi);
@@ -2648,10 +2725,17 @@ static int cmd_frames(int argc, char **argv)
            L.has_holes ? "rebate between the holes"
                        : "estimated: no hole rows, extreme film pixels");
 
-    focus_failed = focus_check(t, lines, px, &ax, ppi, &j) != 0;
-    if (focus_failed) {
-        j.focus = FT_FOCUS_SHIFTED;
-        j.focus_offset = 0;
+    if (share > 0) {
+        if (plan_share(&j, h, share, hf_half_res > 0, select)) {
+            free(t);
+            return 2;
+        }
+    } else {
+        focus_failed = focus_check(t, lines, px, &ax, ppi, &j) != 0;
+        if (focus_failed) {
+            j.focus = FT_FOCUS_SHIFTED;
+            j.focus_offset = 0;
+        }
     }
     warn_job(&j, path);
 
@@ -2670,7 +2754,8 @@ static int cmd_frames(int argc, char **argv)
     rc = write_strip_png(path, t, lines, px, &ax, &j);
     free(t);
     print_job(&j);
-    print_options(&j);
+    if (!(share > 0))
+        print_options(&j);
     printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
            base, base, base);
     if (focus_failed)
@@ -2825,6 +2910,150 @@ static void write_crop(const char *out, const ft_job *j,
         fprintf(stderr, "warning: cannot append the crop to %s\n", meta);
 }
 
+/* A share job's window for group g: from its first frame - margin to its
+ * last + margin along (ft_share_group_window, as the planner priced it)
+ * and the whole reach across at the group's optics (detection in ftdev
+ * cut needs the hole rows; the line rate does not depend on the width).
+ * -1 if the group has no included frame. */
+static int share_request(const ft_job *j, const ft_holder *h, int g,
+                         struct crop_req *q)
+{
+    const ft_job_frame *fr = NULL;
+    ft_share_opts o;
+    double y0, len, scale, lo, hi;
+    int i;
+    for (i = 0; i < j->nframes && !fr; i++)
+        if (j->f[i].include && j->f[i].group == g)
+            fr = &j->f[i];
+    ft_share_opts_default(&o, h->scan_len_mm);
+    if (!fr || ft_share_group_window(j, g, &o, &y0, &len))
+        return -1;
+    scale = fr->ppi * ft_job_bin(fr);
+    lo = ft_ccd_to_mm(FT_CCD_FIRST, scale);
+    hi = ft_ccd_to_mm(FT_CCD_FIRST + FT_CCD_PIXELS, scale);
+    if (!(lo > 0))
+        lo = 0;
+    if (!(hi < CROP_X_MAX))
+        hi = CROP_X_MAX;
+    if (hi > h->scan_width_mm)
+        hi = h->scan_width_mm;
+    memset(q, 0, sizeof *q);
+    q->ppi = fr->ppi;
+    q->bin = ft_job_bin(fr);
+    q->x = lo + JOB_EDGE;
+    q->w = hi - JOB_EDGE - q->x;
+    q->y = y0;
+    q->h = len;
+    q->ccd = q->optic = -1;
+    q->focus_offset = j->focus_offset;
+    q->hold = 3000;                     /* cmd_scan: >= g_first_hold first */
+    return 0;
+}
+
+static int group_todo(const ft_job *j, int g)
+{
+    int i;
+    for (i = 0; i < j->nframes; i++)
+        if (j->f[i].include && j->f[i].group == g && !j->f[i].done)
+            return 1;
+    return 0;
+}
+
+/* scan --job of a share job: one scan per group not yet done, every
+ * window checked (crop_check) before the scanner does anything. Output
+ * <jobbase>_winNN.raw; its .txt gets the share keys (ft_share_cut.h) for
+ * ftdev cut. A window's frames are marked done together. */
+static int scan_share(ft_job *j, const char *path, const char *jobbase,
+                      const ft_holder *h)
+{
+    char ref[FT_MAX_FRAMES + 1];
+    int g, ng = 0, i, nref = 0, ntodo = 0, nscan = 0;
+
+    for (i = 0; i < j->nframes; i++)
+        if (j->f[i].include && j->f[i].group > ng)
+            ng = j->f[i].group;
+    memset(ref, 0, sizeof ref);
+    for (g = 1; g <= ng; g++) {
+        struct crop_req q;
+        long ccd, optic;
+        if (!group_todo(j, g))
+            continue;
+        if (share_request(j, h, g, &q) || crop_check(&q, &ccd, &optic)) {
+            printf("window %d: REFUSED (reason above); it will be skipped\n",
+                   g);
+            ref[g] = 1;
+            nref++;
+        } else {
+            ntodo++;
+        }
+    }
+    printf("%s: share job, %d window(s) to scan\n", path, ntodo);
+    g_lamp = 255;                       /* the lamp level persists: set it */
+    for (g = 1; g <= ng && !g_abort; g++) {
+        struct crop_req q;
+        char out[300], meta[310];
+        FILE *m;
+        int rc;
+        if (!group_todo(j, g) || ref[g])
+            continue;
+        share_request(j, h, g, &q);
+        snprintf(out, sizeof out, "%s_win%02d.raw", jobbase, g);
+        q.out = out;
+        printf("\n=== window %d: %.1f..%.1f mm, %g ppi, bin %d (~%.0f s)\n",
+               g, q.y, q.y + q.h, q.ppi, q.bin,
+               ft_scan_seconds(q.ppi, q.bin, q.h));
+        rc = crop_scan(&q);
+        if (rc == CROP_REFUSED) {
+            printf("window %d: REFUSED (reason above); not scanned\n", g);
+            ref[g] = 1;
+            nref++;
+            continue;
+        }
+        if (rc) {
+            save_job(path, j);
+            printf("window %d: %s; stopped (finished windows are marked done "
+                   "in %s)\n", g, g_abort ? "interrupted" : "scan failed",
+                   path);
+            return 1;
+        }
+        nscan++;
+        snprintf(meta, sizeof meta, "%s.txt", out);
+        m = fopen(meta, "a");
+        if (m) {
+            int bad = ft_share_meta_write(m, j, g) != 0;
+            if (fclose(m) != 0 || bad)
+                m = NULL;
+        }
+        if (!m)
+            fprintf(stderr, "warning: cannot append the share keys to %s; "
+                            "ftdev cut will refuse it\n", meta);
+        for (i = 0; i < j->nframes; i++)
+            if (j->f[i].include && j->f[i].group == g)
+                j->f[i].done = 1;
+        if (save_job(path, j))
+            return 1;
+        printf("next: ftdev cut %s\n", out);
+    }
+    for (g = 1, i = 0; g <= ng; g++)
+        i += group_todo(j, g) && !ref[g];
+    if (g_abort && i) {
+        save_job(path, j);
+        printf("interrupted; finished windows are marked done in %s\n", path);
+        return 1;
+    }
+    if (nref) {
+        printf("\n%d window(s) scanned; REFUSED:", nscan);
+        for (g = 1; g <= ng; g++)
+            if (ref[g])
+                printf(" %d", g);
+        printf(" (fix them in %s and run again)\n", path);
+        return 1;
+    }
+    printf(nscan ? "\nall windows scanned\n" : "\nnothing to scan (every "
+           "window is done)\n");
+    return 0;
+}
+
 /* scan --job <file> [-h s]: scan every included frame not yet done.
  * The job is validated and every frame's scan window checked (crop_check)
  * before the scanner does anything; refused frames are listed, skipped,
@@ -2890,6 +3119,8 @@ static int cmd_scanjob(int argc, char **argv)
     h = ft_holder_find(j.holder);
     if (!h)
         return 1;                       /* validate checked it */
+    if (j.share > 0)
+        return scan_share(&j, path, jobbase, h);
     /* every window through crop_scan's checks before any scanner action */
     memset(ref, 0, sizeof ref);
     for (i = 0; i < j.nframes; i++) {
@@ -3285,9 +3516,15 @@ int main(int argc, char **argv)
             "                       min) or 1500 (~5.7 min); strip.raw keeps it\n"
             "                     prints per-frame optics options (bin: time,\n"
             "                       light, Dmax); pick one with the job's bin key\n"
+            "         [--share px [--select 1,3-6] [--hf-half-res on|off]]\n"
+            "                     scan to share: px on each frame's long side\n"
+            "                       (2000); the selected frames (default all\n"
+            "                       but partial) grouped into windows at the\n"
+            "                       optics with the most light; no focus check\n"
             "  scan --job strip.job [-h s]  scan the job's included frames\n"
             "                     (resumable; strip_frameNN.raw + .txt with the tight\n"
-            "                     crop, named after the job file)\n"
+            "                     crop, named after the job file); a share job\n"
+            "                     scans windows: strip_winNN.raw, then ftdev cut\n"
             "                     -h first-scan hold, 0..120 s (default 10; 35 cold)\n"
             "  calibrate-focus <x> <y> <w> [-h s]  fit this scanner's focus curve\n"
             "                     on a textured window (mm) -> focus.txt\n"

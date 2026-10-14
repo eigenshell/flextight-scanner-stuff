@@ -48,6 +48,15 @@ int ft_fix_defects(float *t, int lines, int px, const char *faul, size_t n,
 int ft_crop_orient(const float *t, int lines, int px, const ft_develop_opts *o,
                    ft_image *im, ft_err *e);
 
+/* The stages before the crop (flat-field, defects, RGB alignment): a
+ * lines x px x 3 transmittance image, line-major, *lines_out lines (the
+ * alignment drops 12 / bin at each end). Caller frees; NULL with e filled
+ * on failure. o's crop is ignored. */
+float *ft_develop_t(const unsigned short *raw, int lines, int px,
+                    const unsigned short *cal, int cal_lines,
+                    const char *faul, size_t faul_n,
+                    const ft_develop_opts *o, int *lines_out, ft_err *e);
+
 /* All stages. im: ft_image_init'd by the caller (its metadata is kept);
  * pixels are allocated here. raw: lines x px x 3, cal: cal_lines x px x 3. */
 int ft_develop(const unsigned short *raw, int lines, int px,

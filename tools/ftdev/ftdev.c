@@ -5,6 +5,10 @@
  *   ftdev <scan.raw> [-f dng,png,positive] [-o base] [-d defects.txt]
  *         [--no-crop] [--film neg|slide|bw] [--base r,g,b] [--exposure s]
  *         [--tint r,g,b] [--grade g] [--curve preset|"x,y x,y ..."]
+ *   ftdev cut <window.raw> [-o base] [-d defects.txt]
+ *   ftdev export <frame.dng> [render flags] [--space srgb|p3|adobe]
+ *         [--gamut soft|clip] [--crop x,y,w,h] [--long-edge px]
+ *         [--quality q] [--raw-too] [-o out.jpg]
  *
  * Reads <scan.raw> with its .cal, .faul and .txt (ftpoc's output), runs
  * the libft pipeline (ft_develop.h) and writes one file per format to
@@ -18,8 +22,11 @@
  * an estimate from the frame itself; range and exposure automatic; then
  * the overrides. The recipe used is printed as flags to paste back.
  *
+ * cut and export are the scan-to-share steps (share.c, ft_share_cut.h).
+ *
  * Build: make (Linux/macOS), or with mingw:
- *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c <every libft .c> -lm
+ *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c render_flags.c
+ *       share.c ..\..\libft\ft_jpeg.c <every other libft .c> -ljpeg -lm
  */
 #include <math.h>
 #include <stdio.h>
@@ -29,46 +36,14 @@
 #include "ft_image.h"
 #include "ft_out.h"
 #include "ft_render.h"
-#include "ft_render_auto.h"
+#include "render_flags.h"
+#include "share.h"
 
 #define MAX_FORMATS 8
 
 static ft_render g_render;              /* ~380 KB of LUTs: not on the stack */
 
-/* "a,b,c" -> v; -1 if malformed or not finite */
-static int parse3(const char *s, float v[3])
-{
-    char extra;
-    if (sscanf(s, "%f,%f,%f%c", &v[0], &v[1], &v[2], &extra) != 3)
-        return -1;
-    return isfinite(v[0]) && isfinite(v[1]) && isfinite(v[2]) ? 0 : -1;
-}
-
-/* a finite number and nothing else -> v; -1 otherwise */
-static int parse1(const char *s, float *v)
-{
-    char *end;
-    double d = strtod(s, &end);
-    if (end == s || *end || !isfinite(d))
-        return -1;
-    *v = (float)d;
-    return 0;
-}
-
-/* the shortest %g text of v that reads back as the same float */
-static const char *fmtf(float v, char *buf, size_t cap)
-{
-    int p;
-    for (p = 6; p < 9; p++) {
-        snprintf(buf, cap, "%.*g", p, (double)v);
-        if (strtof(buf, NULL) == v)
-            return buf;
-    }
-    snprintf(buf, cap, "%.9g", (double)v);
-    return buf;
-}
-
-static void *load_file(const char *path, long *size)
+void *ftdev_load(const char *path, long *size)
 {
     FILE *f = fopen(path, "rb");
     char *buf = NULL;
@@ -134,6 +109,12 @@ static void usage(void)
                     "             [--film neg|slide|bw] [--base r,g,b] "
                     "[--exposure stops] [--tint r,g,b]\n"
                     "             [--grade g] [--curve preset|\"x,y x,y ...\"]\n"
+                    "       ftdev cut <window.raw> [-o base] [-d defects.txt]\n"
+                    "       ftdev export <frame.dng> [render flags] "
+                    "[--space srgb|p3|adobe]\n"
+                    "             [--gamut soft|clip] [--crop x,y,w,h] "
+                    "[--long-edge px] [--quality q]\n"
+                    "             [--raw-too] [-o out.jpg]\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
         fprintf(stderr, "  %-8s %s\n", w->name, w->what);
@@ -147,12 +128,8 @@ int main(int argc, char **argv)
 {
     const char *scan = NULL, *base = NULL, *fmts = "dng", *dpath = NULL;
     const ft_writer *wr[MAX_FORMATS];
-    int nwr = 0, no_crop = 0, film = -1, i, rc = 1;
-    /* render: -f positive, with the recipe overrides below */
-    const char *curve_arg = NULL;
-    int bw = 0, render = 0, has_base = 0, has_exp = 0, has_tint = 0;
-    int has_grade = 0;
-    float ubase[3], utint[3], uexp = 0, ugrade = 0;
+    int nwr = 0, no_crop = 0, i, rc = 1, render = 0;
+    rflags rf;
     ft_recipe rcp;
     char path[1024], *meta = NULL, *faul = NULL, *dtext = NULL;
     char basebuf[1024], preset[32] = "";
@@ -163,53 +140,24 @@ int main(int argc, char **argv)
     ft_image im;
     ft_err e;
 
+    if (argc > 1 && strcmp(argv[1], "cut") == 0)
+        return ftdev_cut(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "export") == 0)
+        return ftdev_export(argc - 2, argv + 2);
     ft_image_init(&im);
+    rflags_init(&rf);
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
+        int r = rflags_parse(&rf, argc, argv, &i);
+        if (r < 0)
+            return 2;
+        if (r > 0)
+            continue;
         if (strcmp(a, "-f") == 0 && i + 1 < argc) fmts = argv[++i];
         else if (strcmp(a, "-o") == 0 && i + 1 < argc) base = argv[++i];
         else if (strcmp(a, "-d") == 0 && i + 1 < argc) dpath = argv[++i];
         else if (strcmp(a, "--no-crop") == 0) no_crop = 1;
-        else if (strcmp(a, "--film") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (strcmp(v, "neg") == 0 || strcmp(v, "negative") == 0)
-                film = FT_FILM_NEGATIVE;
-            else if (strcmp(v, "slide") == 0)
-                film = FT_FILM_SLIDE;
-            else if (strcmp(v, "bw") == 0) {
-                film = FT_FILM_NEGATIVE;
-                bw = 1;
-            } else {
-                fprintf(stderr, "ftdev: --film is neg, slide or bw\n");
-                return 2;
-            }
-        } else if (strcmp(a, "--base") == 0 && i + 1 < argc) {
-            if (parse3(argv[++i], ubase)) {
-                fprintf(stderr, "ftdev: --base is r,g,b (densities)\n");
-                return 2;
-            }
-            has_base = 1;
-        } else if (strcmp(a, "--tint") == 0 && i + 1 < argc) {
-            if (parse3(argv[++i], utint)) {
-                fprintf(stderr, "ftdev: --tint is r,g,b (CC)\n");
-                return 2;
-            }
-            has_tint = 1;
-        } else if (strcmp(a, "--exposure") == 0 && i + 1 < argc) {
-            if (parse1(argv[++i], &uexp)) {
-                fprintf(stderr, "ftdev: --exposure is stops\n");
-                return 2;
-            }
-            has_exp = 1;
-        } else if (strcmp(a, "--grade") == 0 && i + 1 < argc) {
-            if (parse1(argv[++i], &ugrade)) {
-                fprintf(stderr, "ftdev: --grade is a number\n");
-                return 2;
-            }
-            has_grade = 1;
-        } else if (strcmp(a, "--curve") == 0 && i + 1 < argc) {
-            curve_arg = argv[++i];
-        } else if (a[0] == '-' || scan) {
+        else if (a[0] == '-' || scan) {
             usage();
             return 2;
         } else
@@ -236,37 +184,13 @@ int main(int argc, char **argv)
         }
     }
     if (render) {
-        if (film < 0) {
+        if (rf.film < 0) {
             fprintf(stderr, "ftdev: -f positive needs --film neg|slide|bw\n");
             return 2;
         }
-        ft_recipe_default(&rcp, bw ? FT_RENDER_BW
-                                : film == FT_FILM_SLIDE ? FT_RENDER_SLIDE
-                                                        : FT_RENDER_NEG);
-        if (curve_arg && ft_curve_preset(curve_arg, &rcp.master) != 0 &&
-            ft_curve_parse(curve_arg, &rcp.master, &e) != 0) {
-            const char *m = e.msg;
-            int k;
-            fprintf(stderr, "ftdev: --curve: not a preset (");
-            for (k = 0; ft_curve_preset_name(k); k++)
-                fprintf(stderr, "%s%s", k ? " " : "", ft_curve_preset_name(k));
-            fprintf(stderr, ") and not points: %s\n",
-                    strncmp(m, "curve: ", 7) == 0 ? m + 7 : m);
+        if (rflags_recipe(&rf, &rcp))
             return 2;
-        }
-        if (has_grade)
-            rcp.grade = ugrade;     /* before auto: exposure depends on it */
-        if (has_exp)
-            rcp.exposure = uexp;
-        if (has_tint)
-            memcpy(rcp.tint, utint, sizeof rcp.tint);
-        if (has_base)                   /* auto never changes the base */
-            ft_recipe_set_base(&rcp, ubase);
-        if (ft_recipe_validate(&rcp, &e)) {     /* before any file is written */
-            fprintf(stderr, "ftdev: %s\n", e.msg);
-            return 2;
-        }
-    } else if (has_base || has_exp || has_tint || has_grade || curve_arg)
+    } else if (rflags_any(&rf))
         fprintf(stderr, "ftdev: note: render flags ignored without "
                         "-f positive\n");
     if (!base) {
@@ -278,7 +202,7 @@ int main(int argc, char **argv)
     }
 
     snprintf(path, sizeof path, "%s.txt", scan);
-    meta = load_file(path, &nmeta);
+    meta = ftdev_load(path, &nmeta);
     if (!meta) {
         fprintf(stderr, "ftdev: cannot read %s\n", path);
         goto out;
@@ -302,7 +226,7 @@ int main(int argc, char **argv)
         o.crop_h = (int)meta_long(meta, "crop_h", 0);
     }
     if (dpath) {
-        dtext = load_file(dpath, &nd);
+        dtext = ftdev_load(dpath, &nd);
         if (!dtext) {
             fprintf(stderr, "ftdev: cannot read %s\n", dpath);
             goto out;
@@ -314,9 +238,9 @@ int main(int argc, char **argv)
         o.defects = &defects;
     }
 
-    raw = load_file(scan, &nraw);
+    raw = ftdev_load(scan, &nraw);
     snprintf(path, sizeof path, "%s.cal", scan);
-    cal = load_file(path, &ncal);
+    cal = ftdev_load(path, &ncal);
     if (!raw || !cal) {
         fprintf(stderr, "ftdev: cannot read %s or its .cal\n", scan);
         goto out;
@@ -324,20 +248,20 @@ int main(int argc, char **argv)
     lines = nraw / (px * 6);
     cl = ncal / (px * 6);
     snprintf(path, sizeof path, "%s.faul", scan);
-    faul = load_file(path, &nfaul);
+    faul = ftdev_load(path, &nfaul);
     if (!faul)
         fprintf(stderr, "ftdev: note: no %s; Faul Pixs not interpolated\n",
                 path);
 
     im.ppi = (double)meta_long(meta, "ppi", 0);
-    im.film = film;
+    im.film = rf.film;
     snprintf(im.desc, sizeof im.desc,
              "%s; preset %s, %ld ppi, bin %d, x %d, %ld px x %ld lines; "
              "crop %d,%d %dx%d; film %s",
              scan, preset[0] ? preset : "?", meta_long(meta, "ppi", 0), o.bin,
              o.x, px, lines, o.crop_x, o.crop_y, o.crop_w, o.crop_h,
-             film == FT_FILM_NEGATIVE ? "negative"
-             : film == FT_FILM_SLIDE ? "slide" : "unknown");
+             rf.film == FT_FILM_NEGATIVE ? "negative"
+             : rf.film == FT_FILM_SLIDE ? "slide" : "unknown");
     if (ft_develop(raw, (int)lines, (int)px, cal, (int)cl, faul,
                    (size_t)(faul ? nfaul : 0), &o, &im, &e)) {
         fprintf(stderr, "ftdev: %s: %s\n", scan, e.msg);
@@ -358,51 +282,15 @@ int main(int argc, char **argv)
             printf("%s: %dx%d, %.0f ppi\n", path, im.w, im.h, im.ppi);
     }
     if (render) {
-        const ft_image *one[1];
         char fb[128];
-        float d[3];
-        one[0] = &im;
-        if (has_base) {
-            memcpy(d, ubase, sizeof d);
-        } else if (meta_str(meta, "film_base", fb, sizeof fb) &&
-                   sscanf(fb, "%f %f %f", &d[0], &d[1], &d[2]) == 3 &&
-                   isfinite(d[0]) && isfinite(d[1]) && isfinite(d[2])) {
-            /* from the frames preview, via the job */
-        } else {
-            if (ft_render_base_from_frames(one, 1, rcp.mode, d, &e)) {
-                fprintf(stderr, "ftdev: %s\n", e.msg);
-                rc = 1;
-                goto out;
-            }
-            fprintf(stderr, "ftdev: note: no usable film_base in the .txt; "
-                            "film base estimated from the frame itself\n");
-        }
-        ft_recipe_set_base(&rcp, d);
-        if (ft_render_auto(one, 1, &rcp, &e)) {
-            fprintf(stderr, "ftdev: %s\n", e.msg);
-            rc = 1;
+        double d[3];
+        int has = meta_str(meta, "film_base", fb, sizeof fb) &&
+                  sscanf(fb, "%lf %lf %lf", &d[0], &d[1], &d[2]) == 3 &&
+                  isfinite(d[0]) && isfinite(d[1]) && isfinite(d[2]);
+        int r = rflags_render(&rf, &rcp, has ? d : NULL, &im, &g_render);
+        if (r) {
+            rc = r;
             goto out;
-        }
-        if (has_exp)
-            rcp.exposure = uexp;
-        if (has_tint)
-            memcpy(rcp.tint, utint, sizeof rcp.tint);
-        if (ft_render_compile(&rcp, &g_render, &e)) {
-            fprintf(stderr, "ftdev: %s\n", e.msg);
-            rc = 2;
-            goto out;
-        }
-        ft_render_image(&g_render, &im);
-        {
-            char f[10][32];
-            printf("recipe: --film %s --base %s,%s,%s --exposure %s "
-                   "--tint %s,%s,%s --grade %s --curve \"%s\"\n",
-                   bw ? "bw" : film == FT_FILM_SLIDE ? "slide" : "neg",
-                   fmtf(rcp.base[0], f[0], 32), fmtf(rcp.base[1], f[1], 32),
-                   fmtf(rcp.base[2], f[2], 32), fmtf(rcp.exposure, f[3], 32),
-                   fmtf(rcp.tint[0], f[4], 32), fmtf(rcp.tint[1], f[5], 32),
-                   fmtf(rcp.tint[2], f[6], 32), fmtf(rcp.grade, f[7], 32),
-                   curve_arg ? curve_arg : "linear");
         }
         snprintf(path, sizeof path, "%s%s", base,
                  ft_writer_find("positive")->ext);
