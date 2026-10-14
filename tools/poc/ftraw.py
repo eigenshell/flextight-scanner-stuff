@@ -111,11 +111,12 @@ def split_cal(cal):
     """Dark and white reference lines, classified by level: the switch is
     timed in the device, so at slow line rates (3150 ppi: 188 dark + 12
     white in the first batch) it does not fall on line 200. Lines within
-    10 % of either extreme count; transition lines are dropped."""
+    2 % of either extreme count (libft's FT_CAL_BAND); transition lines,
+    which can be half lit, are dropped."""
     c = cal.astype(np.float64)
     lm = c.mean(axis=(1, 2))
     lo, hi = lm.min(), lm.max()
-    band = 0.1 * (hi - lo)
+    band = 0.02 * (hi - lo)
     dark, white = c[lm < lo + band], c[lm > hi - band]
     if len(dark) < 10 or len(white) < 10:
         sys.exit(f"calibration: {len(dark)} dark / {len(white)} white lines")

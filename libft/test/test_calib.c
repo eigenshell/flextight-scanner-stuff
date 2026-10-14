@@ -21,6 +21,17 @@ int main(void)
     CHECK_NEAR(dark[0], 300.995, 0.01);
     CHECK_NEAR(white[5], 3600, 1e-3);
 
+    /* a half-lit lamp-transition line just above the dark level (seen at
+     * bin 1: ~8 % of the range) is neither dark nor white: the dark
+     * reference stays 300 (a 10 % band put it at ~301.4) */
+    for (l = 0; l < CL; l++)
+        for (i = 0; i < PX * 3; i++)
+            cal[l * PX * 3 + i] = (unsigned short)
+                (l < 194 ? 300 : l < 195 ? 564 : 3600);
+    CHECK(ft_split_cal(cal, CL, PX, dark, white, &e) == 0);
+    CHECK_NEAR(dark[0], 300, 1e-3);
+    CHECK_NEAR(white[0], 3600, 1e-3);
+
     for (i = 0; i < CL * PX * 3; i++)
         cal[i] = 300;
     CHECK(ft_split_cal(cal, CL, PX, dark, white, &e) == -1);

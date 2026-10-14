@@ -8,9 +8,9 @@
  * read^2 is the variance of the dark lines about each pixel's own mean
  * (fixed pattern is not noise) and about each line's own offset (lamp
  * drift and flicker move a whole line: banding, not pixel noise); g the
- * slope of the white-line variance over the signal. Lines count as dark or
- * white only within 2 % of the range from either extreme: the lamp's
- * on/off transition lines (half lit, seen at bin 1) are neither. Dividing by the span gives S = g / span, and
+ * slope of the white-line variance over the signal. Lines are classified
+ * as ft_split_cal does (FT_CAL_BAND): the lamp's on/off transition lines
+ * are neither dark nor white. Dividing by the span gives S = g / span, and
  * O = read^2 (1 + 1/n_dark) / span^2, the dark reference being the mean of
  * n_dark lines; both averaged over the pixels. ft_align_rgb copies whole
  * rows, so the realignment leaves the variance as it is (a fractional
@@ -25,8 +25,7 @@
 #define FT_NOISE_MIN_WHITE 20
 #define FT_NOISE_MAX_LINES 1024  /* a .cal has 250 */
 
-/* cal: lines x px x 3 (the line classes are tighter than ft_split_cal's
- * 10 %, see above). prof = S_r O_r S_g O_g S_b O_b.
+/* cal: lines x px x 3. prof = S_r O_r S_g O_g S_b O_b.
  * 0: ok. 1: ok, but a value was clamped (S < 0 or non-finite -> 0, O below
  * 0.25 DN^2 -> that floor); e says which. -1: too few dark or white lines
  * (or a degenerate span), no profile; e says why. */

@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
+#include "ft_calib.h"
 #include "ft_noise_model.h"
 
 /* the 0.25 DN^2 floor: at least the quantisation of a 1-DN step */
 #define O_FLOOR_DN2 0.25
-/* dark / white: within this share of the range of the extremes */
-#define CLASS_BAND 0.02
 
 int ft_noise_model(const unsigned short *cal, int lines, int px,
                    double prof[6], ft_err *e)
@@ -18,7 +17,7 @@ int ft_noise_model(const unsigned short *cal, int lines, int px,
 
     if (lines < 1 || px < 1 || lines > FT_NOISE_MAX_LINES)
         return ft_fail(e, "noise profile: %d calibration lines", lines);
-    /* line classes by their mean over all pixels and channels */
+    /* line classes, as ft_split_cal */
     for (l = 0; l < lines; l++) {
         for (lm = 0, i = 0; i < n3; i++)
             lm += cal[l * n3 + i];
@@ -26,7 +25,7 @@ int ft_noise_model(const unsigned short *cal, int lines, int px,
         if (l == 0 || lm < lo) lo = lm;
         if (l == 0 || lm > hi) hi = lm;
     }
-    band = CLASS_BAND * (hi - lo);
+    band = FT_CAL_BAND * (hi - lo);
     for (l = 0; l < lines; l++) {
         for (lm = 0, i = 0; i < n3; i++)
             lm += cal[l * n3 + i];
