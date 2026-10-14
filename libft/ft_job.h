@@ -20,6 +20,8 @@ typedef struct {
     double tilt_deg;
     int sprockets, straighten, confidence_low, done;
     long focus_offset;            /* per-frame mode: measured offset */
+    int group;                    /* share job: the window it scans in
+                                     (1..); 0 = not in a share job */
 } ft_job_frame;
 
 typedef struct {
@@ -31,6 +33,10 @@ typedef struct {
     double film_base[3];          /* D of unexposed film per channel, from
                                      the preview (ft_layout.base): the
                                      negative's base or the slide's black */
+    double share;                 /* scan to share: target px on each
+                                     frame's long side (ft_share.h); 0 =
+                                     an ordinary job, one scan per frame */
+    int hf_half_res;              /* share: half frames at the FF's ppi */
     int nframes;
     ft_job_frame f[FT_MAX_FRAMES];
 } ft_job;

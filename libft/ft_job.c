@@ -46,6 +46,9 @@ int ft_job_write(const ft_job *j, FILE *out)
     if (j->has_film_base)
         fprintf(out, "film_base = %.4f %.4f %.4f   # D r g b: unexposed film\n",
                 j->film_base[0], j->film_base[1], j->film_base[2]);
+    if (j->share > 0)
+        fprintf(out, "share = %g   # scan to share: px on each frame's long "
+                     "side\nhf_half_res = %s\n", j->share, yn(j->hf_half_res));
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
@@ -59,6 +62,9 @@ int ft_job_write(const ft_job *j, FILE *out)
                 yn(f->sprockets), yn(f->straighten),
                 f->confidence_low ? "low" : "high", f->focus_offset,
                 yn(f->done));
+        if (j->share > 0)
+            fprintf(out, "group = %d   # window: frames of one group scan "
+                         "together\n", f->group);
     }
     return ferror(out) ? -1 : 0;
 }
@@ -97,12 +103,12 @@ static int lnum(const char *v, long *out)
 }
 
 static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset",
-    "film_base" };
-#define N_STRIP_KEYS 5
+    "film_base", "share", "hf_half_res" };
+#define N_STRIP_KEYS 7
 static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
     "sprockets", "straighten", "confidence", "focus_offset", "done",
-    "bin" };
-#define N_FRAME_KEYS 11
+    "bin", "group" };
+#define N_FRAME_KEYS 12
 #define K_PPI 2
 #define K_WINDOW 3
 
@@ -218,6 +224,11 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                 else bad = 1;
             } else if (ki == 3) {
                 bad = lnum(v, &j->focus_offset);
+            } else if (ki == 5) {
+                bad = num(v, &j->share) ||
+                      !(j->share >= 100 && j->share <= 20000);
+            } else if (ki == 6) {
+                bad = yesno(v, &j->hf_half_res);
             } else {
                 double *d = j->film_base;
                 char extra;
@@ -262,6 +273,13 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                     f->bin = (int)b;
                 break;
             }
+            case 11: {
+                long g;
+                bad = lnum(v, &g) || g < 0 || g > FT_MAX_FRAMES;
+                if (!bad)
+                    f->group = (int)g;
+                break;
+            }
             default: bad = yesno(v, &f->done); break;
             }
         }
@@ -285,6 +303,46 @@ static void where(char *buf, size_t n, const ft_job_frame *f)
         snprintf(buf, n, "frame %d", f->index);
 }
 
+/* A share job scans each group of frames as one window: every included
+ * frame is in a group, included frames follow the strip, a group's frames
+ * share ppi and bin and are not split by another group's. An ordinary job
+ * has no groups. */
+static int share_groups(const ft_job *j, ft_err *e)
+{
+    int i, k, prev = -1;
+    char w[48];
+    if (!(j->share > 0)) {
+        for (i = 0; i < j->nframes; i++)
+            if (j->f[i].group) {
+                where(w, sizeof w, &j->f[i]);
+                return ft_fail(e, "%s: group without share in [strip]", w);
+            }
+        return 0;
+    }
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        if (!f->include)
+            continue;
+        where(w, sizeof w, f);
+        if (f->group < 1)
+            return ft_fail(e, "%s: share job frame without a group", w);
+        if (prev >= 0 && f->y0 < j->f[prev].y0)
+            return ft_fail(e, "%s: share job frames must follow the strip",
+                           w);
+        if (prev >= 0 && f->group != j->f[prev].group)
+            for (k = 0; k < prev; k++)
+                if (j->f[k].include && j->f[k].group == f->group)
+                    return ft_fail(e, "%s: group %d is split by group %d", w,
+                                   f->group, j->f[prev].group);
+        if (prev >= 0 && f->group == j->f[prev].group &&
+            (f->ppi != j->f[prev].ppi || f->bin != j->f[prev].bin))
+            return ft_fail(e, "%s: frames of group %d differ in ppi or bin",
+                           w, f->group);
+        prev = i;
+    }
+    return 0;
+}
+
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
 {
     const ft_holder *h = ft_holder_find(j->holder);
@@ -293,6 +351,8 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
         return ft_fail(e, "unknown holder '%s'", j->holder);
     if (j->nframes <= 0)
         return ft_fail(e, "no frames");
+    if (share_groups(j, e))
+        return -1;
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         long ccd, optic, off;
