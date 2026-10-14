@@ -39,7 +39,7 @@ int main(void)
     n = ft_icc_build(FT_SPACE_DISPLAY_P3, icc, sizeof icc);
     CHECK(n > 0);
     CHECK(ft_jpeg_write(path, rgb, W, H, FT_JPEG_QUALITY, 1411.2, icc, n,
-                        &e) == 0);
+                        "look=hp5\ngrade=2\n", &e) == 0);
 
     {
         struct jpeg_decompress_struct d;
@@ -52,7 +52,19 @@ int main(void)
         jpeg_create_decompress(&d);
         jpeg_stdio_src(&d, f);
         jpeg_save_markers(&d, JPEG_APP0 + 2, 0xFFFF);
+        jpeg_save_markers(&d, JPEG_COM, 0xFFFF);
         jpeg_read_header(&d, TRUE);
+        {
+            jpeg_saved_marker_ptr m;
+            int ncom = 0;
+            for (m = d.marker_list; m; m = m->next)
+                if (m->marker == JPEG_COM) {
+                    ncom++;
+                    CHECK(m->data_length == 17 &&
+                          memcmp(m->data, "look=hp5\ngrade=2\n", 17) == 0);
+                }
+            CHECK(ncom == 1);
+        }
         CHECK(d.image_width == W && d.image_height == H);
         CHECK(d.num_components == 3 && d.jpeg_color_space == JCS_YCbCr);
         /* 4:4:4 */
@@ -89,12 +101,28 @@ int main(void)
         }
 
     /* no profile, no density */
-    CHECK(ft_jpeg_write(path, rgb, W, H, 75, 0, NULL, 0, &e) == 0);
+    CHECK(ft_jpeg_write(path, rgb, W, H, 75, 0, NULL, 0, NULL, &e) == 0);
+    {
+        /* no comment: no COM marker */
+        long fn = 0;
+        unsigned char *all;
+        FILE *f = fopen(path, "rb");
+        CHECK(f != NULL);
+        fseek(f, 0, SEEK_END);
+        fn = ftell(f);
+        rewind(f);
+        all = malloc((size_t)fn);
+        CHECK(all && fread(all, 1, (size_t)fn, f) == (size_t)fn);
+        fclose(f);
+        for (x = 0; x + 1 < fn; x++)
+            CHECK(!(all[x] == 0xFF && all[x + 1] == 0xFE));
+        free(all);
+    }
     /* refusals */
-    CHECK(ft_jpeg_write(path, rgb, W, H, 0, 0, NULL, 0, &e) == -1);
-    CHECK(ft_jpeg_write(path, rgb, 0, H, 90, 0, NULL, 0, &e) == -1);
+    CHECK(ft_jpeg_write(path, rgb, W, H, 0, 0, NULL, 0, NULL, &e) == -1);
+    CHECK(ft_jpeg_write(path, rgb, 0, H, 90, 0, NULL, 0, NULL, &e) == -1);
     CHECK(ft_jpeg_write("test/no_such_dir/x.jpg", rgb, W, H, 90, 0, NULL, 0,
-                        &e) == -1);
+                        NULL, &e) == -1);
     CHECK(strstr(e.msg, "no_such_dir") != NULL);
     remove(path);
     return TEST_DONE();

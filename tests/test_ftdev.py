@@ -626,3 +626,236 @@ def test_export_no_profile_warns_and_estimates(ftdev, tmp_path):
     assert "warning: no noise profile, estimated" in err
     _, err = flat_std(ftdev, dng, tmp_path / "z.jpg", "--nr-sensor", "0")
     assert "no noise profile" not in err
+
+
+def cut_frame(ftdev, tmp_path):
+    """The synthetic share window cut: frame 1's working raw + sidecar."""
+    win = share_window(tmp_path)
+    subprocess.run([str(ftdev), "cut", str(win)], check=True,
+                   capture_output=True)
+    return tmp_path / "job_frame01.dng"
+
+
+def export(ftdev, dng, out, *args):
+    r = subprocess.run([str(ftdev), "export", str(dng), "-o", str(out),
+                        *args], capture_output=True, text=True)
+    return r, (sidecar(Path(str(out) + ".txt")) if r.returncode == 0
+               else None)
+
+
+@needs_cc
+def test_export_records_its_recipe(ftdev, tmp_path):
+    dng = cut_frame(ftdev, tmp_path)
+    out = tmp_path / "a.jpg"
+    r, rec = export(ftdev, dng, out, "--grade", "2", "--curve", "soft",
+                    "--sharpen", "0.8", "--space", "p3")
+    assert r.returncode == 0, r.stderr
+    assert rec["look"] == "none" and rec["frame"] == "1"
+    assert rec["film"] == "neg" and rec["base"] == "0.2076 0.3979 0.6021"
+    assert rec["grade"] == "2" and rec["curve"] == "soft"
+    assert rec["tint"] == "0 0 0" and len(rec["range"].split()) == 3
+    assert (rec["nr_sensor"], rec["nr_chroma"], rec["nr_grain"],
+            rec["sharpen"]) == ("1", "2", "0", "0.8")
+    assert rec["space"] == "p3" and rec["gamut"] == "soft"
+    assert "curve_r" not in rec and "bw_weights" not in rec
+    # the exposure recorded is the one the paste-back line prints
+    assert "--exposure %s " % rec["exposure"] in r.stdout
+    # the same text rides in the JPEG's comment (COM marker)
+    text = Path(str(out) + ".txt").read_bytes()
+    data = out.read_bytes()
+    at = data.index(b"\xff\xfe")
+    assert data[at + 4:at + 4 + len(text)] == text
+    assert struct.unpack(">H", data[at + 2:at + 4])[0] == len(text) + 2
+
+
+@needs_cc
+def test_export_with_edit(ftdev, tmp_path):
+    dng = cut_frame(ftdev, tmp_path)
+    roll = tmp_path / "roll.edit"
+    roll.write_text("from = portra400\n"
+                    "[taste]\nexposure = 0.5\ngrade = 2\nsharpen = 0\n"
+                    "nr_grain = 1\n"
+                    "[frame 1]\ngrade = 1.2\ncurve = strong\n"
+                    "curve_b = 0,0 0.5,0.45 1,1\n"
+                    "[frame 2]\nexposure = -1\n")
+    # the auto exposure at each grade, from plain exports
+    _, g12 = export(ftdev, dng, tmp_path / "g12.jpg", "--grade", "1.2")
+    _, g2 = export(ftdev, dng, tmp_path / "g2.jpg", "--grade", "2")
+
+    # frame 1 (from the sidecar): the frame's grade and curves replace the
+    # roll's; the roll's exposure is an offset from the auto value
+    r, rec = export(ftdev, dng, tmp_path / "f1.jpg", "--edit", str(roll))
+    assert r.returncode == 0, r.stderr
+    assert "recipe: look portra400, frame 1; frame overrides: grade curve " \
+           "curve_b" in r.stdout
+    assert rec["look"] == "portra400" and rec["frame"] == "1"
+    assert rec["grade"] == "1.2" and rec["curve"] == "strong"
+    assert rec["curve_b"] == "0,0 0.5,0.45 1,1"
+    assert abs(float(rec["exposure"]) - float(g12["exposure"]) - 0.5) < 1e-5
+    assert rec["range"] == g12["range"] and rec["base"] == g12["base"]
+    assert (rec["nr_grain"], rec["sharpen"], rec["nr_sensor"]) == \
+           ("1", "0", "1")
+
+    # frame 2: the roll's grade, the frame's exposure offset replaces the
+    # roll's (not added to it)
+    side = Path(str(dng) + ".txt")
+    side.write_text(side.read_text().replace("frame=1\n", "frame=2\n"))
+    r, rec = export(ftdev, dng, tmp_path / "f2.jpg", "--edit", str(roll),
+                    "--frame", "2")
+    assert r.returncode == 0, r.stderr
+    assert "frame overrides: exposure" in r.stdout
+    assert rec["frame"] == "2" and rec["grade"] == "2"
+    assert rec["curve"] == "linear" and "curve_b" not in rec
+    assert abs(float(rec["exposure"]) - float(g2["exposure"]) + 1) < 1e-5
+
+    side.write_text(side.read_text().replace("frame=2\n", "frame=1\n"))
+
+    # a look file is a valid edit: copy one to start a roll
+    look = tmp_path / "hp.look"
+    look.write_text("[taste]\ngrade = 2\n")
+    r, rec = export(ftdev, dng, tmp_path / "l.jpg", "--edit", str(look))
+    assert r.returncode == 0, r.stderr
+    assert "recipe: look (unnamed), frame 1\n" in r.stdout
+    assert rec["look"] == "(unnamed)" and rec["exposure"] == g2["exposure"]
+
+
+@needs_cc
+def test_export_edit_refusals(ftdev, tmp_path):
+    dng = cut_frame(ftdev, tmp_path)
+    roll = tmp_path / "roll.edit"
+    roll.write_text("[taste]\ngrade = 2\n")
+    out = tmp_path / "x.jpg"
+    for flags in (["--grade", "3"], ["--exposure", "1"], ["--nr-grain", "1"],
+                  ["--sharpen", "0"]):
+        r, _ = export(ftdev, dng, out, "--edit", str(roll), *flags)
+        assert r.returncode == 2 and "with --edit the render and detail " \
+               "settings come from the .edit" in r.stderr, flags
+    r, _ = export(ftdev, dng, out, "--frame", "1")
+    assert r.returncode == 2 and "--frame needs --edit" in r.stderr
+    r, _ = export(ftdev, dng, out, "--edit", str(roll), "--frame", "x")
+    assert r.returncode == 2 and "--frame is a frame number" in r.stderr
+    # the sidecar says frame 1: frame 2's overrides would be the wrong frame
+    r, _ = export(ftdev, dng, out, "--edit", str(roll), "--frame", "2")
+    assert r.returncode == 2
+    assert "--frame 2, but %s.txt says frame 1" % dng in r.stderr
+    assert not out.exists()
+    bad = tmp_path / "bad.edit"
+    bad.write_text("[taste]\ngrade = 9\n")
+    r, _ = export(ftdev, dng, out, "--edit", str(bad))
+    assert r.returncode == 2
+    assert "bad.edit: line 2: grade: 9 is out of range (0.2..5)" in r.stderr
+    assert not out.exists()
+    r, _ = export(ftdev, dng, out, "--edit", str(tmp_path / "none.edit"))
+    assert r.returncode == 1 and "cannot read" in r.stderr
+    # no sidecar: the frame must be given
+    Path(str(dng) + ".txt").unlink()
+    r, _ = export(ftdev, dng, out, "--film", "neg", "--edit", str(roll))
+    assert r.returncode == 2 and "--edit needs --frame N" in r.stderr
+    r, rec = export(ftdev, dng, out, "--film", "neg", "--edit", str(roll),
+                    "--frame", "4")
+    assert r.returncode == 0, r.stderr
+    assert rec["frame"] == "4" and "estimated from the frame" in r.stderr
+
+
+@needs_cc
+def test_export_edit_bw_ignores_colour(ftdev, tmp_path):
+    # a colour look on a b&w render: the stock ratio is ignored with a
+    # warning, the taste's tint without one (b&w has no tint)
+    dng = cut_frame(ftdev, tmp_path)
+    roll = tmp_path / "roll.edit"
+    roll.write_text("[stock]\nstock_version = 1\nrange_ratio = 1.1 1 0.9\n"
+                    "[taste]\ntint = 3 0 -2\ngrade = 2\n")
+    r, rec = export(ftdev, dng, tmp_path / "bw.jpg", "--film", "bw",
+                    "--edit", str(roll))
+    assert r.returncode == 0, r.stderr
+    assert "range_ratio is for colour negatives; ignored for b&w" in r.stderr
+    assert rec["film"] == "bw" and rec["tint"] == "0 0 0"
+    assert rec["grade"] == "2"
+    # a negative uses both, without the warning
+    r, rec = export(ftdev, dng, tmp_path / "neg.jpg", "--edit", str(roll))
+    assert r.returncode == 0, r.stderr
+    assert "range_ratio" not in r.stderr and rec["tint"] == "3 0 -2"
+
+
+def look_keys(path):
+    return dict(l.split(" = ", 1) for l in path.read_text().splitlines()
+                if " = " in l)
+
+
+@needs_cc
+def test_stock_learn(ftdev, tmp_path):
+    dng = cut_frame(ftdev, tmp_path)
+    _, plain = export(ftdev, dng, tmp_path / "p.jpg")
+    rr, rg, rb = map(float, plain["range"].split())
+    roll = tmp_path / "roll.edit"
+    roll.write_text("from = x\n[taste]\ngrade = 1.8\n[frame 1]\n"
+                    "exposure = 1\n")
+    look = tmp_path / "portra400.look"
+    learn = [str(ftdev), "stock", "learn", str(roll)]
+
+    # one frame: the ratio of the stock-free estimate; the roll's taste
+    # without the frame's overrides
+    r = subprocess.run(learn + [str(dng), "-o", str(look)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "frame 1: r/g %.3f, b/g %.3f" % (rr / rg, rb / rg) in r.stdout
+    assert "note: 1 frames from this roll" in r.stderr
+    k = look_keys(look)
+    q = [float(v) for v in k["range_ratio"].split()]
+    assert abs(q[0] - rr / rg) < 2e-6 and q[1] == 1
+    assert abs(q[2] - rb / rg) < 2e-6
+    assert k["n_frames"] == "1" and k["stock_version"] == "1"
+    assert k["grade"] == "1.8" and "exposure" not in k
+    assert "from" not in k and "[frame" not in look.read_text()
+
+    # again with two frames: pooled with the earlier one, weighted
+    r = subprocess.run(learn + [str(dng), str(dng), "-o", str(look)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert look_keys(look)["n_frames"] == "3"
+    assert "from 3 frames (this roll: 2, spread 0.000)" in r.stdout
+    # --replace starts over
+    r = subprocess.run(learn + [str(dng), "-o", str(look), "--replace"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and look_keys(look)["n_frames"] == "1"
+
+    # the learned look steers the render: r and b follow green
+    r, rec = export(ftdev, dng, tmp_path / "s.jpg", "--edit", str(look))
+    assert r.returncode == 0, r.stderr
+    sr, sg, sb = map(float, rec["range"].split())
+    assert sg == rg
+    assert abs(sr - sg * q[0]) < 1e-5 and abs(sb - sg * q[2]) < 1e-5
+
+
+@needs_cc
+def test_stock_learn_refusals(ftdev, tmp_path):
+    dng = cut_frame(ftdev, tmp_path)
+    roll = tmp_path / "roll.edit"
+    roll.write_text("[taste]\n")
+    look = tmp_path / "a.look"
+    learn = [str(ftdev), "stock", "learn", str(roll)]
+    r = subprocess.run([str(ftdev), "stock", "forget"], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "usage: ftdev stock learn" in r.stderr
+    r = subprocess.run(learn + ["-o", str(look)], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "usage" in r.stderr
+    # a broken look at -o is not overwritten
+    look.write_text("[frame 1]\n")
+    r = subprocess.run(learn + [str(dng), "-o", str(look)],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "a.look: line 1: [frame N] belongs in a " \
+           ".edit" in r.stderr
+    assert look.read_text() == "[frame 1]\n"
+    # slides have no stock ranges
+    side = Path(str(dng) + ".txt")
+    side.write_text(side.read_text().replace("film=negative", "film=slide"))
+    r = subprocess.run(learn + [str(dng), "-o", str(tmp_path / "b.look")],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "a slide" in r.stderr
+    assert not (tmp_path / "b.look").exists()
+    # learning needs the sidecar
+    side.unlink()
+    r = subprocess.run(learn + [str(dng), "-o", str(tmp_path / "b.look")],
+                       capture_output=True, text=True)
+    assert r.returncode == 2 and "no sidecar" in r.stderr

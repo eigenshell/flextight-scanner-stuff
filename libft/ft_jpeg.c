@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <setjmp.h>
 #include <stdio.h>
+#include <string.h>
 #include <jpeglib.h>
 #include "ft_jpeg.h"
 
@@ -19,7 +20,7 @@ static void on_error(j_common_ptr c)
 
 int ft_jpeg_write(const char *path, const unsigned char *rgb, int w, int h,
                   int quality, double ppi, const unsigned char *icc,
-                  size_t icc_n, ft_err *e)
+                  size_t icc_n, const char *comment, ft_err *e)
 {
     struct jpeg_compress_struct c;
     err_mgr em;
@@ -32,6 +33,8 @@ int ft_jpeg_write(const char *path, const unsigned char *rgb, int w, int h,
         return ft_fail(e, "jpeg: quality %d (1..100)", quality);
     if (icc && icc_n > 65519L * 255)
         return ft_fail(e, "jpeg: ICC profile too large");
+    if (comment && strlen(comment) > FT_JPEG_COMMENT_MAX)
+        return ft_fail(e, "jpeg: comment too long");
     f = fopen(path, "wb");
     if (!f)
         return ft_fail(e, "jpeg: cannot write %s", path);
@@ -65,6 +68,9 @@ int ft_jpeg_write(const char *path, const unsigned char *rgb, int w, int h,
     jpeg_start_compress(&c, TRUE);
     if (icc && icc_n)
         jpeg_write_icc_profile(&c, icc, (unsigned int)icc_n);
+    if (comment && *comment)
+        jpeg_write_marker(&c, JPEG_COM, (const JOCTET *)comment,
+                          (unsigned int)strlen(comment));
     while (c.next_scanline < c.image_height) {
         JSAMPROW row = (JSAMPROW)(rgb + (size_t)c.next_scanline * w * 3);
         jpeg_write_scanlines(&c, &row, 1);

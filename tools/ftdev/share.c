@@ -35,6 +35,7 @@
 
 static ft_render g_render;              /* ~380 KB */
 static ft_output g_output;              /* ~330 KB */
+static ft_edit g_edit;                  /* ~100 KB */
 
 #define PATH_CAP 4096
 
@@ -205,6 +206,25 @@ out:
     return rc;
 }
 
+int ftdev_crop(const ft_image *im, const int box[4], ft_image *cut,
+               ft_err *e)
+{
+    int y;
+    if (box[0] < 0 || box[1] < 0 || box[2] < 1 || box[3] < 1 ||
+        box[2] > im->w || box[3] > im->h || box[0] > im->w - box[2] ||
+        box[1] > im->h - box[3])
+        return ft_fail(e, "box %d,%d %dx%d outside the %dx%d image", box[0],
+                       box[1], box[2], box[3], im->w, im->h);
+    if (ft_image_alloc(cut, box[2], box[3], e))
+        return -1;
+    for (y = 0; y < box[3]; y++)
+        memcpy(cut->rgb + (size_t)y * box[2] * 3,
+               im->rgb + ((size_t)(box[1] + y) * im->w + box[0]) * 3,
+               (size_t)box[2] * 3 * sizeof *cut->rgb);
+    cut->ppi = im->ppi;
+    return 0;
+}
+
 /* copy a file byte for byte; -1 on failure */
 static int copy_file(const char *from, const char *to)
 {
@@ -231,7 +251,9 @@ static void export_usage(void)
                     "         [--crop x,y,w,h] [--long-edge px] "
                     "[--quality q] [--raw-too] [-o out.jpg]\n"
                     "         [--nr-sensor 0..4 (1)] [--nr-chroma 0..8 (2)] "
-                    "[--nr-grain 0..4 (0)] [--sharpen 0..3 (0.5)]\n");
+                    "[--nr-grain 0..4 (0)] [--sharpen 0..3 (0.5)]\n"
+                    "         [--edit roll.edit [--frame N]] (render and "
+                    "detail settings from the roll's look)\n");
 }
 
 /* an export strength flag: 1 parsed, 0 not this flag, -1 bad (printed) */
@@ -276,12 +298,40 @@ static void export_profile(const ft_image *im, const ft_share_sidecar *sc,
     }
 }
 
+int ftdev_denoise(const ft_image *im, const ft_share_sidecar *sc,
+                  ft_image *cut, const ft_look_detail *d)
+{
+    void *nrs;
+    if (!(d->nr_sensor > 0) && !(d->nr_grain > 0))
+        return 0;
+    nrs = malloc(ft_nr_scratch_bytes(cut->w, cut->h));
+    if (!nrs) {
+        fprintf(stderr, "ftdev: out of memory\n");
+        return 1;
+    }
+    if (d->nr_sensor > 0) {
+        double prof[6];
+        export_profile(im, sc, cut, prof, nrs);
+        ft_nr_sensor(cut->rgb, cut->w, cut->h, prof, d->nr_sensor,
+                     d->nr_sensor * d->nr_chroma, nrs);
+    }
+    if (d->nr_grain > 0)
+        ft_nr_grain(cut->rgb, cut->w, cut->h, d->nr_grain, nrs);
+    free(nrs);
+    return 0;
+}
+
 int ftdev_export(int argc, char **argv)
 {
-    const char *dng = NULL, *outp = NULL;
-    char outbuf[PATH_CAP], path[PATH_CAP], *side = NULL;
+    const char *dng = NULL, *outp = NULL, *edit = NULL;
+    const char *space_name = "srgb", *curves[4] = { NULL, NULL, NULL, NULL };
+    char outbuf[PATH_CAP], path[PATH_CAP], *side = NULL, rtext[4096];
     int i, rc = 1, crop[4] = { 0, 0, 0, 0 }, has_crop = 0, raw_too = 0;
-    int quality = FT_JPEG_QUALITY, ow, oh, has_side = 0;
+    int quality = FT_JPEG_QUALITY, ow, oh, has_side = 0, has_detail = 0;
+    int frame = -1;
+    long frame_arg = -1;
+    ft_taste taste;
+    ft_look_detail det;
     long nside = 0;
     double long_edge = 0, scale = 1, ref_long;
     ft_space space = FT_SPACE_SRGB;
@@ -291,7 +341,6 @@ int ftdev_export(int argc, char **argv)
     rflags rf;
     ft_image im, cut;
     float *small = NULL, *scratch = NULL;
-    void *nrs = NULL;
     double nr_sensor = 1, nr_chroma = 2, nr_grain = 0, sharpen = 0.5;
     unsigned char *px8 = NULL, icc[FT_ICC_MAX];
     size_t icc_n;
@@ -314,14 +363,27 @@ int ftdev_export(int argc, char **argv)
              (r = strength(a, argv[i + 1], "--sharpen", 3, &sharpen)))) {
             if (r < 0)
                 return 2;
+            has_detail = 1;
             i++;
             continue;
         }
         if (strcmp(a, "--space") == 0 && i + 1 < argc) {
-            if (ft_space_find(argv[++i], &space) ||
+            space_name = argv[++i];
+            if (ft_space_find(space_name, &space) ||
                 space == FT_SPACE_REC2020) {
                 fprintf(stderr, "ftdev: --space is srgb, p3 or adobe "
                                 "(8-bit Rec.2020 bands)\n");
+                return 2;
+            }
+        } else if (strcmp(a, "--edit") == 0 && i + 1 < argc) {
+            edit = argv[++i];
+        } else if (strcmp(a, "--frame") == 0 && i + 1 < argc) {
+            char *end;
+            frame_arg = strtol(argv[++i], &end, 10);
+            if (*end || end == argv[i] || frame_arg < 0 ||
+                frame_arg > 9999) {
+                fprintf(stderr, "ftdev: --frame is a frame number "
+                                "(0..9999)\n");
                 return 2;
             }
         } else if (strcmp(a, "--gamut") == 0 && i + 1 < argc) {
@@ -368,6 +430,18 @@ int ftdev_export(int argc, char **argv)
         export_usage();
         return 2;
     }
+    /* one source for the settings: the flags (absolute exposure) or the
+     * roll's look (exposure as an offset from the auto value) */
+    if (edit && (rflags_any(&rf) || has_detail)) {
+        fprintf(stderr, "ftdev: with --edit the render and detail settings "
+                        "come from the .edit (overrides go in its [frame N] "
+                        "section)\n");
+        return 2;
+    }
+    if (frame_arg >= 0 && !edit) {
+        fprintf(stderr, "ftdev: --frame needs --edit\n");
+        return 2;
+    }
     if (path_cat(path, sizeof path, dng, ".txt"))
         return 2;
     side = ftdev_load(path, &nside);
@@ -389,6 +463,55 @@ int ftdev_export(int argc, char **argv)
     if (rflags_recipe(&rf, &rcp)) {
         rc = 2;
         goto out;
+    }
+    curves[0] = rf.curve;
+    if (has_side)
+        frame = sc.frame;
+    if (edit) {
+        long nt = 0;
+        char *txt;
+        int k;
+        /* the sidecar names the frame the pixels are: another frame's
+         * overrides would render (and record) the wrong frame */
+        if (frame_arg >= 0 && frame >= 0 && frame_arg != frame) {
+            fprintf(stderr, "ftdev: --frame %ld, but %s.txt says frame %d\n",
+                    frame_arg, dng, frame);
+            rc = 2;
+            goto out;
+        }
+        if (frame_arg >= 0)
+            frame = (int)frame_arg;
+        if (frame < 0) {
+            fprintf(stderr, "ftdev: --edit needs --frame N (no sidecar to "
+                            "read the frame from)\n");
+            rc = 2;
+            goto out;
+        }
+        txt = ftdev_load(edit, &nt);
+        if (!txt) {
+            fprintf(stderr, "ftdev: cannot read %s\n", edit);
+            goto out;
+        }
+        if (ft_edit_parse(txt, (size_t)nt, FT_EDIT_FILE, &g_edit, &e)) {
+            fprintf(stderr, "ftdev: %s: %s\n", edit, e.msg);
+            free(txt);
+            rc = 2;
+            goto out;
+        }
+        free(txt);
+        if (g_edit.stock.has_ratio && rflags_mode(&rf) != FT_RENDER_NEG)
+            fprintf(stderr, "ftdev: warning: %s: range_ratio is for colour "
+                            "negatives; ignored for %s\n", edit,
+                    rf.bw ? "b&w" : "a slide");
+        ft_edit_taste(&g_edit, frame, &taste, NULL);
+        ft_look_detail_of(&taste, &det);
+        nr_sensor = det.nr_sensor;
+        nr_chroma = det.nr_chroma;
+        nr_grain = det.nr_grain;
+        sharpen = det.sharpen;
+        for (k = 0; k < 4; k++)
+            curves[k] = (taste.set & (FT_T_CURVE << k)) ? taste.curve[k]
+                                                        : NULL;
     }
     if (!outp) {
         if (path_swap(outbuf, sizeof outbuf, dng, ".dng", ".jpg")) {
@@ -431,40 +554,53 @@ int ftdev_export(int argc, char **argv)
     if (!has_side && long_edge <= 0)
         fprintf(stderr, "ftdev: note: no sidecar; exporting at full size "
                         "(use --long-edge)\n");
-    if (ft_image_alloc(&cut, crop[2], crop[3], &e)) {
+    if (ftdev_crop(&im, crop, &cut, &e)) {
         fprintf(stderr, "ftdev: %s\n", e.msg);
         goto out;
     }
-    for (i = 0; i < crop[3]; i++)
-        memcpy(cut.rgb + (size_t)i * crop[2] * 3,
-               im.rgb + ((size_t)(crop[1] + i) * im.w + crop[0]) * 3,
-               (size_t)crop[2] * 3 * sizeof *cut.rgb);
-    cut.ppi = im.ppi;
-    /* noise reduction on the transmittance, before the render */
-    if (nr_sensor > 0 || nr_grain > 0) {
-        nrs = malloc(ft_nr_scratch_bytes(cut.w, cut.h));
-        if (!nrs) {
-            fprintf(stderr, "ftdev: out of memory\n");
-            goto out;
-        }
-    }
-    if (nr_sensor > 0) {
-        double prof[6];
-        export_profile(&im, has_side ? &sc : NULL, &cut, prof, nrs);
-        ft_nr_sensor(cut.rgb, cut.w, cut.h, prof, nr_sensor,
-                     nr_sensor * nr_chroma, nrs);
-    }
-    if (nr_grain > 0)
-        ft_nr_grain(cut.rgb, cut.w, cut.h, nr_grain, nrs);
-    free(nrs);
-    nrs = NULL;
+    det.nr_sensor = nr_sensor;
+    det.nr_chroma = nr_chroma;
+    det.nr_grain = nr_grain;
+    det.sharpen = sharpen;
+    if (ftdev_denoise(&im, has_side ? &sc : NULL, &cut, &det))
+        goto out;
     ft_image_free(&im);
     {
-        int r = rflags_render(&rf, &rcp,
-                              !rf.has_base && has_side && sc.has_film_base
-                              ? sc.film_base : NULL, &cut, &g_render);
+        const double *base_d = !rf.has_base && has_side && sc.has_film_base
+                               ? sc.film_base : NULL;
+        int r = edit ? look_render(g_edit.stock.present ? &g_edit.stock
+                                                        : NULL,
+                                   &taste, rflags_mode(&rf), base_d, &cut,
+                                   &rcp, &g_render)
+                     : rflags_render(&rf, &rcp, base_d, &cut, &g_render);
         if (r) {
             rc = r;
+            goto out;
+        }
+        if (edit) {
+            unsigned ff, bit;
+            const char *key;
+            int k, any = 0;
+            ft_edit_taste(&g_edit, frame, &taste, &ff);
+            printf("recipe: look %s, frame %d",
+                   g_edit.from[0] ? g_edit.from : "(unnamed)", frame);
+            for (k = 0; (key = ft_taste_key(k, &bit)) != NULL; k++)
+                if (ff & bit)
+                    printf("%s%s", any++ ? " " : "; frame overrides: ", key);
+            printf("\n");
+        }
+    }
+    {
+        int n = recipe_text(rtext, sizeof rtext,
+                            edit ? (g_edit.from[0] ? g_edit.from
+                                                   : "(unnamed)")
+                                 : "none", frame, &rcp, curves, &det);
+        n += snprintf(rtext + (n < (int)sizeof rtext ? n : 0),
+                      n < (int)sizeof rtext ? sizeof rtext - (size_t)n : 0,
+                      "space=%s\ngamut=%s\n", space_name,
+                      gamut == FT_GAMUT_SOFT ? "soft" : "clip");
+        if (n >= (int)sizeof rtext) {
+            fprintf(stderr, "ftdev: recipe text too long\n");
             goto out;
         }
     }
@@ -508,13 +644,34 @@ int ftdev_export(int argc, char **argv)
     }
     if (ft_jpeg_write(outp, px8, ow, oh, quality,
                       cut.ppi > 0 ? cut.ppi * ow / cut.w : 0, icc, icc_n,
-                      &e)) {
+                      rtext, &e)) {
         fprintf(stderr, "ftdev: %s\n", e.msg);
         goto out;
     }
     printf("%s: %dx%d, %s, gamut %s, q%d\n", outp, ow, oh,
            ft_space_what(space), gamut == FT_GAMUT_SOFT ? "soft" : "clip",
            quality);
+    /* how it was made, next to it: <out.jpg>.txt */
+    {
+        char rpath[PATH_CAP];
+        FILE *f;
+        if (path_cat(rpath, sizeof rpath, outp, ".txt")) {
+            rc = 2;
+            goto out;
+        }
+        f = fopen(rpath, "w");
+        if (f) {
+            int bad = fputs(rtext, f) == EOF;
+            if (fclose(f))
+                bad = 1;
+            if (bad)
+                f = NULL;
+        }
+        if (!f) {
+            fprintf(stderr, "ftdev: cannot write %s\n", rpath);
+            goto out;
+        }
+    }
     rc = 0;
     if (raw_too) {
         char to[PATH_CAP], to_txt[PATH_CAP];
@@ -544,7 +701,6 @@ out:
     ft_image_free(&cut);
     free(small);
     free(scratch);
-    free(nrs);
     free(px8);
     free(side);
     return rc;
