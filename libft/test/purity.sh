@@ -12,7 +12,7 @@
 # prefixes symbols with `_`: not supported).
 # Usage: sh test/purity.sh file.o...
 bad=$(nm -u "$@" | awk 'NF == 2 { print $2 }' |
-      grep -Ev '^(ft_fail|ft_curve_[a-z_]+|ft_recipe_[a-z_]+|ft_render_[a-z_]+|ft_dens_[a-z0-9_]+|mem(cpy|set|move|cmp)|strcmp|strtod|(exp|exp2|expm1|log|log2|log10|log1p|pow|sqrt|cbrt|ceil|floor|round|lround|trunc|rint|lrint|nearbyint|fabs|fmin|fmax|fmod|sin|cos|tan|atan|atan2)f?|__stack_chk_fail)$' |
+      grep -Ev '^(ft_fail|ft_curve_[a-z_]+|ft_recipe_[a-z_]+|ft_render_[a-z_]+|ft_dens_[a-z0-9_]+|ft_dplan_[a-z_]+|ft_dscan_[a-z_]+|ft_(bin_ok|bins_for_ppi|scan_seconds|line_seconds|mm_to_ccd|ccd_to_mm|out_to_ccd)|mem(cpy|set|move|cmp)|strcmp|strtod|(exp|exp2|expm1|log|log2|log10|log1p|pow|sqrt|cbrt|ceil|floor|round|lround|trunc|rint|lrint|nearbyint|fabs|fmin|fmax|fmod|sin|cos|tan|atan|atan2)f?|__stack_chk_fail)$' |
       sort -u)
 if [ -n "$bad" ]; then
     echo "purity: forbidden imports in $*:" $bad
