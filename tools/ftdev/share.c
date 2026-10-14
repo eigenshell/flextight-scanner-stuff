@@ -161,6 +161,8 @@ int ftdev_cut(int argc, char **argv)
     if (!r.detect_ok)
         fprintf(stderr, "ftdev: WARNING: frame detection failed on %s; "
                         "every frame cut at its preview box\n", scan);
+    if (r.noise_rc)
+        fprintf(stderr, "ftdev: note: %s\n", r.noise_err.msg);
     rc = 0;
     for (i = 0; i < r.n; i++) {
         ft_share_cut_frame *c = &r.f[i];

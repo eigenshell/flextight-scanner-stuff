@@ -37,7 +37,7 @@ def read_dng(path):
     assert b[:4] == b"II*\x00"
     ifd = struct.unpack_from("<I", b, 4)[0]
     n = struct.unpack_from("<H", b, ifd)[0]
-    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 10: 8}
+    size = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 10: 8, 12: 8}
     tags = {}
     for i in range(n):
         tag, typ, cnt, val = struct.unpack_from("<HHII", b, ifd + 2 + 12 * i)

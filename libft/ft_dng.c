@@ -4,6 +4,7 @@
  * after the IFD (word-aligned), then the strips. */
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +12,7 @@
 #include "ft_dng.h"
 
 enum { T_BYTE = 1, T_ASCII = 2, T_SHORT = 3, T_LONG = 4, T_RATIONAL = 5,
-       T_SRATIONAL = 10 };
+       T_SRATIONAL = 10, T_DOUBLE = 12 };
 
 #define MAX_TAGS 32
 #define STRIP_BYTES 262144L
@@ -31,7 +32,8 @@ typedef struct {
 static size_t type_size(unsigned type)
 {
     return type == T_SHORT ? 2 : type == T_LONG ? 4 :
-           type == T_RATIONAL || type == T_SRATIONAL ? 8 : 1;
+           type == T_RATIONAL || type == T_SRATIONAL || type == T_DOUBLE ? 8
+           : 1;
 }
 
 static void le16(unsigned char *p, unsigned long v)
@@ -104,6 +106,29 @@ static void add_rationals(ifd *d, unsigned tag, unsigned type,
         le32(p + 8 * i, (unsigned long)num);
         le32(p + 8 * i + 4, (unsigned long)den);
     }
+}
+
+/* IEEE 754 doubles, little-endian whatever the host */
+static void add_doubles(ifd *d, unsigned tag, const double *v, int n)
+{
+    unsigned char *p = add(d, tag, T_DOUBLE, (unsigned long)n);
+    int i, k;
+    for (i = 0; p && i < n; i++) {
+        uint64_t u;
+        memcpy(&u, &v[i], 8);
+        for (k = 0; k < 8; k++)
+            p[8 * i + k] = (unsigned char)(u >> 8 * k);
+    }
+}
+
+/* a usable NoiseProfile: finite, S >= 0, O > 0 */
+static int noise_ok(const double *v)
+{
+    int i;
+    for (i = 0; i < 6; i++)
+        if (!isfinite(v[i]) || v[i] < 0 || (i % 2 && v[i] == 0))
+            return 0;
+    return 1;
 }
 
 static int by_tag(const void *a, const void *b)
@@ -193,6 +218,8 @@ int ft_dng_write(const char *path, const ft_image *im, ft_err *e)
     add_rationals(&d, 50721, T_SRATIONAL, im->xyz_to_rgb, 9, 10000000L);
     add_rationals(&d, 50728, T_RATIONAL, neutral, 3, 1);
     add_short(&d, 50778, 21);                     /* D65 */
+    if (im->has_noise && noise_ok(im->noise))
+        add_doubles(&d, 51041, im->noise, 6);     /* NoiseProfile */
     if (d.oom) {
         ft_fail(e, "dng: out of memory");
         goto out;
@@ -289,7 +316,8 @@ typedef struct {
 
 /* the tags the reader looks at */
 static const unsigned WANT[] = { 256, 257, 258, 259, 262, 270, 271, 272, 273,
-                                 277, 278, 279, 282, 284, 50706, 50721 };
+                                 277, 278, 279, 282, 284, 50706, 50721,
+                                 51041 };
 #define NWANT (sizeof WANT / sizeof WANT[0])
 
 static int want(unsigned long tag)
@@ -406,6 +434,24 @@ int ft_dng_parse(const unsigned char *b, size_t n, ft_image *im, ft_err *e)
         const tag_ref *x = find(tags, 282);
         if (x && x->type == T_RATIONAL && rd32(b + x->at + 4))
             im->ppi = (double)rd32(b + x->at) / rd32(b + x->at + 4);
+    }
+    {
+        /* a bad NoiseProfile reads as none (export then estimates) */
+        const tag_ref *np = find(tags, 51041);
+        if (np && np->type == T_DOUBLE && np->count == 6) {
+            double v[6];
+            int k;
+            for (i = 0; i < 6; i++) {
+                uint64_t u = 0;
+                for (k = 7; k >= 0; k--)
+                    u = u << 8 | b[np->at + 8 * i + k];
+                memcpy(&v[i], &u, 8);
+            }
+            if (noise_ok(v)) {
+                memcpy(im->noise, v, sizeof v);
+                im->has_noise = 1;
+            }
+        }
     }
     {
         const tag_ref *cm = find(tags, 50721);

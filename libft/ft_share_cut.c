@@ -5,6 +5,7 @@
 #include "ft_detect.h"
 #include "ft_geom.h"
 #include "ft_holder.h"
+#include "ft_noise_model.h"
 #include "ft_preview.h"
 #include "ft_share_cut.h"
 
@@ -225,6 +226,10 @@ int ft_share_cut(const unsigned short *raw, int lines,
     if (!t)
         return -1;
     k = 12 / m->bin;
+    /* one NoiseProfile for every frame of the window (same .cal); none
+     * is not an error, export estimates */
+    r->noise_rc = ft_noise_model(cal, cal_lines, m->px, r->noise,
+                                 &r->noise_err);
 
     /* detection on a ~500 ppi copy, in holder mm */
     f = (int)floor(m->ppi / 500 + 0.5);
@@ -328,6 +333,10 @@ int ft_share_cut(const unsigned short *raw, int lines,
         r->n++;
         c->im.ppi = m->ppi;
         c->im.film = m->film;
+        if (r->noise_rc >= 0) {
+            c->im.has_noise = 1;
+            memcpy(c->im.noise, r->noise, sizeof c->im.noise);
+        }
         c->im.frame = p->index;
         snprintf(c->im.desc, sizeof c->im.desc,
                  "share frame %d, %g ppi, bin %d%s", p->index, m->ppi, m->bin,
@@ -373,6 +382,10 @@ int ft_share_sidecar_write(FILE *out, const ft_share_meta *m,
     if (m->has_film_base)
         fprintf(out, "film_base=%.4f %.4f %.4f\n", m->film_base[0],
                 m->film_base[1], m->film_base[2]);
+    if (c->im.has_noise)
+        fprintf(out, "noise_profile=%.17g %.17g %.17g %.17g %.17g %.17g\n",
+                c->im.noise[0], c->im.noise[1], c->im.noise[2],
+                c->im.noise[3], c->im.noise[4], c->im.noise[5]);
     fprintf(out, "box=%d %d %d %d\nexport_scale=%.6f\nestimated=%d\n"
                  "shift_mm=%.3f\n", c->box[0], c->box[1], c->box[2],
             c->box[3], c->export_scale, c->estimated, c->shift_mm);
@@ -432,6 +445,16 @@ int ft_share_sidecar_parse(const char *text, size_t n, ft_share_sidecar *s,
                   || !(b[0] >= 0 && b[0] <= 4.5 && b[1] >= 0 && b[1] <= 4.5 &&
                        b[2] >= 0 && b[2] <= 4.5);
             s->has_film_base = !bad;
+        } else if (strcmp(k, "noise_profile") == 0) {
+            double *p = s->noise;
+            char extra;
+            int i;
+            bad = sscanf(v, "%lf %lf %lf %lf %lf %lf %c", &p[0], &p[1], &p[2],
+                         &p[3], &p[4], &p[5], &extra) != 6;
+            s->has_noise = !bad;
+            for (i = 0; i < 6 && !bad; i++)
+                if (!isfinite(p[i]) || p[i] < 0 || (i % 2 && p[i] == 0))
+                    s->has_noise = 0;
         }
         if (bad)
             return ft_fail(e, "sidecar: bad %s=%s", k, v);
