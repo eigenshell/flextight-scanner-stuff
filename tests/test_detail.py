@@ -222,3 +222,11 @@ def test_bench(ftdev, tmp_path):
     assert r.returncode == 0, r.stderr
     assert "headroom" in r.stdout
     assert not list(tmp_path.glob("bench_frame*"))           # cleaned up
+
+
+@needs_cc
+def test_ring_unit_tests():
+    """The ring between the scanner and the pass worker (tools/detail)."""
+    r = subprocess.run(["make", "-C", str(ROOT / "tools" / "detail"), "test"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
