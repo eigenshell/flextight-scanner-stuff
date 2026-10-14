@@ -5,6 +5,8 @@
  *   ftdev <scan.raw> [-f dng,png,positive] [-o base] [-d defects.txt]
  *         [--no-crop] [--film neg|slide|bw] [--base r,g,b] [--exposure s]
  *         [--tint r,g,b] [--grade g] [--curve preset|"x,y x,y ..."]
+ *   ftdev detail <pass.raw> --job <file.job> ...   (detail.c)
+ *   ftdev bench [...]                               (detail.c)
  *
  * Reads <scan.raw> with its .cal, .faul and .txt (ftpoc's output), runs
  * the libft pipeline (ft_develop.h) and writes one file per format to
@@ -19,7 +21,9 @@
  * the overrides. The recipe used is printed as flags to paste back.
  *
  * Build: make (Linux/macOS), or with mingw:
- *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c <every libft .c> -lm
+ *   gcc -std=c99 -O2 -I..\..\libft -I..\detail -o ftdev.exe ftdev.c
+ *       detail.c util.c ..\detail\ring.c ..\detail\worker.c
+ *       <every libft .c> -lm
  */
 #include <math.h>
 #include <stdio.h>
@@ -30,6 +34,10 @@
 #include "ft_out.h"
 #include "ft_render.h"
 #include "ft_render_auto.h"
+#include "util.h"
+
+int ftdev_detail(int argc, char **argv);    /* detail.c */
+int ftdev_bench(int argc, char **argv);
 
 #define MAX_FORMATS 8
 
@@ -68,63 +76,6 @@ static const char *fmtf(float v, char *buf, size_t cap)
     return buf;
 }
 
-static void *load_file(const char *path, long *size)
-{
-    FILE *f = fopen(path, "rb");
-    char *buf = NULL;
-    long n;
-    if (!f)
-        return NULL;
-    if (fseek(f, 0, SEEK_END) == 0 && (n = ftell(f)) >= 0 &&
-        fseek(f, 0, SEEK_SET) == 0 && (buf = malloc((size_t)n + 1)) != NULL) {
-        if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
-            free(buf);
-            buf = NULL;
-        } else {
-            buf[n] = 0;
-            *size = n;
-        }
-    }
-    fclose(f);
-    return buf;
-}
-
-/* value of key in a key=value text, or def */
-static long meta_long(const char *meta, const char *key, long def)
-{
-    size_t k = strlen(key);
-    const char *p = meta;
-    while (p && *p) {
-        if (strncmp(p, key, k) == 0 && p[k] == '=')
-            return strtol(p + k + 1, NULL, 10);
-        p = strchr(p, '\n');
-        if (p)
-            p++;
-    }
-    return def;
-}
-
-static int meta_str(const char *meta, const char *key, char *out, size_t cap)
-{
-    size_t k = strlen(key), n = 0;
-    const char *p = meta;
-    while (p && *p) {
-        if (strncmp(p, key, k) == 0 && p[k] == '=') {
-            p += k + 1;
-            while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < cap) {
-                out[n] = p[n];
-                n++;
-            }
-            out[n] = 0;
-            return 1;
-        }
-        p = strchr(p, '\n');
-        if (p)
-            p++;
-    }
-    return 0;
-}
-
 static void usage(void)
 {
     const ft_writer *w;
@@ -134,6 +85,10 @@ static void usage(void)
                     "             [--film neg|slide|bw] [--base r,g,b] "
                     "[--exposure stops] [--tint r,g,b]\n"
                     "             [--grade g] [--curve preset|\"x,y x,y ...\"]\n"
+                    "       ftdev detail <pass.raw> --job <file.job> ... "
+                    "(a kept detailed-scan pass)\n"
+                    "       ftdev bench [...] (the detailed-scan worker's "
+                    "speed here)\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
         fprintf(stderr, "  %-8s %s\n", w->name, w->what);
@@ -163,6 +118,10 @@ int main(int argc, char **argv)
     ft_image im;
     ft_err e;
 
+    if (argc > 1 && strcmp(argv[1], "detail") == 0)
+        return ftdev_detail(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "bench") == 0)
+        return ftdev_bench(argc - 2, argv + 2);
     ft_image_init(&im);
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
