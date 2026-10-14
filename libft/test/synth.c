@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ft_geom.h"
 #include "test/synth.h"
 
 #define PI 3.14159265358979323846
@@ -220,4 +221,85 @@ float *synth_preview(const synth_spec *s)
                     *p = (float)(v < 0 ? 0 : v > 1 ? 1 : v);
                 }
     return t;
+}
+
+/* ------------------------------------------------------- window scans */
+
+void synth_window(const synth_win *w, synth_win_scan *s)
+{
+    synth_spec sp;
+    double scale = w->ppi * w->bin, half = (w->bin - 1) / 2.0, xm0, xm1;
+    double off;
+    int k = 12 / w->bin, tl, l, c, i;
+    float *t;
+
+    memset(s, 0, sizeof *s);
+    s->y = (long)floor(w->y0_mm / 25.4 * w->ppi + 0.5);
+    s->x = (long)floor((ft_mm_to_ccd(w->x0_mm, scale) - FT_CCD_FIRST) /
+                       w->bin + 0.5);
+    xm0 = ft_ccd_to_mm(ft_out_to_ccd(s->x, 0, w->bin) + half, scale);
+    xm1 = ft_ccd_to_mm(ft_out_to_ccd(s->x, 1, w->bin) + half, scale);
+    s->px = (int)(w->w_mm / (xm1 - xm0));
+    s->lines = (int)floor(w->len_mm / 25.4 * w->ppi + 0.5);
+    tl = s->lines - 2 * k;
+
+    synth_default(&sp, FT_FILM_NEGATIVE);
+    sp.px = s->px;
+    sp.lines = tl;
+    sp.y_mm_per_line = 25.4 / w->ppi;
+    sp.x_mm_per_px = xm1 - xm0;
+    sp.x_mm0 = xm0;
+    sp.film_y0 = -50;
+    sp.film_y1 = 1000;
+    sp.blur_mm = 0.05;
+    sp.grain = 0.02;
+    sp.open_outside = w->open;
+    if (w->open)
+        sp.film_y0 = sp.film_y1 = 2000;    /* no film in the window */
+    /* synth row l is holder (y + l + k) / ppi */
+    off = (s->y + k) * 25.4 / w->ppi;
+    for (i = 0; i < w->nfr; i++)
+        synth_add(&sp, w->fy0[i] - off, w->flen[i], 0);
+    for (i = 0; i < w->npatch && i < 4; i++) {
+        sp.patch[i].y0 = w->patch[i].y0 - off;
+        sp.patch[i].y1 = w->patch[i].y1 - off;
+        sp.patch[i].x0 = w->patch[i].x0;
+        sp.patch[i].x1 = w->patch[i].x1;
+    }
+    sp.npatch = w->npatch;
+    memcpy(s->base, sp.base, sizeof s->base);
+    t = synth_preview(&sp);
+    s->raw = malloc((size_t)s->lines * s->px * 3 * sizeof *s->raw);
+    s->cal_lines = 250;
+    s->cal = malloc((size_t)s->cal_lines * s->px * 3 * sizeof *s->cal);
+    if (!t || !s->raw || !s->cal) {
+        free(t);
+        free(s->raw);
+        free(s->cal);
+        s->raw = s->cal = NULL;
+        return;
+    }
+    for (l = 0; l < s->lines; l++)
+        for (c = 0; c < s->px; c++)
+            for (i = 0; i < 3; i++) {
+                int src = l - (i == 0 ? 2 * k : i == 1 ? k : 0);
+                float v;
+                if (src < 0) src = 0;
+                if (src >= tl) src = tl - 1;
+                v = t[((size_t)src * s->px + c) * 3 + i];
+                if (v > 1.2f) v = 1.2f;
+                s->raw[((size_t)l * s->px + c) * 3 + i] =
+                    (unsigned short)(300 + v * 4700 + 0.5f);
+            }
+    for (l = 0; l < s->cal_lines; l++)
+        for (c = 0; c < s->px * 3; c++)
+            s->cal[(size_t)l * s->px * 3 + c] = l < 200 ? 300 : 5000;
+    free(t);
+}
+
+void synth_window_free(synth_win_scan *s)
+{
+    free(s->raw);
+    free(s->cal);
+    s->raw = s->cal = NULL;
 }
