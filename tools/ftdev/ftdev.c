@@ -5,6 +5,8 @@
  *   ftdev <scan.raw> [-f dng,png,positive] [-o base] [-d defects.txt]
  *         [--no-crop] [--film neg|slide|bw] [--base r,g,b] [--exposure s]
  *         [--tint r,g,b] [--grade g] [--curve preset|"x,y x,y ..."]
+ *   ftdev detail <pass.raw> --job <file.job> ...   (detail.c)
+ *   ftdev bench [...]                               (detail.c)
  *   ftdev cut <window.raw> [-o base] [-d defects.txt]
  *   ftdev export <frame.dng> [render flags] [--space srgb|p3|adobe]
  *         [--gamut soft|clip] [--crop x,y,w,h] [--long-edge px]
@@ -31,8 +33,10 @@
  * hints learned from its frames.
  *
  * Build: make (Linux/macOS), or with mingw:
- *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c render_flags.c
- *       share.c ..\..\libft\ft_jpeg.c <every other libft .c> -ljpeg -lm
+ *   gcc -std=c99 -O2 -I..\..\libft -I..\detail -o ftdev.exe ftdev.c
+ *       detail.c util.c render_flags.c share.c ..\detail\ring.c
+ *       ..\detail\worker.c ..\..\libft\ft_jpeg.c <every other libft .c>
+ *       -ljpeg -lm
  */
 #include <math.h>
 #include <stdio.h>
@@ -43,8 +47,13 @@
 #include "ft_noise_model.h"
 #include "ft_out.h"
 #include "ft_render.h"
+#include "ft_render_auto.h"
 #include "render_flags.h"
 #include "share.h"
+#include "util.h"
+
+int ftdev_detail(int argc, char **argv);    /* detail.c */
+int ftdev_bench(int argc, char **argv);
 
 #define MAX_FORMATS 8
 
@@ -71,42 +80,6 @@ void *ftdev_load(const char *path, long *size)
     return buf;
 }
 
-/* value of key in a key=value text, or def */
-static long meta_long(const char *meta, const char *key, long def)
-{
-    size_t k = strlen(key);
-    const char *p = meta;
-    while (p && *p) {
-        if (strncmp(p, key, k) == 0 && p[k] == '=')
-            return strtol(p + k + 1, NULL, 10);
-        p = strchr(p, '\n');
-        if (p)
-            p++;
-    }
-    return def;
-}
-
-static int meta_str(const char *meta, const char *key, char *out, size_t cap)
-{
-    size_t k = strlen(key), n = 0;
-    const char *p = meta;
-    while (p && *p) {
-        if (strncmp(p, key, k) == 0 && p[k] == '=') {
-            p += k + 1;
-            while (p[n] && p[n] != '\n' && p[n] != '\r' && n + 1 < cap) {
-                out[n] = p[n];
-                n++;
-            }
-            out[n] = 0;
-            return 1;
-        }
-        p = strchr(p, '\n');
-        if (p)
-            p++;
-    }
-    return 0;
-}
-
 static void usage(void)
 {
     const ft_writer *w;
@@ -116,6 +89,10 @@ static void usage(void)
                     "             [--film neg|slide|bw] [--base r,g,b] "
                     "[--exposure stops] [--tint r,g,b]\n"
                     "             [--grade g] [--curve preset|\"x,y x,y ...\"]\n"
+                    "       ftdev detail <pass.raw> --job <file.job> ... "
+                    "(a kept detailed-scan pass)\n"
+                    "       ftdev bench [...] (the detailed-scan worker's "
+                    "speed here)\n"
                     "       ftdev cut <window.raw> [-o base] [-d defects.txt]\n"
                     "       ftdev export <frame.dng> [render flags] "
                     "[--space srgb|p3|adobe]\n"
@@ -152,6 +129,10 @@ int main(int argc, char **argv)
     ft_image im;
     ft_err e;
 
+    if (argc > 1 && strcmp(argv[1], "detail") == 0)
+        return ftdev_detail(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "bench") == 0)
+        return ftdev_bench(argc - 2, argv + 2);
     if (argc > 1 && strcmp(argv[1], "cut") == 0)
         return ftdev_cut(argc - 2, argv + 2);
     if (argc > 1 && strcmp(argv[1], "export") == 0)

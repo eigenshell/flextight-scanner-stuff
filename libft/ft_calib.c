@@ -5,24 +5,16 @@
 #include "ft_calib.h"
 #include "ft_geom.h"
 
-int ft_split_cal(const unsigned short *cal, int lines, int px,
-                 float *dark, float *white, ft_err *e)
+/* each line dark (-1), white (1) or neither (0) by its mean level: within
+ * FT_CAL_BAND of the range from the darkest or brightest line mean */
+static int classify(const unsigned short *cal, int lines, long n3,
+                    signed char *cls)
 {
-    long n3 = (long)px * 3, i;
-    double *lm, *sd, *sw;
-    double lo, hi, band;
-    int l, nd = 0, nw = 0, rc = 0;
-
-    if (lines < 1 || px < 1)
-        return ft_fail(e, "calibration: bad dimensions");
-    lm = malloc(lines * sizeof *lm);
-    sd = calloc(n3, sizeof *sd);
-    sw = calloc(n3, sizeof *sw);
-
-    if (!lm || !sd || !sw) {
-        rc = ft_fail(e, "calibration: out of memory");
-        goto out;
-    }
+    double *lm = malloc(lines * sizeof *lm), lo, hi, band;
+    long i;
+    int l;
+    if (!lm)
+        return -1;
     for (l = 0; l < lines; l++) {
         double s = 0;
         for (i = 0; i < n3; i++)
@@ -35,8 +27,32 @@ int ft_split_cal(const unsigned short *cal, int lines, int px,
         if (lm[l] > hi) hi = lm[l];
     }
     band = FT_CAL_BAND * (hi - lo);
+    for (l = 0; l < lines; l++)
+        cls[l] = lm[l] < lo + band ? -1 : lm[l] > hi - band ? 1 : 0;
+    free(lm);
+    return 0;
+}
+
+int ft_split_cal(const unsigned short *cal, int lines, int px,
+                 float *dark, float *white, ft_err *e)
+{
+    long n3 = (long)px * 3, i;
+    double *sd, *sw;
+    signed char *cls;
+    int l, nd = 0, nw = 0, rc = 0;
+
+    if (lines < 1 || px < 1)
+        return ft_fail(e, "calibration: bad dimensions");
+    cls = malloc((size_t)lines);
+    sd = calloc(n3, sizeof *sd);
+    sw = calloc(n3, sizeof *sw);
+
+    if (!cls || !sd || !sw || classify(cal, lines, n3, cls)) {
+        rc = ft_fail(e, "calibration: out of memory");
+        goto out;
+    }
     for (l = 0; l < lines; l++) {
-        double *acc = lm[l] < lo + band ? sd : lm[l] > hi - band ? sw : NULL;
+        double *acc = cls[l] < 0 ? sd : cls[l] > 0 ? sw : NULL;
         if (!acc)
             continue;
         if (acc == sd) nd++; else nw++;
@@ -52,9 +68,54 @@ int ft_split_cal(const unsigned short *cal, int lines, int px,
         white[i] = (float)(sw[i] / nw);
     }
 out:
-    free(lm);
+    free(cls);
     free(sd);
     free(sw);
+    return rc;
+}
+
+int ft_white_var(const unsigned short *cal, int lines, int px,
+                 double var[3], ft_err *e)
+{
+    long n3 = (long)px * 3, i;
+    float *dark = malloc(n3 * sizeof *dark), *white = malloc(n3 * sizeof *white);
+    double *ss = calloc(n3, sizeof *ss), sum[3] = { 0, 0, 0 };
+    signed char *cls = malloc(lines > 0 ? (size_t)lines : 1);
+    int l, nw = 0, c, rc = -1;
+
+    if (!dark || !white || !ss || !cls) {
+        ft_fail(e, "calibration: out of memory");
+        goto out;
+    }
+    if (ft_split_cal(cal, lines, px, dark, white, e))
+        goto out;
+    if (classify(cal, lines, n3, cls)) {
+        ft_fail(e, "calibration: out of memory");
+        goto out;
+    }
+    for (l = 0; l < lines; l++) {
+        if (cls[l] <= 0)
+            continue;
+        nw++;
+        for (i = 0; i < n3; i++) {
+            double d = cal[l * n3 + i] - white[i];
+            ss[i] += d * d;
+        }
+    }
+    for (i = 0; i < n3; i++) {
+        double span = white[i] - dark[i];
+        if (span < 1)
+            span = 1;
+        sum[i % 3] += ss[i] / nw / (span * span);
+    }
+    for (c = 0; c < 3; c++)
+        var[c] = sum[c] / px;
+    rc = 0;
+out:
+    free(dark);
+    free(white);
+    free(ss);
+    free(cls);
     return rc;
 }
 

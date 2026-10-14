@@ -20,9 +20,19 @@ typedef struct {
     double tilt_deg;
     int sprockets, straighten, confidence_low, done;
     long focus_offset;            /* per-frame mode: measured offset */
+    int pass;                     /* detailed scan: its pass (1..), 0 none */
     int group;                    /* share job: the window it scans in
                                      (1..); 0 = not in a share job */
 } ft_job_frame;
+
+/* Detailed scans (sub-project 2b): what the passes write */
+typedef enum { FT_DETAIL_NONE, FT_DETAIL_NEG, FT_DETAIL_POS } ft_detail_out;
+typedef enum { FT_DFMT_DNG, FT_DFMT_TIFF } ft_detail_fmt;
+typedef enum { FT_BW_OFF, FT_BW_MONO, FT_BW_RGB } ft_detail_bw;
+#define FT_RING_MB_DEFAULT 64
+#define FT_RING_MB_MIN 8
+#define FT_RING_MB_MAX 1024     /* a 32-bit process (ftpoc on XP) has
+                                   2 GB of address space in all */
 
 typedef struct {
     char holder[16];
@@ -33,6 +43,13 @@ typedef struct {
     double film_base[3];          /* D of unexposed film per channel, from
                                      the preview (ft_layout.base): the
                                      negative's base or the slide's black */
+    /* detailed scan; written only when detail != FT_DETAIL_NONE */
+    ft_detail_out detail;         /* neg: digital negative, pos: archive
+                                     positive (density, ft_density.h) */
+    ft_detail_fmt detail_fmt;     /* neg only: DNG or TIFF */
+    ft_detail_bw detail_bw;       /* pos only: off (colour), mono, rgb */
+    int keep_raw;                 /* also write the undeveloped lines */
+    int ring_mb;                  /* RAM between the scanner and the disk */
     double share;                 /* scan to share: target px on each
                                      frame's long side (ft_share.h); 0 =
                                      an ordinary job, one scan per frame */
@@ -46,5 +63,8 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e);
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e);
 /* the bin a frame scans with: its own, or the fastest for its ppi */
 int ft_job_bin(const ft_job_frame *f);
+/* detailed scan: the included frames of pass `pass` not yet done; 0 =
+ * nothing to scan in it (finished, or no frame) */
+int ft_job_pass_todo(const ft_job *j, int pass);
 
 #endif

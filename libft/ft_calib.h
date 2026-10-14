@@ -17,6 +17,11 @@
  * extreme) */
 int ft_split_cal(const unsigned short *cal, int lines, int px,
                  float *dark, float *white, ft_err *e);
+/* per-channel noise of the white reference in transmittance units: each
+ * pixel's variance over the white lines / (white - dark)^2, averaged over
+ * the line (the weights of a mono b/w file, ft_density.h) */
+int ft_white_var(const unsigned short *cal, int lines, int px,
+                 double var[3], ft_err *e);
 /* transmittance 0..1 into t (lines*px*3 floats) */
 void ft_flatfield(const unsigned short *raw, int lines, int px,
                   const float *dark, const float *white, float *t);

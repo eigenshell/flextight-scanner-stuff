@@ -161,5 +161,24 @@ int main(void)
         CHECK(cnt[2] == 1 && pix[2][0] == 2000);
     }
     CHECK(ft_split_cal(cal, 0, PX, dark, white, &e) == -1);
+
+    /* white-reference noise: white lines alternate +-a per channel
+     * (a = 10, 20, 40 DN) over a 4000 DN span -> variance (a / 4000)^2 */
+    {
+        enum { WP = 3, WL = 250 };
+        static unsigned short c2[WL * WP * 3];
+        static const int a[3] = { 10, 20, 40 };
+        double var[3];
+        int l2, k;
+        for (l2 = 0; l2 < WL; l2++)
+            for (k = 0; k < WP * 3; k++)
+                c2[l2 * WP * 3 + k] = (unsigned short)(l2 < 200 ? 300
+                    : 4300 + (l2 % 2 ? a[k % 3] : -a[k % 3]));
+        CHECK(ft_white_var(c2, WL, WP, var, &e) == 0);
+        CHECK_NEAR(var[0], 100.0 / 16e6, 1e-12);
+        CHECK_NEAR(var[1], 400.0 / 16e6, 1e-12);
+        CHECK_NEAR(var[2], 1600.0 / 16e6, 1e-12);
+        CHECK(ft_white_var(c2, 0, WP, var, &e) == -1);
+    }
     return TEST_DONE();
 }

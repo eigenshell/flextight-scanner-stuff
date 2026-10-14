@@ -33,7 +33,9 @@
 #include <limits.h>
 #include <math.h>
 #include "ft_calib.h"
+#include "ft_detail.h"
 #include "ft_detect.h"
+#include "ft_dplan.h"
 #include "ft_focus.h"
 #include "ft_geom.h"
 #include "ft_holder.h"
@@ -45,6 +47,8 @@
 #include "ft_share.h"
 #include "ft_share_cut.h"
 #include "ft_upload.h"
+#include "ring.h"
+#include "worker.h"
 
 #define IOCTL_SRB 0x190012
 
@@ -52,6 +56,24 @@
 #define SRB_DIR_IN  0x40        /* device -> host */
 
 #define TIMEOUT_MS  5000
+
+/* A detailed-scan pass in progress (sub-project 2b): cmd_scan collects
+ * the calibration lines in RAM, then starts the worker (ft_detail behind
+ * a ring) and floods the image lines into the ring instead of a file.
+ * NULL for every other scan. */
+static struct detail_run {
+    ft_detail_opts o;
+    ft_detail *d;
+    ring *r;
+    pass_worker w;
+    int ring_mb;
+    unsigned short *cal;           /* FT_CAL_LINES lines */
+    size_t cal_n, cal_cap;         /* bytes */
+    int phase;                     /* 0: calibration lines, 1: image */
+} *g_detail;
+
+static int detail_put(const BYTE *p, DWORD n);
+static int detail_start(const char *out);
 
 /* ---------------------------------------------------------------- transport */
 
@@ -1175,6 +1197,7 @@ static long read_flood(long n, WORD blklen, FILE *f)
                     shorts++;
                     short_bytes += got;
                     if (f && got && fwrite(q->buf, 1, got, f) != got) err = 1;
+                    if (!f && got && detail_put(q->buf, got)) err = 1;
                     if (got)
                         printf("\nflood read %ld: partial, %lu bytes\n",
                                done, (unsigned long)got);
@@ -1185,6 +1208,7 @@ static long read_flood(long n, WORD blklen, FILE *f)
                 }
             } else if (!err) {
                 if (f && fwrite(q->buf, 1, got, f) != got) err = 1;
+                else if (!f && detail_put(q->buf, got)) err = 1;
                 else kept++;
                 last_full = GetTickCount();
             }
@@ -1348,28 +1372,33 @@ static int cmd_scan(const struct preset *p, long y, long keep,
     /* Calibration: count FULL lines — at high resolution many reads come
      * back empty (FlexColor issues ~300 reads for the 200 at 2000 ppi). */
     sprintf(meta, "%s.cal", out);
-    fc = fopen(meta, "wb");
-    if (!fc) { perror(meta); send_end(p); return 1; }
+    fc = g_detail ? NULL : fopen(meta, "wb");
+    if (!fc && !g_detail) { perror(meta); send_end(p); return 1; }
     printf("calibration: 200 lines\n");
     got = read_flood(200, blklen, fc);
     if (got < 200) {
         printf("calibration got %ld/200 lines; stopping\n", got);
-        fclose(fc);
+        if (fc) fclose(fc);
         send_end(p);
         return 1;
     }
     /* carriage move between the batches (~550 ms); reading during it
      * means the scan never starts */
     if (wait_move(1000, 30000, "between calibration batches")) {
-        fclose(fc);
+        if (fc) fclose(fc);
         send_end(p);
         return 1;
     }
     printf("calibration: 50 lines\n");
     got = read_flood(50, blklen, fc);
-    fclose(fc);
+    if (fc) fclose(fc);
     if (got < 50) {
         printf("calibration got %ld/50 lines; stopping\n", got);
+        send_end(p);
+        return 1;
+    }
+    /* detailed pass: the worker starts while the carriage moves */
+    if (g_detail && detail_start(out)) {
         send_end(p);
         return 1;
     }
@@ -1405,6 +1434,14 @@ static int cmd_scan(const struct preset *p, long y, long keep,
         return 1;
     }
 
+    if (g_detail) {
+        printf("reading %ld lines -> pass worker\n", keep);
+        got = read_flood(keep, blklen, NULL);
+        printf("\nread %ld x %u B%s\n", got, blklen,
+               got == keep ? "" : " (INCOMPLETE)");
+        send_end(p);
+        return got == keep ? 0 : 1;
+    }
     printf("reading %ld lines -> %s\n", keep, out);
     f = fopen(out, "wb");
     if (!f) { perror(out); send_end(p); return 1; }
@@ -2039,6 +2076,9 @@ static int cmd_crop(int argc, char **argv)
 #define FB_NO_PEAK 2
 #define FB_MIN_CONTRAST 0.03    /* (max - min) / max below this: flat */
 
+/* the bin focus crops use; 0: the fastest for the ppi */
+static int g_focus_bin;
+
 static int focus_bracket(double ppi, double xc, double yc, double w,
                          long centre, long step, int n, int max_samples,
                          int ccd_only, long *best)
@@ -2046,7 +2086,8 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
     const long lim = ccd_only ? FT_CAL_BRACKET_MAX : FT_BRACKET_MAX;
     long off[FB_SAMPLES];
     double sh[FB_SAMPLES];
-    int ns = 0, tries, i, k, m, bin = ft_bin_for_ppi(ppi), dir = 0;
+    int ns = 0, tries, i, k, m, dir = 0;
+    int bin = g_focus_bin ? g_focus_bin : ft_bin_for_ppi(ppi);
     long half, refused_lo = LONG_MAX, refused_hi = LONG_MIN;
 
     if (n < 3 || n > max_samples || max_samples > FB_SAMPLES || step <= 0 ||
@@ -2085,6 +2126,7 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
             }
             memset(&q, 0, sizeof q);
             q.ppi = ppi;
+            q.bin = g_focus_bin;
             q.x = xc - w / 2;
             q.y = yc - 0.5;
             q.w = w;
@@ -2531,6 +2573,9 @@ static void warn_job(const ft_job *j, const char *path)
         printf("  %s\n", all.msg);
 }
 
+static int detail_plan(const float *t, int lines, int px, const ft_axes *ax,
+                       double ppi, const char *select, ft_job *j);
+
 /* frames --share: pick the frames, price every bin (ft_share.h), keep
  * the most light, write the plan into the job. Focus: the curve as is
  * (offset 0). The share optics have the deepest depth of field, and the
@@ -2600,6 +2645,9 @@ static int cmd_frames(int argc, char **argv)
     ft_err e;
     float *t;
     FILE *f;
+    /* detailed scans: --detail neg|pos and its options */
+    int detail = FT_DETAIL_NONE, dfmt = FT_DFMT_DNG, dbw = FT_BW_OFF;
+    int keep_raw = 0, ring_mb = FT_RING_MB_DEFAULT, preview_set = 0;
 
     for (i = 0; i < argc; i += 2) {
         if (i + 1 >= argc) {
@@ -2627,11 +2675,54 @@ static int cmd_frames(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--preview") == 0) {
             pm = ft_preview_find(argv[i + 1]);
+            preview_set = 1;
             if (!pm) {
                 fprintf(stderr, "frames: --preview standard|1000|1500\n");
                 return 2;
             }
         }
+        else if (strcmp(argv[i], "--detail") == 0) {
+            if (strcmp(argv[i + 1], "neg") == 0) detail = FT_DETAIL_NEG;
+            else if (strcmp(argv[i + 1], "pos") == 0) detail = FT_DETAIL_POS;
+            else {
+                fprintf(stderr, "frames: --detail neg|pos\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--fmt") == 0) {
+            if (strcmp(argv[i + 1], "dng") == 0) dfmt = FT_DFMT_DNG;
+            else if (strcmp(argv[i + 1], "tiff") == 0) dfmt = FT_DFMT_TIFF;
+            else {
+                fprintf(stderr, "frames: --fmt dng|tiff\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--bw") == 0) {
+            if (strcmp(argv[i + 1], "off") == 0) dbw = FT_BW_OFF;
+            else if (strcmp(argv[i + 1], "mono") == 0) dbw = FT_BW_MONO;
+            else if (strcmp(argv[i + 1], "rgb") == 0) dbw = FT_BW_RGB;
+            else {
+                fprintf(stderr, "frames: --bw off|mono|rgb\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--keep-raw") == 0) {
+            if (strcmp(argv[i + 1], "yes") == 0) keep_raw = 1;
+            else if (strcmp(argv[i + 1], "no") == 0) keep_raw = 0;
+            else {
+                fprintf(stderr, "frames: --keep-raw yes|no\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--ring-mb") == 0) {
+            ring_mb = atoi(argv[i + 1]);
+            if (ring_mb < FT_RING_MB_MIN || ring_mb > FT_RING_MB_MAX) {
+                fprintf(stderr, "frames: --ring-mb %d..%d\n", FT_RING_MB_MIN,
+                        FT_RING_MB_MAX);
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--select") == 0) select = argv[i + 1];
         else if (strcmp(argv[i], "-o") == 0) base = argv[i + 1];
         else if (strcmp(argv[i], "--share") == 0) {
             share = atof(argv[i + 1]);
@@ -2641,7 +2732,6 @@ static int cmd_frames(int argc, char **argv)
                 return 2;
             }
         }
-        else if (strcmp(argv[i], "--select") == 0) select = argv[i + 1];
         else if (strcmp(argv[i], "--hf-half-res") == 0) {
             if (strcmp(argv[i + 1], "on") == 0) hf_half_res = 1;
             else if (strcmp(argv[i + 1], "off") == 0) hf_half_res = 0;
@@ -2655,13 +2745,48 @@ static int cmd_frames(int argc, char **argv)
             return 2;
         }
     }
-    if (!(share > 0) && (select || hf_half_res >= 0)) {
-        fprintf(stderr, "frames: --select and --hf-half-res need --share\n");
+    if (hf_half_res >= 0 && !(share > 0)) {
+        fprintf(stderr, "frames: --hf-half-res needs --share\n");
+        return 2;
+    }
+    if (detail == FT_DETAIL_NONE && !(share > 0) && select) {
+        fprintf(stderr, "frames: --select needs --detail neg|pos or --share\n");
         return 2;
     }
     if (!ft_ppi_supported(ppi)) {
         fprintf(stderr, "frames: ppi %g not supported\n", ppi);
         return 2;
+    }
+    if (detail == FT_DETAIL_NONE &&
+        (dbw != FT_BW_OFF || keep_raw || dfmt != FT_DFMT_DNG)) {
+        fprintf(stderr, "frames: --fmt/--bw/--keep-raw need "
+                        "--detail neg|pos\n");
+        return 2;
+    }
+    if (detail != FT_DETAIL_NONE) {
+        /* the preview at the scan's own optics: same light, same Dmax */
+        if (ppi != 3150 && ppi != 6300) {
+            fprintf(stderr, "frames: --detail scans at --ppi 3150 or 6300\n");
+            return 2;
+        }
+        if (preview_set) {
+            fprintf(stderr, "frames: --detail previews at the scan's optics "
+                            "(no --preview)\n");
+            return 2;
+        }
+        if (detail == FT_DETAIL_POS && (film != FT_FILM_NEGATIVE ||
+                                        dfmt != FT_DFMT_DNG)) {
+            fprintf(stderr, "frames: --detail pos is for negatives and "
+                            "always TIFF (no --fmt)\n");
+            return 2;
+        }
+        if (detail == FT_DETAIL_NEG && dbw != FT_BW_OFF) {
+            fprintf(stderr, "frames: --bw is for --detail pos\n");
+            return 2;
+        }
+        if (detail == FT_DETAIL_POS)
+            dfmt = FT_DFMT_TIFF;
+        pm = ft_preview_find(ppi == 6300 ? "standard" : "o3150");
     }
     if (!h) {
         fprintf(stderr, "frames: no 24x217 holder geometry\n");
@@ -2725,7 +2850,18 @@ static int cmd_frames(int argc, char **argv)
            L.has_holes ? "rebate between the holes"
                        : "estimated: no hole rows, extreme film pixels");
 
-    if (share > 0) {
+    if (detail != FT_DETAIL_NONE) {
+        j.detail = (ft_detail_out)detail;
+        j.detail_fmt = (ft_detail_fmt)dfmt;
+        j.detail_bw = (ft_detail_bw)dbw;
+        j.keep_raw = keep_raw;
+        j.ring_mb = ring_mb;
+        if (detail_plan(t, lines, px, &ax, ppi, select, &j)) {
+            free(t);
+            return 1;
+        }
+        focus_failed = 0;
+    } else if (share > 0) {
         if (plan_share(&j, h, share, hf_half_res > 0, select)) {
             free(t);
             return 2;
@@ -2758,6 +2894,12 @@ static int cmd_frames(int argc, char **argv)
         print_options(&j);
     printf("\nwrote %s.job and %s.png; edit the job, then: ftpoc scan --job %s.job\n",
            base, base, base);
+    if (detail != FT_DETAIL_NONE)
+        printf("detailed scan: %s, %g ppi; scan --job writes %s_frameNN%s\n",
+               detail == FT_DETAIL_NEG ? "digital negatives" :
+               "archive positives", ppi, base,
+               detail == FT_DETAIL_NEG && dfmt == FT_DFMT_DNG ? ".dng"
+                                                              : ".tif");
     if (focus_failed)
         printf("\n*** FOCUS NOT CHECKED: a focus crop %s. The job uses the\n"
                "*** focus curve as is (shifted, offset 0); check the scanner and\n"
@@ -2908,6 +3050,408 @@ static void write_crop(const char *out, const ft_job *j,
     }
     if (!m)
         fprintf(stderr, "warning: cannot append the crop to %s\n", meta);
+}
+
+/* ------------------------------------------------ detailed scans (2b) */
+
+/* flood bytes of a detailed pass: calibration lines to RAM, image lines
+ * to the ring (never blocking: a full ring stops the scan) */
+static int detail_put(const BYTE *p, DWORD n)
+{
+    struct detail_run *r = g_detail;
+    if (!r)
+        return 0;
+    if (r->phase == 0) {
+        size_t take = n;
+        if (take > r->cal_cap - r->cal_n)
+            take = r->cal_cap - r->cal_n;
+        memcpy((BYTE *)r->cal + r->cal_n, p, take);
+        r->cal_n += take;
+        return 0;
+    }
+    if (ring_write(r->r, p, n) == 0)
+        return 0;
+    printf("\n%s; stopping the scan\n", ring_failed(r->r)
+           ? "the pass worker failed"
+           : "RING FULL: the disk fell behind the scanner (a larger "
+             "ring_mb, a faster card, or a two-stage scan)");
+    return -1;
+}
+
+/* after the calibration lines: open the pass (its files are created
+ * here) and the worker thread behind the ring scan_detail allocated */
+static int detail_start(const char *out)
+{
+    struct detail_run *r = g_detail;
+    char fp[300];
+    char *faul;
+    long nfaul = 0;
+    ft_err e;
+
+    if (r->cal_n < r->cal_cap) {
+        printf("detail: %lu of %lu calibration bytes\n",
+               (unsigned long)r->cal_n, (unsigned long)r->cal_cap);
+        return 1;
+    }
+    snprintf(fp, sizeof fp, "%s.faul", out);
+    faul = load_file(fp, &nfaul);
+    r->d = ft_detail_open(&r->o, r->cal, FT_CAL_LINES, faul,
+                          (size_t)(faul ? nfaul : 0), &e);
+    free(faul);
+    if (!r->d) {
+        printf("detail: %s\n", e.msg);
+        return 1;
+    }
+    memset(&r->w, 0, sizeof r->w);
+    r->w.r = r->r;
+    r->w.d = r->d;
+    if (pass_worker_start(&r->w)) {
+        printf("detail: cannot start the worker thread\n");
+        ft_detail_abort(r->d);
+        r->d = NULL;
+        return 1;
+    }
+    r->phase = 1;
+    return 0;
+}
+
+/* the pass's scan window: its frames' boxes + FT_DETAIL_MARGIN_MM along,
+ * the whole reach of the bin-1 optics across (detection sees the hole
+ * rows), and the middle of their focus offsets. -1 if no frame. */
+static int detail_window(const ft_job *j, int pass, const ft_holder *h,
+                         struct crop_req *q, ft_dscan *ds)
+{
+    double y0 = 1e9, y1 = -1e9, lo, hi, ppi = 0;
+    long flo = LONG_MAX, fhi = LONG_MIN;
+    int i, n = 0;
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        if (!f->include || f->pass != pass)
+            continue;
+        if (f->y0 < y0) y0 = f->y0;
+        if (f->y0 + f->len > y1) y1 = f->y0 + f->len;
+        if (f->focus_offset < flo) flo = f->focus_offset;
+        if (f->focus_offset > fhi) fhi = f->focus_offset;
+        ppi = f->ppi;
+        n++;
+    }
+    if (!n)
+        return -1;
+    y0 -= FT_DETAIL_MARGIN_MM;
+    y1 += FT_DETAIL_MARGIN_MM;
+    if (y0 < 0) y0 = 0;
+    if (y1 > h->scan_len_mm) y1 = h->scan_len_mm;
+    ft_dscan_reach(ppi, FT_DETAIL_BIN, &lo, &hi);
+    lo += JOB_EDGE;
+    hi -= JOB_EDGE;
+    if (lo < JOB_EDGE) lo = JOB_EDGE;
+    if (hi > CROP_X_MAX - JOB_EDGE) hi = CROP_X_MAX - JOB_EDGE;
+    if (hi > h->scan_width_mm) hi = h->scan_width_mm;
+    memset(q, 0, sizeof *q);
+    q->ppi = ppi;
+    q->bin = FT_DETAIL_BIN;
+    q->x = lo;
+    q->w = hi - lo;
+    q->y = y0;
+    q->h = y1 - y0;
+    q->ccd = q->optic = -1;
+    q->focus_offset = ft_dplan_mid(flo, fhi);
+    q->hold = 3000;
+    ft_dscan_for(ppi, FT_DETAIL_BIN, q->x, q->w, q->y, q->h, ds);
+    return 0;
+}
+
+/* bytes the pass's frame files take */
+static double detail_bytes(const ft_job *j, int pass, const ft_dscan *ds)
+{
+    ft_tiff_kind k = ft_detail_kind(j->detail, j->detail_fmt, j->detail_bw);
+    double sum = 0;
+    int i, r[4];
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        if (!f->include || f->pass != pass)
+            continue;
+        if (ft_dscan_ranges(ds, f->y0 - FT_DETAIL_MARGIN_MM,
+                            f->y0 + f->len + FT_DETAIL_MARGIN_MM,
+                            f->x0 - FT_DETAIL_MARGIN_MM,
+                            f->x0 + f->width + FT_DETAIL_MARGIN_MM, r) == 0)
+            sum += ft_tiff_bytes(k, r[1] - r[0], r[3] - r[2]);
+    }
+    return sum;
+}
+
+/* frames --detail: a focus point on every selected frame at the scan's
+ * optics (bin 1), then the passes (ft_dplan) written into the job */
+static int detail_plan(const float *t, int lines, int px, const ft_axes *ax,
+                       double ppi, const char *select, ft_job *j)
+{
+    static ft_dframe df[FT_MAX_FRAMES];
+    static ft_dplan plan;
+    const ft_holder *h = ft_holder_find(j->holder);
+    int idx[FT_MAX_FRAMES], ok[FT_MAX_FRAMES], n = 0, i, k, p, nok = 0;
+    long meas[FT_MAX_FRAMES], med = 0;
+    double total_s = 0, total_b = 0;
+    ft_err e;
+
+    for (i = 0; i < j->nframes; i++) {
+        ft_job_frame *f = &j->f[i];
+        int sel = f->type != FT_FRAME_PARTIAL;
+        if (select && (sel = ft_dplan_selected(select, f->index, &e)) < 0) {
+            fprintf(stderr, "frames: %s\n", e.msg);
+            return -1;
+        }
+        f->include = sel;
+        f->pass = 0;
+        f->ppi = ppi;
+        f->bin = FT_DETAIL_BIN;
+        f->focus_offset = 0;
+        if (sel)
+            idx[n++] = i;
+    }
+    if (!n) {
+        fprintf(stderr, "frames: no frame selected\n");
+        return -1;
+    }
+    printf("detail focus: %d frame(s) at %g ppi, bin 1, ~%d min\n", n, ppi,
+           (n * FOCUS_N * CROP_S + 59) / 60);
+    g_focus_bin = FT_DETAIL_BIN;
+    for (k = 0; k < n; k++) {
+        int rc = focus_point(t, lines, px, ax, ppi, &j->f[idx[k]], &meas[k]);
+        if (rc < 0) {
+            g_focus_bin = 0;
+            return -1;
+        }
+        ok[k] = rc == 0;
+        nok += ok[k];
+    }
+    g_focus_bin = 0;
+    if (nok) {                  /* frames without a peak: the median */
+        long v[FT_MAX_FRAMES];
+        int m = 0, a, b;
+        for (k = 0; k < n; k++)
+            if (ok[k])
+                v[m++] = meas[k];
+        for (a = 1; a < m; a++)
+            for (b = a; b > 0 && v[b - 1] > v[b]; b--) {
+                long tmp = v[b];
+                v[b] = v[b - 1];
+                v[b - 1] = tmp;
+            }
+        med = m % 2 ? v[m / 2] : ft_dplan_mid(v[m / 2 - 1], v[m / 2]);
+    }
+    for (k = 0; k < n; k++) {
+        const ft_job_frame *f = &j->f[idx[k]];
+        if (!ok[k])
+            printf("WARNING: frame %d: no focus peak; using %ld (the median "
+                   "of the others)\n", f->index, med);
+        df[k].index = f->index;
+        df[k].y0 = f->y0;
+        df[k].len = f->len;
+        df[k].focus = ok[k] ? meas[k] : med;
+    }
+    if (ft_dplan_make(df, n, ppi, h->scan_len_mm, FT_DETAIL_DOF_SPAN, &plan,
+                      &e)) {
+        fprintf(stderr, "frames: %s\n", e.msg);
+        return -1;
+    }
+    j->focus = FT_FOCUS_PER_FRAME;
+    j->focus_offset = 0;
+    printf("\ndetailed scan: %d pass(es)\n", plan.npass);
+    for (p = 0; p < plan.npass; p++) {
+        const ft_dpass *ps = &plan.p[p];
+        struct crop_req q;
+        ft_dscan ds;
+        double b;
+        for (k = ps->first; k <= ps->last; k++) {
+            j->f[idx[k]].pass = p + 1;
+            j->f[idx[k]].focus_offset = df[k].focus;
+        }
+        detail_window(j, p + 1, h, &q, &ds);
+        b = detail_bytes(j, p + 1, &ds);
+        printf("  pass %d: frames %d..%d, %.1f..%.1f mm, focus %+ld, ~%.0f s, "
+               "%.0f MB\n", p + 1, df[ps->first].index, df[ps->last].index,
+               ps->y0, ps->y0 + ps->len, ps->focus, ps->seconds, b / 1048576);
+        total_s += ps->seconds;
+        total_b += b;
+    }
+    printf("  total ~%.0f min, %.0f MB\n", total_s / 60, total_b / 1048576);
+    return 0;
+}
+
+/* scan --job for a detailed scan: one scan per pass, developed and
+ * written while it arrives. Every pass is checked and the disk's free
+ * space with it before the scanner moves. */
+static int scan_detail(ft_job *j, const char *path, const char *jobbase,
+                       const ft_holder *h)
+{
+    static struct detail_run run;
+    static ft_detail_result res;
+    static ft_image meta;
+    int maxp = 0, npass = 0, p, i, k;
+    double need = 0, secs = 0;
+    ULARGE_INTEGER avail;
+    char dir[260];
+
+    for (i = 0; i < j->nframes; i++)
+        if (j->f[i].include && !j->f[i].done && j->f[i].pass > maxp)
+            maxp = j->f[i].pass;
+    for (p = 1; p <= maxp; p++) {
+        struct crop_req q;
+        ft_dscan ds;
+        long ccd, optic;
+        if (!ft_job_pass_todo(j, p) || detail_window(j, p, h, &q, &ds))
+            continue;
+        npass++;
+        if (crop_check(&q, &ccd, &optic)) {
+            printf("pass %d: REFUSED (reason above); nothing scanned\n", p);
+            return 1;
+        }
+        need += detail_bytes(j, p, &ds);
+        secs += ft_scan_seconds(q.ppi, q.bin, q.h);
+    }
+    if (!maxp) {
+        printf("\nnothing to scan (every included frame is done)\n");
+        return 0;
+    }
+    snprintf(dir, sizeof dir, "%s", jobbase);
+    for (k = (int)strlen(dir); k > 0 && dir[k - 1] != '/' && dir[k - 1] != '\\';
+         k--)
+        ;
+    dir[k] = 0;
+    if (GetDiskFreeSpaceExA(k ? dir : NULL, &avail, NULL, NULL)) {
+        double freeb = (double)avail.QuadPart;
+        printf("%s: %d pass(es), ~%.0f min, %.0f MB of files, %.0f MB free\n",
+               path, npass, secs / 60, need / 1048576, freeb / 1048576);
+        if (freeb < need * 1.05) {
+            printf("not enough free space (outputs + 5 %%); nothing "
+                   "scanned\n");
+            return 1;
+        }
+    } else {
+        printf("WARNING: free space unknown (GLE=%lu)\n", GetLastError());
+    }
+
+    ft_image_init(&meta);
+    g_lamp = 255;
+    for (p = 1; p <= maxp && !g_abort; p++) {
+        struct crop_req q;
+        ft_dscan ds;
+        long ccd, optic;
+        char out[300], report[256];
+        double t0;
+        int rc, n = 0;
+        ft_err e;
+
+        if (!ft_job_pass_todo(j, p) || detail_window(j, p, h, &q, &ds))
+            continue;
+        memset(&run, 0, sizeof run);
+        run.o.scan = ds;
+        run.o.film = j->film;
+        run.o.out = j->detail;
+        run.o.fmt = j->detail_fmt;
+        run.o.bw = j->detail_bw;
+        memcpy(run.o.film_base, j->film_base, sizeof run.o.film_base);
+        run.o.margin_mm = FT_DETAIL_MARGIN_MM;
+        run.o.holder = h;
+        run.o.meta = &meta;
+        run.o.base = jobbase;
+        run.o.pass = p;
+        run.o.focus = q.focus_offset;
+        run.o.keep_raw = j->keep_raw;
+        for (i = 0; i < j->nframes; i++) {
+            const ft_job_frame *f = &j->f[i];
+            if (!f->include || f->pass != p)
+                continue;
+            run.o.f[n].index = f->index;
+            run.o.f[n].y0 = f->y0;
+            run.o.f[n].y1 = f->y0 + f->len;
+            run.o.f[n].x0 = f->x0;
+            run.o.f[n].x1 = f->x0 + f->width;
+            n++;
+        }
+        run.o.nframes = n;
+        run.ring_mb = j->ring_mb;
+        run.cal_cap = (size_t)FT_CAL_LINES * ds.px * 6;
+        run.cal = malloc(run.cal_cap);
+        if (!run.cal || crop_check(&q, &ccd, &optic)) {
+            free(run.cal);
+            printf("pass %d: out of memory or refused; stopped\n", p);
+            return 1;
+        }
+        /* the ring before the scanner moves: a failed allocation now
+         * stops the job, not the scan halfway through calibration */
+        run.r = ring_open((size_t)ds.px * 6, (size_t)run.ring_mb << 20);
+        if (!run.r) {
+            free(run.cal);
+            printf("pass %d: no room for a %d MB ring (a smaller ring_mb); "
+                   "stopped\n", p, run.ring_mb);
+            return 1;
+        }
+        snprintf(out, sizeof out, "%s_pass%02d.raw", jobbase, p);
+        printf("\n=== pass %d: %d frame(s), %g ppi, bin 1, %.1f..%.1f mm "
+               "(~%.0f s), focus offset %+ld\n", p, n, q.ppi, q.y,
+               q.y + q.h, ft_scan_seconds(q.ppi, 1, q.h), q.focus_offset);
+        g_detail = &run;
+        t0 = ring_ms();
+        rc = synth_scan("detail", "detailed-scan pass", q.ppi, 1, ds.x_out,
+                        ds.y_line, ds.px, ds.lines, ccd, optic, 0, q.hold,
+                        out);
+        g_detail = NULL;
+        if (run.d) {
+            ring_end(run.r);
+            pass_worker_join(&run.w);
+            pass_worker_report(&run.w, (ring_ms() - t0) / 1000, report,
+                               sizeof report);
+            printf("pass %d: %s\n", p, report);
+        }
+        if (!j->keep_raw) {
+            char fp[320];
+            snprintf(fp, sizeof fp, "%s.faul", out);
+            remove(fp);
+        }
+        if (rc || !run.d || run.w.failed) {
+            if (run.w.failed)
+                printf("pass %d: %s\n", p, run.w.e.msg);
+            if (run.d)
+                ft_detail_abort(run.d);
+            ring_close(run.r);
+            free(run.cal);
+            save_job(path, j);
+            printf("pass %d: %s; its frames stay .partial, finished passes "
+                   "are marked done in %s\n", p,
+                   g_abort ? "interrupted" : "failed", path);
+            return 1;
+        }
+        rc = ft_detail_close(run.d, &res, &e);
+        ring_close(run.r);
+        free(run.cal);
+        for (i = 0; i < res.nframes; i++) {
+            const ft_detail_frame_result *f = &res.f[i];
+            printf("  %s: frame %d at %d,%d %dx%d px, shift %+.2f mm%s%s\n",
+                   f->path, f->index, f->box[0], f->box[1], f->box[2],
+                   f->box[3], f->shift_mm,
+                   f->estimated ? "  ESTIMATED: not found on the scan" : "",
+                   f->edge ? "  WARNING: at the file edge, frame may be "
+                             "cut (margin too small)" : "");
+        }
+        if (rc) {
+            printf("pass %d: %s\n", p, e.msg);
+            save_job(path, j);
+            return 1;
+        }
+        for (i = 0; i < j->nframes; i++)
+            if (j->f[i].include && j->f[i].pass == p)
+                j->f[i].done = 1;
+        if (save_job(path, j))
+            return 1;
+    }
+    if (g_abort) {
+        save_job(path, j);
+        printf("interrupted; finished passes are marked done in %s\n", path);
+        return 1;
+    }
+    printf("\nall passes scanned\n");
+    return 0;
 }
 
 /* A share job's window for group g: from its first frame - margin to its
@@ -3119,6 +3663,8 @@ static int cmd_scanjob(int argc, char **argv)
     h = ft_holder_find(j.holder);
     if (!h)
         return 1;                       /* validate checked it */
+    if (j.detail != FT_DETAIL_NONE)
+        return scan_detail(&j, path, jobbase, h);
     if (j.share > 0)
         return scan_share(&j, path, jobbase, h);
     /* every window through crop_scan's checks before any scanner action */
@@ -3516,6 +4062,15 @@ int main(int argc, char **argv)
             "                       min) or 1500 (~5.7 min); strip.raw keeps it\n"
             "                     prints per-frame optics options (bin: time,\n"
             "                       light, Dmax); pick one with the job's bin key\n"
+            "  frames --detail neg|pos --ppi 3150|6300 [--select 1,3-6]\n"
+            "         [--fmt dng|tiff] [--bw off|mono|rgb] [--keep-raw yes|no]\n"
+            "         [--ring-mb N] [--film neg|slide] [-h s] [-o strip]\n"
+            "                     detailed scan: preview at the scan's optics,\n"
+            "                     focus per selected frame (bin 1), passes grouped\n"
+            "                     by depth of focus -> strip.job; scan --job then\n"
+            "                     writes strip_frameNN.dng (neg: digital negative)\n"
+            "                     or .tif (pos: archive positive, density) while\n"
+            "                     the scan runs (ring of --ring-mb, default 64)\n"
             "         [--share px [--select 1,3-6] [--hf-half-res on|off]]\n"
             "                     scan to share: px on each frame's long side\n"
             "                       (2000); the selected frames (default all\n"
