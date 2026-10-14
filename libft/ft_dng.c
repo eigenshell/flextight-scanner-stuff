@@ -332,10 +332,10 @@ int ft_dng_parse(const unsigned char *b, size_t n, ft_image *im, ft_err *e)
     if (n < 8 || memcmp(b, "II*\0", 4) != 0)
         return ft_fail(e, "dng: not a little-endian TIFF");
     ifd = rd32(b + 4);
-    if (ifd < 8 || ifd + 2 > n)
+    if (ifd < 8 || ifd > n || n - ifd < 2)
         return ft_fail(e, "dng: bad IFD offset");
     cnt = rd16(b + ifd);
-    if (cnt > 200 || ifd + 2 + 12 * cnt + 4 > n)
+    if (cnt > 200 || n - ifd - 2 < 12 * cnt + 4)
         return ft_fail(e, "dng: truncated IFD");
     for (i = 0; i < cnt; i++) {
         const unsigned char *p = b + ifd + 2 + 12 * i;
@@ -389,6 +389,10 @@ int ft_dng_parse(const unsigned char *b, size_t n, ft_image *im, ft_err *e)
             o > n || l > n - o)
             return ft_fail(e, "dng: strip %lu outside the file", s);
     }
+    /* strips may overlap, so they alone do not bound w x h: the pixels
+       must fit in the file (double: no wrap on 32 bits) */
+    if ((double)w * h * 6 > (double)n)
+        return ft_fail(e, "dng: %lux%lu pixels do not fit in the file", w, h);
     if (ft_image_alloc(im, (int)w, (int)h, e))
         return -1;
     for (s = 0; s < nstrips; s++) {

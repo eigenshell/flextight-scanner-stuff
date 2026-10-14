@@ -23,6 +23,8 @@ int ft_image_alloc(ft_image *im, int w, int h, ft_err *e)
 {
     if (w < 1 || h < 1)
         return ft_fail(e, "image: bad size %dx%d", w, h);
+    if ((double)w * h * 3 > (double)((size_t)-1 / sizeof(float)))
+        return ft_fail(e, "image: %dx%d is too large", w, h);
     im->rgb = calloc((size_t)w * h * 3, sizeof *im->rgb);
     if (!im->rgb)
         return ft_fail(e, "image: out of memory for %dx%d", w, h);

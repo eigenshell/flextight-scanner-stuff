@@ -35,6 +35,58 @@ static size_t entry_of(const unsigned char *b, unsigned tag)
     return 0;
 }
 
+static void put16(unsigned char *p, unsigned long v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+}
+
+static void put32(unsigned char *p, unsigned long v)
+{
+    put16(p, v & 0xffff);
+    put16(p + 2, v >> 16);
+}
+
+/* a file whose h one-row strips all point at the same row: every strip is
+   valid alone, but w x h pixels cannot be in the file */
+static unsigned char *overlap_file(unsigned long w, unsigned long h,
+                                   size_t *n)
+{
+    unsigned long ne = 11, ifd = 8, offs = ifd + 2 + 12 * ne + 4;
+    unsigned long lens = offs + 4 * h, bps = lens + 4 * h, pix = bps + 8;
+    unsigned char *b, *p;
+    unsigned long i;
+    *n = pix + w * 6;
+    b = calloc(*n, 1);
+    CHECK(b != NULL);
+    memcpy(b, "II*\0", 4);
+    put32(b + 4, ifd);
+    put16(b + ifd, ne);
+    p = b + ifd + 2;
+#define ENT(tag, type, cnt, val) do { put16(p, tag); put16(p + 2, type); \
+    put32(p + 4, cnt); put32(p + 8, val); p += 12; } while (0)
+    ENT(256, 4, 1, w);
+    ENT(257, 4, 1, h);
+    ENT(258, 3, 3, bps);
+    ENT(259, 3, 1, 1);
+    ENT(262, 3, 1, 34892);
+    ENT(273, 4, h, offs);
+    ENT(277, 3, 1, 3);
+    ENT(278, 4, 1, 1);
+    ENT(279, 4, h, lens);
+    ENT(284, 3, 1, 1);
+    ENT(50706, 1, 4, 0x00040101);
+#undef ENT
+    put16(b + bps, 16);
+    put16(b + bps + 2, 16);
+    put16(b + bps + 4, 16);
+    for (i = 0; i < h; i++) {
+        put32(b + offs + 4 * i, pix);
+        put32(b + lens + 4 * i, w * 6);
+    }
+    return b;
+}
+
 int main(void)
 {
     const char *path = "test/dng_test_out.dng";
@@ -138,6 +190,26 @@ int main(void)
             CHECK(b.rgb == NULL);
         }
     }
+    /* overlapping strips: w x h x 6 wraps a 32-bit size_t */
+    {
+        unsigned char *ov = overlap_file(34179, 41887, &k);
+        ft_image_init(&b);
+        CHECK(ft_dng_parse(ov, k, &b, &e) == -1);
+        CHECK(strstr(e.msg, "do not fit") != NULL);
+        CHECK(b.rgb == NULL);
+        free(ov);
+    }
+    /* IFD offset near 2^32: ifd + 2 wraps a 32-bit unsigned long */
+    memcpy(bad, buf, n);
+    put32(bad + 4, 0xfffffffeUL);
+    ft_image_init(&b);
+    CHECK(ft_dng_parse(bad, n, &b, &e) == -1);
+    CHECK(b.rgb == NULL);
+    /* a size no platform can hold in floats */
+    ft_image_init(&b);
+    CHECK(ft_image_alloc(&b, 2000000000, 2000000000, &e) == -1);
+    CHECK(strstr(e.msg, "too large") != NULL);
+    CHECK(b.rgb == NULL);
     CHECK(ft_dng_read("test/no_such_file.dng", &b, &e) == -1);
     CHECK(strstr(e.msg, "no_such_file") != NULL);
     free(buf);
