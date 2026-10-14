@@ -9,6 +9,8 @@
  *   ftdev export <frame.dng> [render flags] [--space srgb|p3|adobe]
  *         [--gamut soft|clip] [--crop x,y,w,h] [--long-edge px]
  *         [--quality q] [--raw-too] [-o out.jpg]
+ *         [--edit roll.edit [--frame N]]
+ *   ftdev stock learn <roll.edit> <frame.dng>... -o <name.look> [--replace]
  *
  * Reads <scan.raw> with its .cal, .faul and .txt (ftpoc's output), runs
  * the libft pipeline (ft_develop.h) and writes one file per format to
@@ -23,6 +25,10 @@
  * the overrides. The recipe used is printed as flags to paste back.
  *
  * cut and export are the scan-to-share steps (share.c, ft_share_cut.h).
+ * export --edit renders with a roll's look and the frame's overrides
+ * (ft_look.h); every export writes how it was made to <out.jpg>.txt and
+ * the JPEG's comment. stock learn (stock.c) saves a roll's look with stock
+ * hints learned from its frames.
  *
  * Build: make (Linux/macOS), or with mingw:
  *   gcc -std=c99 -O2 -I..\..\libft -o ftdev.exe ftdev.c render_flags.c
@@ -117,7 +123,10 @@ static void usage(void)
                     "[--long-edge px] [--quality q]\n"
                     "             [--nr-sensor k] [--nr-chroma k] "
                     "[--nr-grain k] [--sharpen a]\n"
-                    "             [--raw-too] [-o out.jpg]\n"
+                    "             [--raw-too] [-o out.jpg] "
+                    "[--edit roll.edit [--frame N]]\n"
+                    "       ftdev stock learn <roll.edit> <frame.dng>... "
+                    "-o <name.look> [--replace]\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
         fprintf(stderr, "  %-8s %s\n", w->name, w->what);
@@ -147,6 +156,8 @@ int main(int argc, char **argv)
         return ftdev_cut(argc - 2, argv + 2);
     if (argc > 1 && strcmp(argv[1], "export") == 0)
         return ftdev_export(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "stock") == 0)
+        return ftdev_stock(argc - 2, argv + 2);
     ft_image_init(&im);
     rflags_init(&rf);
     for (i = 1; i < argc; i++) {
