@@ -34,7 +34,7 @@ int ft_split_cal(const unsigned short *cal, int lines, int px,
         if (lm[l] < lo) lo = lm[l];
         if (lm[l] > hi) hi = lm[l];
     }
-    band = 0.1 * (hi - lo);
+    band = FT_CAL_BAND * (hi - lo);
     for (l = 0; l < lines; l++) {
         double *acc = lm[l] < lo + band ? sd : lm[l] > hi - band ? sw : NULL;
         if (!acc)

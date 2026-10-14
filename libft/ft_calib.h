@@ -8,8 +8,13 @@
 
 #define FT_FAUL_MAX 64
 
+/* dark/white lines: line mean within this share of the range from either
+ * extreme. Tight, because the lamp's on/off transition lines can be half
+ * lit (seen at bin 1, ~8 % of the range): those are neither. */
+#define FT_CAL_BAND 0.02
 /* dark/white reference per pixel and channel (px*3 floats each) from the
- * 250 .cal lines, classified by level (within 10 % of either extreme) */
+ * 250 .cal lines, classified by level (within FT_CAL_BAND of either
+ * extreme) */
 int ft_split_cal(const unsigned short *cal, int lines, int px,
                  float *dark, float *white, ft_err *e);
 /* transmittance 0..1 into t (lines*px*3 floats) */
