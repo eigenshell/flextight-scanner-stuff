@@ -151,7 +151,7 @@ int rflags_render(const rflags *f, ft_recipe *r, const double *base_d,
             fprintf(stderr, "ftdev: %s\n", e.msg);
             return 1;
         }
-        fprintf(stderr, "ftdev: note: no usable film_base in the .txt; "
+        fprintf(stderr, "ftdev: note: no film_base given; "
                         "film base estimated from the frame itself\n");
     }
     ft_recipe_set_base(r, d);

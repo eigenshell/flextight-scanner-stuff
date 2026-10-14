@@ -465,3 +465,67 @@ def test_share_export_refusals(ftdev, tmp_path):
     r = subprocess.run([str(ftdev), "cut", str(scan)], capture_output=True,
                        text=True)
     assert r.returncode == 1 and "not a share window scan" in r.stderr
+
+
+@needs_cc
+def test_share_export_limits(ftdev, tmp_path):
+    cv2 = pytest.importorskip("cv2")
+    win = share_window(tmp_path)
+    subprocess.run([str(ftdev), "cut", str(win)], check=True,
+                   capture_output=True)
+    dng = tmp_path / "job_frame01.dng"
+    sc = sidecar(Path(str(dng) + ".txt"))
+    # the film base is the one the window scan was written with
+    assert sc["film_base"] == "0.2076 0.3979 0.6021"
+    assert sidecar(Path(str(win) + ".txt"))["film_base"] == sc["film_base"]
+    bw = int(sc["box"].split()[2])
+
+    # never upscaled: a huge --long-edge gives the frame's own size
+    out = tmp_path / "big.jpg"
+    r = subprocess.run([str(ftdev), "export", str(dng), "--long-edge",
+                        "65000", "-o", str(out)], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    assert cv2.imread(str(out)).shape[1] == bw
+
+    # --quality: q1 is smaller than q100; out of range is refused
+    sizes = []
+    for q in ("1", "100"):
+        out = tmp_path / ("q%s.jpg" % q)
+        r = subprocess.run([str(ftdev), "export", str(dng), "--quality", q,
+                            "--long-edge", "500", "-o", str(out)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        sizes.append(out.stat().st_size)
+    assert sizes[0] < sizes[1]
+    r = subprocess.run([str(ftdev), "export", str(dng), "--quality",
+                        "99999999999"], capture_output=True, text=True)
+    assert r.returncode == 2 and "1..100" in r.stderr
+
+    # a crop whose x + w overflows int is refused, not a crash
+    r = subprocess.run([str(ftdev), "export", str(dng), "--crop",
+                        "2147483000,0,1000,10"], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "outside" in r.stderr
+    # so is a sidecar box that does not fit this DNG
+    bad = tmp_path / "bad.dng"
+    bad.write_bytes(dng.read_bytes())
+    txt = Path(str(dng) + ".txt").read_text().splitlines()
+    txt = ["box=2147483000 29 1000 1413" if l.startswith("box=") else l
+           for l in txt]
+    Path(str(bad) + ".txt").write_text("\n".join(txt) + "\n")
+    r = subprocess.run([str(ftdev), "export", str(bad)], capture_output=True,
+                       text=True)
+    assert r.returncode == 2 and "sidecar box" in r.stderr
+
+    # a path that does not fit a buffer is refused, not overflowed
+    long = str(tmp_path / ("a" * 4200)) + ".jpg"
+    r = subprocess.run([str(ftdev), "export", str(dng), "--raw-too", "-o",
+                        long], capture_output=True, text=True)
+    assert r.returncode != 0 and r.returncode != -11
+
+    # no sidecar, no --long-edge: full size, with a note
+    Path(str(dng) + ".txt").unlink()
+    r = subprocess.run([str(ftdev), "export", str(dng), "--film", "neg"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and "exporting at full size" in r.stderr

@@ -34,25 +34,56 @@
 static ft_render g_render;              /* ~380 KB */
 static ft_output g_output;              /* ~330 KB */
 
-/* path without ext (if it ends so) and then without "_winNN" */
-static void base_of(const char *path, const char *ext, char *out, size_t cap)
+#define PATH_CAP 4096
+
+/* dst = a + b; -1 (message printed) if it does not fit */
+static int path_cat(char *dst, size_t cap, const char *a, const char *b)
 {
-    size_t n, e = strlen(ext);
-    snprintf(out, cap, "%s", path);
+    int n = snprintf(dst, cap, "%s%s", a, b);
+    if (n < 0 || (size_t)n >= cap) {
+        fprintf(stderr, "ftdev: path too long: %.60s...\n", a);
+        return -1;
+    }
+    return 0;
+}
+
+/* dst = src with its trailing from replaced by to (if src ends so) */
+static int path_swap(char *dst, size_t cap, const char *src, const char *from,
+                     const char *to)
+{
+    size_t n = strlen(src), f = strlen(from);
+    if (n > f && strcmp(src + n - f, from) == 0) {
+        char head[PATH_CAP];
+        if (n - f >= sizeof head) {
+            fprintf(stderr, "ftdev: path too long: %.60s...\n", src);
+            return -1;
+        }
+        memcpy(head, src, n - f);
+        head[n - f] = 0;
+        return path_cat(dst, cap, head, to);
+    }
+    return path_cat(dst, cap, src, to);
+}
+
+/* path without ext (if it ends so) and then without "_winNN" */
+static int base_of(const char *path, const char *ext, char *out, size_t cap)
+{
+    size_t n;
+    if (path_swap(out, cap, path, ext, ""))
+        return -1;
     n = strlen(out);
-    if (n > e && strcmp(out + n - e, ext) == 0)
-        out[n -= e] = 0;
     if (n > 6 && strncmp(out + n - 6, "_win", 4) == 0 &&
         out[n - 2] >= '0' && out[n - 2] <= '9' && out[n - 1] >= '0' &&
         out[n - 1] <= '9')
         out[n - 6] = 0;
+    return 0;
 }
 
 int ftdev_cut(int argc, char **argv)
 {
     static ft_share_cut_result r;
     const char *scan = NULL, *base = NULL, *dpath = NULL;
-    char basebuf[1024], path[1100], *meta = NULL, *faul = NULL, *dt = NULL;
+    char basebuf[PATH_CAP], path[PATH_CAP], txt[PATH_CAP], *meta = NULL, *faul = NULL, *dt = NULL;
     unsigned short *raw = NULL, *cal = NULL;
     long nmeta = 0, nraw = 0, ncal = 0, nfaul = 0, nd = 0;
     ft_share_meta m;
@@ -76,10 +107,12 @@ int ftdev_cut(int argc, char **argv)
         return 2;
     }
     if (!base) {
-        base_of(scan, ".raw", basebuf, sizeof basebuf);
+        if (base_of(scan, ".raw", basebuf, sizeof basebuf))
+            return 2;
         base = basebuf;
     }
-    snprintf(path, sizeof path, "%s.txt", scan);
+    if (path_cat(path, sizeof path, scan, ".txt"))
+        return 2;
     meta = ftdev_load(path, &nmeta);
     if (!meta) {
         fprintf(stderr, "ftdev: cannot read %s\n", path);
@@ -99,13 +132,19 @@ int ftdev_cut(int argc, char **argv)
         }
     }
     raw = ftdev_load(scan, &nraw);
-    snprintf(path, sizeof path, "%s.cal", scan);
+    if (path_cat(path, sizeof path, scan, ".cal")) {
+        rc = 2;
+        goto out;
+    }
     cal = ftdev_load(path, &ncal);
     if (!raw || !cal) {
         fprintf(stderr, "ftdev: cannot read %s or its .cal\n", scan);
         goto out;
     }
-    snprintf(path, sizeof path, "%s.faul", scan);
+    if (path_cat(path, sizeof path, scan, ".faul")) {
+        rc = 2;
+        goto out;
+    }
     faul = ftdev_load(path, &nfaul);
     if (!faul)
         fprintf(stderr, "ftdev: note: no %s; Faul Pixs not interpolated\n",
@@ -127,7 +166,12 @@ int ftdev_cut(int argc, char **argv)
         ft_share_cut_frame *c = &r.f[i];
         FILE *f;
         int long_px = c->box[2] > c->box[3] ? c->box[2] : c->box[3];
-        snprintf(path, sizeof path, "%s_frame%02d.dng", base, c->index);
+        char num[32];
+        snprintf(num, sizeof num, "_frame%02d.dng", c->index);
+        if (path_cat(path, sizeof path, base, num)) {
+            rc = 2;
+            break;
+        }
         if (ft_dng_write(path, &c->im, &e)) {
             fprintf(stderr, "ftdev: %s\n", e.msg);
             rc = 1;
@@ -137,10 +181,13 @@ int ftdev_cut(int argc, char **argv)
                path, c->im.w, c->im.h, c->box[2], c->box[3], c->shift_mm,
                c->estimated ? " (ESTIMATED: not detected)" : "",
                (int)floor(long_px * c->export_scale + 0.5));
-        strcat(path, ".txt");
-        f = fopen(path, "w");
+        if (path_cat(txt, sizeof txt, path, ".txt")) {
+            rc = 2;
+            break;
+        }
+        f = fopen(txt, "w");
         if (!f || ft_share_sidecar_write(f, &m, c) || fclose(f)) {
-            fprintf(stderr, "ftdev: cannot write %s\n", path);
+            fprintf(stderr, "ftdev: cannot write %s\n", txt);
             rc = 1;
         }
     }
@@ -184,7 +231,7 @@ static void export_usage(void)
 int ftdev_export(int argc, char **argv)
 {
     const char *dng = NULL, *outp = NULL;
-    char outbuf[1024], path[1100], *side = NULL;
+    char outbuf[PATH_CAP], path[PATH_CAP], *side = NULL;
     int i, rc = 1, crop[4] = { 0, 0, 0, 0 }, has_crop = 0, raw_too = 0;
     int quality = FT_JPEG_QUALITY, ow, oh, has_side = 0;
     long nside = 0;
@@ -240,11 +287,12 @@ int ftdev_export(int argc, char **argv)
             }
         } else if (strcmp(a, "--quality") == 0 && i + 1 < argc) {
             char *end;
-            quality = (int)strtol(argv[++i], &end, 10);
-            if (*end || quality < 1 || quality > 100) {
+            long q = strtol(argv[++i], &end, 10);
+            if (*end || end == argv[i] || q < 1 || q > 100) {
                 fprintf(stderr, "ftdev: --quality is 1..100\n");
                 return 2;
             }
+            quality = (int)q;
         } else if (strcmp(a, "--raw-too") == 0) {
             raw_too = 1;
         } else if (strcmp(a, "-o") == 0 && i + 1 < argc) {
@@ -260,7 +308,8 @@ int ftdev_export(int argc, char **argv)
         export_usage();
         return 2;
     }
-    snprintf(path, sizeof path, "%s.txt", dng);
+    if (path_cat(path, sizeof path, dng, ".txt"))
+        return 2;
     side = ftdev_load(path, &nside);
     if (side) {
         if (ft_share_sidecar_parse(side, (size_t)nside, &sc, &e)) {
@@ -282,12 +331,10 @@ int ftdev_export(int argc, char **argv)
         goto out;
     }
     if (!outp) {
-        size_t n;
-        snprintf(outbuf, sizeof outbuf, "%s", dng);
-        n = strlen(outbuf);
-        if (n > 4 && strcmp(outbuf + n - 4, ".dng") == 0)
-            outbuf[n - 4] = 0;
-        strncat(outbuf, ".jpg", sizeof outbuf - strlen(outbuf) - 1);
+        if (path_swap(outbuf, sizeof outbuf, dng, ".dng", ".jpg")) {
+            rc = 2;
+            goto out;
+        }
         outp = outbuf;
     }
     if (ft_dng_read(dng, &im, &e)) {
@@ -303,9 +350,12 @@ int ftdev_export(int argc, char **argv)
             crop[3] = im.h;
         }
     }
-    if (crop[0] + crop[2] > im.w || crop[1] + crop[3] > im.h) {
-        fprintf(stderr, "ftdev: crop %d,%d %dx%d outside the %dx%d image\n",
-                crop[0], crop[1], crop[2], crop[3], im.w, im.h);
+    if (crop[2] > im.w || crop[3] > im.h || crop[0] > im.w - crop[2] ||
+        crop[1] > im.h - crop[3]) {
+        fprintf(stderr, "ftdev: %s %d,%d %dx%d outside the %dx%d image%s\n",
+                has_crop ? "crop" : "sidecar box", crop[0], crop[1], crop[2],
+                crop[3], im.w, im.h,
+                has_crop ? "" : " (sidecar from another DNG?)");
         rc = 2;
         goto out;
     }
@@ -318,6 +368,9 @@ int ftdev_export(int argc, char **argv)
         scale = sc.export_scale;
     if (scale > 1)
         scale = 1;
+    if (!has_side && long_edge <= 0)
+        fprintf(stderr, "ftdev: note: no sidecar; exporting at full size "
+                        "(use --long-edge)\n");
     if (ft_image_alloc(&cut, crop[2], crop[3], &e)) {
         fprintf(stderr, "ftdev: %s\n", e.msg);
         goto out;
@@ -357,6 +410,10 @@ int ftdev_export(int argc, char **argv)
                             (size_t)i * ow);
     }
     icc_n = ft_icc_build(space, icc, sizeof icc);
+    if (icc_n == 0) {
+        fprintf(stderr, "ftdev: cannot build the ICC profile\n");
+        goto out;
+    }
     if (ft_jpeg_write(outp, px8, ow, oh, quality,
                       cut.ppi > 0 ? cut.ppi * ow / cut.w : 0, icc, icc_n,
                       &e)) {
@@ -368,13 +425,11 @@ int ftdev_export(int argc, char **argv)
            quality);
     rc = 0;
     if (raw_too) {
-        char to[1100];
-        size_t n;
-        snprintf(to, sizeof to, "%s", outp);
-        n = strlen(to);
-        if (n > 4 && strcmp(to + n - 4, ".jpg") == 0)
-            to[n - 4] = 0;
-        strncat(to, ".dng", sizeof to - strlen(to) - 1);
+        char to[PATH_CAP], to_txt[PATH_CAP];
+        if (path_swap(to, sizeof to, outp, ".jpg", ".dng")) {
+            rc = 2;
+            goto out;
+        }
         if (strcmp(to, dng) == 0) {
             printf("%s: the working raw is already there\n", to);
         } else if (copy_file(dng, to)) {
@@ -383,8 +438,9 @@ int ftdev_export(int argc, char **argv)
         } else {
             printf("%s: the working raw\n", to);
             if (has_side) {
-                strcat(to, ".txt");
-                if (copy_file(path, to)) {
+                if (path_cat(to_txt, sizeof to_txt, to, ".txt")) {
+                    rc = 2;
+                } else if (copy_file(path, to_txt)) {
                     fprintf(stderr, "ftdev: cannot copy %s\n", path);
                     rc = 1;
                 }
