@@ -64,6 +64,16 @@ FlexColor software — first on Windows, then on Linux.
   grade and curve presets, as a 16-bit sRGB PNG. Formats are entries in
   `libft/ft_out.c`; FlexColor 3F (.fff) output is planned there as a
   legacy option.
+- Detailed scans (3150 / 6300 ppi archive files): `ftpoc frames
+  --detail neg|pos` previews at the scan's own optics, measures focus per
+  selected frame and groups the frames into passes by depth of focus;
+  `ftpoc scan --job` then develops and writes every frame *while the
+  scanner runs* (a RAM ring between the scanner and the disk, one write
+  per file): `neg` is a linear 16-bit digital negative (tiled DNG, or
+  TIFF) for Negative Lab Pro, `pos` a flat archive positive (16-bit
+  density above the film base, Cineon-style, mono or RGB for b/w).
+  `ftdev detail` re-develops a pass kept with `--keep-raw yes`; `ftdev
+  bench` measures whether a machine keeps up (`tools/detail/`).
 - `src/flextight/` — the Python package for the Linux (SG_IO) stack.
 - `tools/spti_logger/` — the DeviceIoControl tracer used to observe the
   protocol.

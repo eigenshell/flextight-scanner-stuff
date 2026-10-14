@@ -222,6 +222,71 @@ that keeps every measured scale inside FlexColor's positions. Brackets
 never leave ±12000 steps of the current curve; a peak further off is
 skipped like any other unusable scale.
 
+### Detailed scans (archive files)
+
+```
+ftpoc frames --detail neg|pos --ppi 3150|6300 [--select 1,3-6]
+             [--fmt dng|tiff] [--bw off|mono|rgb] [--keep-raw yes|no]
+             [--ring-mb N] [--film neg|slide] [-h s] [-o strip]
+ftpoc scan --job strip.job [-h s]
+```
+
+For files to keep and process later, not to edit on the box:
+
+- `--detail neg` writes a **digital negative** per frame: linear 16-bit
+  transmittance (x 65535, uninverted), tiled DNG (`--fmt dng`, the
+  default; LinearRaw with the scanner colour matrix) or TIFF (`--fmt
+  tiff`, with a linear ICC profile). For Negative Lab Pro, Lightroom,
+  darktable. Slides use this too: their negative is the positive.
+- `--detail pos` (negative film only) writes a **flat archive
+  positive**: per channel the density above the film base, 16-bit, as
+  Kodak's Cineon stored film: `code = round((D - D_base + 0.1) / 4.0 x
+  65535)`. The film base sits at code 1638, so noise thinner than the
+  base is kept; denser film is a higher code, so the file is a flat,
+  log-looking positive with the orange mask gone. No curve, no
+  exposure, no clipping, no colour matrix: grade it later. The
+  constants are in the TIFF's ImageDescription and the sidecar. For
+  b/w: `--bw mono` (default for b/w work: one channel, the three
+  channels' densities averaged by inverse noise, measured on the white
+  reference) or `--bw rgb` (three channels, e.g. chromogenic films).
+- 8-bit outputs do not exist here: make them in post.
+
+`frames --detail` previews at the scan's **own optics** (6300:
+FlexColor's standard preview; 3150: 525 ppi at the 3150 optics, bin 6),
+so the preview's light level and Dmax are the scan's. It then brackets
+focus on every selected frame at bin 1 (~1 min each; the film is not
+flat along a strip, ~1900 tandem steps measured) and groups the frames
+into **passes**: the fewest scans such that every frame's focus offset
+is within +-300 steps of its pass's (`libft/ft_dplan.h`; an estimate
+until measured at these optics). It prints each pass (frames, window,
+focus, time, file size) and writes the job (`detail*`, `keep_raw`,
+`ring_mb` keys; a `pass` per frame).
+
+`scan --job` checks every pass window and the **free space** (files +
+5 %) before the scanner moves, then scans pass by pass. The scanner's
+lines go into a RAM ring (`ring_mb`, default 64 MB: ~2 min of a stalled
+disk at the scanner's ~0.5 MB/s) and a worker thread develops them
+line by line (flat-field, Faul Pixs, RGB alignment), cuts each frame
+(its preview box + 3 mm, for creep) and appends it to its tiled file:
+nothing is held whole and every file is written once. The reader never
+waits: a full ring stops the scan cleanly (`RING FULL`). At the end of
+a pass frame detection runs on a 525 ppi copy; each frame's detected box
+(its creep since the preview) goes into the DNG's DefaultCrop and the
+sidecar `<frame>.txt` (`frame_box`, `shift_mm`, `estimated`, `edge`).
+Files are `strip_frameNN.dng|.tif`, written as `.partial` and renamed
+when complete; a failed or interrupted pass leaves its frames
+`.partial` (finished passes are marked done; resuming inside a pass is
+not supported). Every pass prints the ring's peak and the longest
+single line: the numbers that tell whether a slower machine keeps up.
+
+`--keep-raw yes` also keeps each pass as it arrived
+(`strip_passNN.raw` + `.cal .faul .txt`, a second write);
+`ftdev detail strip_pass01.raw --job strip.job [--out neg|pos]` develops
+it again on any machine. `ftdev bench [--ppi 6300] [--pace] [--ring-mb
+N]` measures the worker on the machine it runs on: without `--pace` its
+speed against the scanner's line rate, with `--pace` a paced run into a
+ring of that size.
+
 ## Device selection
 
 The scanner answers on all 8 LUNs of its SCSI target, so Windows creates
