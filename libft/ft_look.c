@@ -371,7 +371,8 @@ int ft_edit_parse(const char *text, size_t n, ft_look_kind k, ft_edit *ed,
                 had_taste = 1;
                 cur = &ed->taste;
                 sec = S_TASTE;
-            } else if (memcmp(name, "frame", 5) == 0 && space(name[5])) {
+            } else if (strlen(name) > 5 && memcmp(name, "frame", 5) == 0 &&
+                       space(name[5])) {
                 long idx;
                 int slot;
                 if (k == FT_LOOK_FILE)
@@ -769,7 +770,8 @@ int ft_look_recipe(const ft_stock *s, const ft_taste *t, ft_render_mode m,
     }
     if (t && (t->set & FT_T_EXPOSURE))
         r->exposure = clampf(r->exposure + t->exposure, -6, 6);
-    if (t && (t->set & FT_T_TINT))
+    /* b&w has one channel: a look's tint is ignored, not an error */
+    if (t && (t->set & FT_T_TINT) && m != FT_RENDER_BW)
         for (c = 0; c < 3; c++)
             r->tint[c] = (float)t->tint[c];
     return ft_recipe_validate(r, e);

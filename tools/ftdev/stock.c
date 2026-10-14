@@ -2,8 +2,9 @@
 /*
  * ftdev stock learn <roll.edit> <frame.dng>... -o <name.look> [--replace]
  *
- *   Stock hints for a colour negative film, from a roll the user has tuned
- *   (ft_look.h). Per frame (cut to its sidecar's box, with its film base
+ *   Stock hints for a colour negative film, from a roll (ft_look.h). The
+ *   user's tint and curve choices do not enter the hint, only the roll's
+ *   noise reduction (the estimate is measured after it). Per frame (cut to its sidecar's box, with its film base
  *   and the roll's noise reduction for it, as export does), the channel
  *   ranges of the stock-free auto-estimate as ratios to green; the median
  *   over the frames; pooled, weighted by frame count,

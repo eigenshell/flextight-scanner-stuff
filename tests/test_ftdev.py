@@ -696,8 +696,10 @@ def test_export_with_edit(ftdev, tmp_path):
     assert (rec["nr_grain"], rec["sharpen"], rec["nr_sensor"]) == \
            ("1", "0", "1")
 
-    # --frame 2: the roll's grade, the frame's exposure offset replaces
-    # the roll's (not added to it)
+    # frame 2: the roll's grade, the frame's exposure offset replaces the
+    # roll's (not added to it)
+    side = Path(str(dng) + ".txt")
+    side.write_text(side.read_text().replace("frame=1\n", "frame=2\n"))
     r, rec = export(ftdev, dng, tmp_path / "f2.jpg", "--edit", str(roll),
                     "--frame", "2")
     assert r.returncode == 0, r.stderr
@@ -705,6 +707,8 @@ def test_export_with_edit(ftdev, tmp_path):
     assert rec["frame"] == "2" and rec["grade"] == "2"
     assert rec["curve"] == "linear" and "curve_b" not in rec
     assert abs(float(rec["exposure"]) - float(g2["exposure"]) + 1) < 1e-5
+
+    side.write_text(side.read_text().replace("frame=2\n", "frame=1\n"))
 
     # a look file is a valid edit: copy one to start a roll
     look = tmp_path / "hp.look"
@@ -730,6 +734,11 @@ def test_export_edit_refusals(ftdev, tmp_path):
     assert r.returncode == 2 and "--frame needs --edit" in r.stderr
     r, _ = export(ftdev, dng, out, "--edit", str(roll), "--frame", "x")
     assert r.returncode == 2 and "--frame is a frame number" in r.stderr
+    # the sidecar says frame 1: frame 2's overrides would be the wrong frame
+    r, _ = export(ftdev, dng, out, "--edit", str(roll), "--frame", "2")
+    assert r.returncode == 2
+    assert "--frame 2, but %s.txt says frame 1" % dng in r.stderr
+    assert not out.exists()
     bad = tmp_path / "bad.edit"
     bad.write_text("[taste]\ngrade = 9\n")
     r, _ = export(ftdev, dng, out, "--edit", str(bad))
@@ -746,6 +755,26 @@ def test_export_edit_refusals(ftdev, tmp_path):
                     "--frame", "4")
     assert r.returncode == 0, r.stderr
     assert rec["frame"] == "4" and "estimated from the frame" in r.stderr
+
+
+@needs_cc
+def test_export_edit_bw_ignores_colour(ftdev, tmp_path):
+    # a colour look on a b&w render: the stock ratio is ignored with a
+    # warning, the taste's tint without one (b&w has no tint)
+    dng = cut_frame(ftdev, tmp_path)
+    roll = tmp_path / "roll.edit"
+    roll.write_text("[stock]\nstock_version = 1\nrange_ratio = 1.1 1 0.9\n"
+                    "[taste]\ntint = 3 0 -2\ngrade = 2\n")
+    r, rec = export(ftdev, dng, tmp_path / "bw.jpg", "--film", "bw",
+                    "--edit", str(roll))
+    assert r.returncode == 0, r.stderr
+    assert "range_ratio is for colour negatives; ignored for b&w" in r.stderr
+    assert rec["film"] == "bw" and rec["tint"] == "0 0 0"
+    assert rec["grade"] == "2"
+    # a negative uses both, without the warning
+    r, rec = export(ftdev, dng, tmp_path / "neg.jpg", "--edit", str(roll))
+    assert r.returncode == 0, r.stderr
+    assert "range_ratio" not in r.stderr and rec["tint"] == "3 0 -2"
 
 
 def look_keys(path):

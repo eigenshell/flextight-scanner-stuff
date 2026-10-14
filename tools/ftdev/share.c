@@ -471,6 +471,14 @@ int ftdev_export(int argc, char **argv)
         long nt = 0;
         char *txt;
         int k;
+        /* the sidecar names the frame the pixels are: another frame's
+         * overrides would render (and record) the wrong frame */
+        if (frame_arg >= 0 && frame >= 0 && frame_arg != frame) {
+            fprintf(stderr, "ftdev: --frame %ld, but %s.txt says frame %d\n",
+                    frame_arg, dng, frame);
+            rc = 2;
+            goto out;
+        }
         if (frame_arg >= 0)
             frame = (int)frame_arg;
         if (frame < 0) {
@@ -491,6 +499,10 @@ int ftdev_export(int argc, char **argv)
             goto out;
         }
         free(txt);
+        if (g_edit.stock.has_ratio && rflags_mode(&rf) != FT_RENDER_NEG)
+            fprintf(stderr, "ftdev: warning: %s: range_ratio is for colour "
+                            "negatives; ignored for %s\n", edit,
+                    rf.bw ? "b&w" : "a slide");
         ft_edit_taste(&g_edit, frame, &taste, NULL);
         ft_look_detail_of(&taste, &det);
         nr_sensor = det.nr_sensor;

@@ -113,7 +113,9 @@ void ft_edit_taste(const ft_edit *ed, int frame, ft_taste *out,
 void ft_look_detail_of(const ft_taste *t, ft_look_detail *d);
 /* the recipe for frames im[0..n) (pooled statistics; usually one):
  * stock and taste NULL = none; base NULL = estimated from the frames.
- * Exposure after the offset is clamped to +-6 stops. -1 with e filled */
+ * Exposure after the offset is clamped to +-6 stops. The stock's
+ * range_ratio applies to negatives only, the taste's tint not to b&w (both
+ * ignored there). -1 with e filled */
 int ft_look_recipe(const ft_stock *s, const ft_taste *t, ft_render_mode m,
                    const float *base, const ft_image *const *im, int n,
                    ft_recipe *r, ft_err *e);

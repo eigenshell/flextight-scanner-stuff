@@ -208,6 +208,10 @@ static void error_tests(void)
           == 0);
     CHECK(strcmp(err_of("[looks]\n", FT_LOOK_FILE),
                  "line 1: unknown section [looks]") == 0);
+    CHECK(strcmp(err_of("[fr]\n", FT_EDIT_FILE),
+                 "line 1: unknown section [fr]") == 0);
+    CHECK(strcmp(err_of("[frame]\n", FT_EDIT_FILE),
+                 "line 1: unknown section [frame]") == 0);
     CHECK(strcmp(err_of("[taste\n", FT_LOOK_FILE),
                  "line 1: '[taste' is not a [section]") == 0);
     CHECK(strcmp(err_of("[taste]\ngrade 2\n", FT_LOOK_FILE),
@@ -428,12 +432,11 @@ static void recipe_tests(void)
     s.bw_weights[2] = 0.2;
     CHECK(ft_look_recipe(&s, NULL, FT_RENDER_BW, BASE, one, 1, &r, &e) == 0);
     CHECK(r.bw_weights[0] == 0.5f && r.bw_weights[2] == 0.2f);
-    /* b&w with a tint fails validation */
+    /* b&w ignores a look's tint (a colour look stays usable) */
     memset(&t, 0, sizeof t);
     CHECK(ft_taste_set(&t, "tint", "1 0 0", &e) == 0);
-    CHECK(ft_look_recipe(NULL, &t, FT_RENDER_BW, BASE, one, 1, &r, &e)
-          == -1);
-    CHECK(strcmp(e.msg, "recipe: tint must be 0 for b&w") == 0);
+    CHECK(ft_look_recipe(NULL, &t, FT_RENDER_BW, BASE, one, 1, &r, &e) == 0);
+    CHECK(r.tint[0] == 0 && r.tint[1] == 0 && r.tint[2] == 0);
 
     /* no base: estimated from the frame, as ft_render_base_from_frames */
     CHECK(ft_render_base_from_frames(one, 1, FT_RENDER_NEG, d, &e) == 0);
