@@ -9,6 +9,9 @@
 #include "ft_plan.h"
 
 static const char *TYPES[] = { "full", "half", "panorama", "partial" };
+static const char *DETAIL[] = { "none", "neg", "pos" };
+static const char *DFMT[] = { "dng", "tiff" };
+static const char *BW[] = { "off", "mono", "rgb" };
 
 static const char *yn(int v) { return v ? "yes" : "no"; }
 
@@ -38,6 +41,10 @@ int ft_job_write(const ft_job *j, FILE *out)
     for (i = 0; i < j->nframes; i++)
         if ((int)j->f[i].type < 0 || (int)j->f[i].type > 3)
             return -1;
+    if ((int)j->detail < 0 || (int)j->detail > 2 ||
+        (int)j->detail_fmt < 0 || (int)j->detail_fmt > 1 ||
+        (int)j->detail_bw < 0 || (int)j->detail_bw > 2)
+        return -1;
     fprintf(out, "[strip]\nholder = %s\nfilm = %s\nfocus = %s\n"
                  "focus_offset = %ld\n", j->holder,
             j->film == FT_FILM_SLIDE ? "slide" : "negative",
@@ -46,6 +53,12 @@ int ft_job_write(const ft_job *j, FILE *out)
     if (j->has_film_base)
         fprintf(out, "film_base = %.4f %.4f %.4f   # D r g b: unexposed film\n",
                 j->film_base[0], j->film_base[1], j->film_base[2]);
+    if (j->detail != FT_DETAIL_NONE)
+        fprintf(out, "detail = %s   # neg: digital negative, pos: archive "
+                     "positive\ndetail_fmt = %s\ndetail_bw = %s\n"
+                     "keep_raw = %s\nring_mb = %d\n", DETAIL[j->detail],
+                DFMT[j->detail_fmt], BW[j->detail_bw], yn(j->keep_raw),
+                j->ring_mb);
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
@@ -59,6 +72,8 @@ int ft_job_write(const ft_job *j, FILE *out)
                 yn(f->sprockets), yn(f->straighten),
                 f->confidence_low ? "low" : "high", f->focus_offset,
                 yn(f->done));
+        if (j->detail != FT_DETAIL_NONE)
+            fprintf(out, "pass = %d\n", f->pass);
     }
     return ferror(out) ? -1 : 0;
 }
@@ -97,14 +112,26 @@ static int lnum(const char *v, long *out)
 }
 
 static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset",
-    "film_base" };
-#define N_STRIP_KEYS 5
+    "film_base", "detail", "detail_fmt", "detail_bw", "keep_raw", "ring_mb" };
+#define N_STRIP_KEYS 10
 static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
     "sprockets", "straighten", "confidence", "focus_offset", "done",
-    "bin" };
-#define N_FRAME_KEYS 11
+    "bin", "pass" };
+#define N_FRAME_KEYS 12
 #define K_PPI 2
 #define K_WINDOW 3
+
+/* v as an index into tab; -1 if it is none of them */
+static int word(const char **tab, int n, const char *v, int *out)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (strcmp(tab[i], v) == 0) {
+            *out = i;
+            return 0;
+        }
+    return -1;
+}
 
 static int key_index(const char **tab, int n, const char *k)
 {
@@ -133,6 +160,7 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
     ft_job_frame *f = NULL;
 
     memset(j, 0, sizeof *j);
+    j->ring_mb = FT_RING_MB_DEFAULT;
     while (fgets(line, sizeof line, in)) {
         char *s, *k, *v, *hash;
         int bad = 0, ki;
@@ -218,6 +246,23 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                 else bad = 1;
             } else if (ki == 3) {
                 bad = lnum(v, &j->focus_offset);
+            } else if (ki >= 5 && ki <= 7) {
+                int d;
+                bad = ki == 5 ? word(DETAIL + 1, 2, v, &d)
+                    : ki == 6 ? word(DFMT, 2, v, &d) : word(BW, 3, v, &d);
+                if (!bad && ki == 5)
+                    j->detail = (ft_detail_out)(d + 1);
+                else if (!bad && ki == 6)
+                    j->detail_fmt = (ft_detail_fmt)d;
+                else if (!bad)
+                    j->detail_bw = (ft_detail_bw)d;
+            } else if (ki == 8) {
+                bad = yesno(v, &j->keep_raw);
+            } else if (ki == 9) {
+                long m;
+                bad = lnum(v, &m) || m < FT_RING_MB_MIN || m > FT_RING_MB_MAX;
+                if (!bad)
+                    j->ring_mb = (int)m;
             } else {
                 double *d = j->film_base;
                 char extra;
@@ -262,6 +307,13 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e)
                     f->bin = (int)b;
                 break;
             }
+            case 11: {
+                long ps;
+                bad = lnum(v, &ps) || ps < 0 || ps > FT_MAX_FRAMES;
+                if (!bad)
+                    f->pass = (int)ps;
+                break;
+            }
             default: bad = yesno(v, &f->done); break;
             }
         }
@@ -293,6 +345,15 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
         return ft_fail(e, "unknown holder '%s'", j->holder);
     if (j->nframes <= 0)
         return ft_fail(e, "no frames");
+    if (j->detail == FT_DETAIL_POS && j->film != FT_FILM_NEGATIVE)
+        return ft_fail(e, "detail = pos (archive positive) is for negative "
+                          "film; slides: detail = neg");
+    if (j->detail == FT_DETAIL_POS && j->detail_fmt != FT_DFMT_TIFF)
+        return ft_fail(e, "detail = pos is always TIFF (detail_fmt = tiff)");
+    if (j->detail == FT_DETAIL_NEG && j->detail_bw != FT_BW_OFF)
+        return ft_fail(e, "detail_bw is for detail = pos only");
+    if (j->detail == FT_DETAIL_POS && !j->has_film_base)
+        return ft_fail(e, "detail = pos needs film_base (from the preview)");
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
         long ccd, optic, off;
@@ -315,6 +376,18 @@ int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e)
         if (!(fabs(f->tilt_deg) <= 45))
             return ft_fail(e, "%s: tilt %g out of range (+-45 degrees)", w,
                            f->tilt_deg);
+        if (j->detail != FT_DETAIL_NONE) {
+            int k;
+            if (f->pass < 1)
+                return ft_fail(e, "%s: detailed scan without a pass", w);
+            if (ft_job_bin(f) != 1)
+                return ft_fail(e, "%s: detailed scans are bin 1", w);
+            for (k = 0; k < i; k++)
+                if (j->f[k].include && j->f[k].pass == f->pass &&
+                    j->f[k].ppi != f->ppi)
+                    return ft_fail(e, "%s: pass %d mixes %g and %g ppi", w,
+                                   f->pass, j->f[k].ppi, f->ppi);
+        }
         off = j->focus == FT_FOCUS_PER_FRAME ? f->focus_offset : j->focus_offset;
         if (off < -FT_CCD_MAX || off > FT_CCD_MAX ||
             ft_optics_focus(lens, f->ppi * ft_job_bin(f), off,

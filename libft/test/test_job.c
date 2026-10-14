@@ -75,6 +75,101 @@ int main(void)
         fclose(f);
         CHECK(b.f[0].bin == 0 && b.f[1].bin == 1 && ft_job_bin(&b.f[1]) == 1);
     }
+    /* detailed scans: strip keys and the frame's pass, written only for a
+     * detail job (older jobs read and write as before) */
+    {
+        ft_job c = a, d2;
+        int k;
+        f = tmpfile();
+        CHECK(ft_job_write(&c, f) == 0);
+        rewind(f);
+        {
+            char buf[4096];
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            CHECK(strstr(buf, "detail") == NULL && strstr(buf, "pass") == NULL);
+        }
+        fclose(f);
+        c.film = FT_FILM_NEGATIVE;
+        c.detail = FT_DETAIL_POS;
+        c.detail_fmt = FT_DFMT_TIFF;
+        c.detail_bw = FT_BW_MONO;
+        c.keep_raw = 1;
+        c.ring_mb = 256;
+        c.f[0].pass = 1;
+        c.f[1].pass = 2;
+        f = tmpfile();
+        CHECK(ft_job_write(&c, f) == 0);
+        rewind(f);
+        CHECK(ft_job_read(&d2, f, &e) == 0);
+        fclose(f);
+        CHECK(d2.detail == FT_DETAIL_POS && d2.detail_fmt == FT_DFMT_TIFF);
+        CHECK(d2.detail_bw == FT_BW_MONO && d2.keep_raw && d2.ring_mb == 256);
+        CHECK(d2.f[0].pass == 1 && d2.f[1].pass == 2);
+
+        f = text("[strip]\nholder = 24x217\n");
+        CHECK(ft_job_read(&d2, f, &e) == 0);
+        fclose(f);
+        CHECK(d2.detail == FT_DETAIL_NONE && d2.ring_mb == FT_RING_MB_DEFAULT);
+        {
+            static const char *bad[] = {
+                "detail = both\n", "detail = none\n", "detail_fmt = jpg\n",
+                "detail_bw = grey\n", "keep_raw = 1\n", "ring_mb = 4\n",
+                "ring_mb = 5000\n", NULL };
+            for (k = 0; bad[k]; k++) {
+                char t2[128];
+                snprintf(t2, sizeof t2, "[strip]\nholder = 24x217\n%s", bad[k]);
+                f = text(t2);
+                CHECK(ft_job_read(&d2, f, &e) == -1);
+                fclose(f);
+            }
+        }
+        f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 3150\n"
+                 "window = 4 4 36 24\npass = -1\n");
+        CHECK(ft_job_read(&d2, f, &e) == -1);
+        fclose(f);
+
+        /* validation */
+        c.has_film_base = 1;
+        c.film_base[0] = 0.3; c.film_base[1] = 0.6; c.film_base[2] = 0.9;
+        c.f[0].bin = 1;
+        c.f[1].include = 0;
+        c.focus = FT_FOCUS_SHIFTED;
+        c.focus_offset = 0;
+        CHECK(ft_job_validate(&c, &ft_lens_default, &e) == 0);
+        d2 = c;
+        d2.film = FT_FILM_SLIDE;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "negative") != NULL);
+        d2 = c;
+        d2.detail_fmt = FT_DFMT_DNG;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        d2 = c;
+        d2.detail = FT_DETAIL_NEG;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);   /* bw */
+        d2.detail_bw = FT_BW_OFF;
+        d2.film = FT_FILM_SLIDE;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == 0);
+        d2 = c;
+        d2.has_film_base = 0;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        d2 = c;
+        d2.f[0].pass = 0;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        d2 = c;
+        d2.f[0].bin = 2;                    /* 3150 x 2 = 6300 optics */
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "bin 1") != NULL);
+        d2 = c;
+        d2.f[1].include = 1;
+        d2.f[1].pass = 1;
+        d2.f[1].ppi = 6300;
+        d2.f[1].bin = 1;
+        d2.f[1].type = FT_FRAME_FULL;
+        CHECK(ft_job_validate(&d2, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "mixes") != NULL);
+    }
+
     /* film_base: written with the strip, read back; absent = not set */
     {
         ft_job c = a;
