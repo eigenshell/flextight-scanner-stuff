@@ -112,7 +112,7 @@ int ft_share_meta_parse(const char *text, size_t n, ft_share_meta *m,
         } else if (strcmp(k, "share_frame") == 0) {
             ft_share_frame *f = &m->f[m->nframes];
             char tn[16], extra;
-            int idx;
+            int idx, j;
             if (m->nframes == FT_MAX_FRAMES)
                 return ft_fail(e, "share meta: more than %d share_frame",
                                FT_MAX_FRAMES);
@@ -121,8 +121,13 @@ int ft_share_meta_parse(const char *text, size_t n, ft_share_meta *m,
                   type_of(tn, &f->type) || idx < 1 || !(f->len > 0) ||
                   !(f->width > 0) || !isfinite(f->y0) || !isfinite(f->x0);
             f->index = idx;
-            if (!bad)
+            if (!bad) {
+                for (j = 0; j < m->nframes; j++)
+                    if (m->f[j].index == idx)
+                        return ft_fail(e, "share meta: frame %d listed twice",
+                                       idx);
                 m->nframes++;
+            }
         }
         if (bad)
             return ft_fail(e, "share meta: bad %s=%s", k, v);

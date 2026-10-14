@@ -33,6 +33,35 @@ static void add_frame(ft_share_meta *m, int idx, ft_frame_type t, double y0,
     f->width = 24;
 }
 
+/* mean G over a column (col >= 0) or a row (col < 0, row used) segment of the
+ * cut image, from a to b exclusive */
+static double mean_g(const ft_image *im, int col, int row, int a, int b)
+{
+    double s = 0;
+    int i;
+    for (i = a; i < b; i++)
+        s += col >= 0 ? im->rgb[((size_t)i * im->w + col) * 3 + 1]
+                      : im->rgb[((size_t)row * im->w + i) * 3 + 1];
+    return s / (b - a);
+}
+
+/* the box edges sit within a few px of the true frame edge in both axes:
+ * base just outside, exposed just inside (base G is 0.40) */
+static void edge_probes(const ft_image *im, const int *bx)
+{
+    int x0 = bx[0], y0 = bx[1], x1 = bx[0] + bx[2], y1 = bx[1] + bx[3];
+    CHECK_NEAR(mean_g(im, x0 - 3, 0, y0, y1), 0.40, 0.03);
+    CHECK(mean_g(im, x0 + 3, 0, y0, y1) < 0.37);
+    if (x1 + 2 < im->w)
+        CHECK_NEAR(mean_g(im, x1 + 2, 0, y0, y1), 0.40, 0.03);
+    CHECK(mean_g(im, x1 - 4, 0, y0, y1) < 0.37);
+    CHECK_NEAR(mean_g(im, -1, y0 - 3, x0, x1), 0.40, 0.03);
+    CHECK(mean_g(im, -1, y0 + 3, x0, x1) < 0.37);
+    if (y1 + 2 < im->h)
+        CHECK_NEAR(mean_g(im, -1, y1 + 2, x0, x1), 0.40, 0.03);
+    CHECK(mean_g(im, -1, y1 - 4, x0, x1) < 0.37);
+}
+
 int main(void)
 {
     static ft_share_cut_result r;
@@ -91,6 +120,7 @@ int main(void)
             CHECK(mid[1] < 0.35f);                  /* base G is 0.40 */
             CHECK_NEAR(gap[1], 0.40, 0.04);
         }
+        edge_probes(&c->im, c->box);
     }
     CHECK(r.f[2].index == 3 && r.f[2].estimated);
     CHECK_NEAR(r.f[2].shift_mm, 1.5, 0.1);          /* the median shift */
@@ -127,6 +157,7 @@ int main(void)
     CHECK_NEAR(r.f[0].shift_mm, -1.0, 0.1);
     CHECK_NEAR(r.f[0].box[2], 36 * 1500 / 25.4, 0.15 * 1500 / 25.4);
     CHECK(r.f[0].box[2] > r.f[0].box[3]);           /* landscape */
+    edge_probes(&r.f[0].im, r.f[0].box);
     CHECK_NEAR(r.f[0].export_scale, 2000.0 / r.f[0].box[2], 1e-9);
     ft_share_cut_free(&r);
     synth_window_free(&s);
@@ -176,6 +207,10 @@ int main(void)
         strcpy(buf, txt);
         strcat(buf, "share_frame=5 sideways 1 2 3 4\n");
         CHECK(ft_share_meta_parse(buf, strlen(buf), &m, &e) == -1);
+        strcpy(buf, txt);
+        strcat(buf, "share_frame=3 half 1.000 18.000 4.100 24.000\n");
+        CHECK(ft_share_meta_parse(buf, strlen(buf), &m, &e) == -1);
+        CHECK(strstr(e.msg, "listed twice") != NULL);
         strcpy(buf, txt);
         strcat(buf, "bin=5\n");
         CHECK(ft_share_meta_parse(buf, strlen(buf), &m, &e) == -1);
