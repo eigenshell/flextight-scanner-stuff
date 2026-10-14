@@ -25,6 +25,9 @@ test/test_detect: test/test_detect.c test/synth.c test/synth.h test/ftest.h libf
 test/test_share_cut: test/test_share_cut.c test/synth.c test/synth.h test/ftest.h libft.a
 	$(CC) $(CFLAGS) -I. -o $@ test/test_share_cut.c test/synth.c libft.a -lm
 
+test/window_dump: test/window_dump.c test/synth.c test/synth.h libft.a
+	$(CC) $(CFLAGS) -I. -o $@ test/window_dump.c test/synth.c libft.a -lm
+
 test/test_icc: test/test_icc.c test/ftest.h libft.a
 	$(CC) $(CFLAGS) -I. -o $@ test/test_icc.c libft.a $(LCMS_LIBS) -lm
 
@@ -44,6 +47,6 @@ test: $(TESTS) purity
 	@for t in $(TESTS); do ./$$t || exit 1; done
 
 clean:
-	rm -f $(OBJ) libft.a $(TESTS) test/png_dump
+	rm -f $(OBJ) libft.a $(TESTS) test/png_dump test/window_dump
 
 .PHONY: test clean purity
