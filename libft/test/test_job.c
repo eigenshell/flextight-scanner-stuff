@@ -115,7 +115,7 @@ int main(void)
             static const char *bad[] = {
                 "detail = both\n", "detail = none\n", "detail_fmt = jpg\n",
                 "detail_bw = grey\n", "keep_raw = 1\n", "ring_mb = 4\n",
-                "ring_mb = 5000\n", NULL };
+                "ring_mb = 1025\n", "ring_mb = 4096\n", NULL };
             for (k = 0; bad[k]; k++) {
                 char t2[128];
                 snprintf(t2, sizeof t2, "[strip]\nholder = 24x217\n%s", bad[k]);
@@ -124,6 +124,29 @@ int main(void)
                 fclose(f);
             }
         }
+        /* the largest ring a 32-bit process can still allocate */
+        f = text("[strip]\nholder = 24x217\nring_mb = 1024\n");
+        CHECK(ft_job_read(&d2, f, &e) == 0 && d2.ring_mb == 1024);
+        fclose(f);
+        CHECK((double)FT_RING_MB_MAX * 1048576 < 2147483648.0);
+
+        /* frames still to scan in a pass: a resumed job skips the passes
+         * it finished (done) and those without an included frame */
+        d2 = c;
+        d2.f[1].include = 1;
+        d2.f[1].done = 0;
+        CHECK(ft_job_pass_todo(&d2, 1) == 1 && ft_job_pass_todo(&d2, 2) == 1);
+        d2.f[0].done = 1;
+        CHECK(ft_job_pass_todo(&d2, 1) == 0 && ft_job_pass_todo(&d2, 2) == 1);
+        d2.f[1].include = 0;
+        CHECK(ft_job_pass_todo(&d2, 2) == 0 && ft_job_pass_todo(&d2, 3) == 0);
+        d2.f[0].done = 0;
+        d2.f[1].include = 1;
+        d2.f[1].pass = 1;
+        CHECK(ft_job_pass_todo(&d2, 1) == 2);
+        d2.f[1].done = 1;
+        CHECK(ft_job_pass_todo(&d2, 1) == 1);   /* one of two left */
+
         f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 3150\n"
                  "window = 4 4 36 24\npass = -1\n");
         CHECK(ft_job_read(&d2, f, &e) == -1);

@@ -31,7 +31,8 @@ typedef enum { FT_DFMT_DNG, FT_DFMT_TIFF } ft_detail_fmt;
 typedef enum { FT_BW_OFF, FT_BW_MONO, FT_BW_RGB } ft_detail_bw;
 #define FT_RING_MB_DEFAULT 64
 #define FT_RING_MB_MIN 8
-#define FT_RING_MB_MAX 4096
+#define FT_RING_MB_MAX 1024     /* a 32-bit process (ftpoc on XP) has
+                                   2 GB of address space in all */
 
 typedef struct {
     char holder[16];
@@ -62,5 +63,8 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e);
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e);
 /* the bin a frame scans with: its own, or the fastest for its ppi */
 int ft_job_bin(const ft_job_frame *f);
+/* detailed scan: the included frames of pass `pass` not yet done; 0 =
+ * nothing to scan in it (finished, or no frame) */
+int ft_job_pass_todo(const ft_job *j, int pass);
 
 #endif

@@ -20,6 +20,14 @@ int ft_job_bin(const ft_job_frame *f)
     return f->bin ? f->bin : ft_bin_for_ppi(f->ppi);
 }
 
+int ft_job_pass_todo(const ft_job *j, int pass)
+{
+    int i, n = 0;
+    for (i = 0; i < j->nframes; i++)
+        n += j->f[i].include && !j->f[i].done && j->f[i].pass == pass;
+    return n;
+}
+
 /* "# bin options at P ppi: b: time, light, Dmax | ..." for the frame */
 static void bin_options(FILE *out, const ft_job_frame *f)
 {

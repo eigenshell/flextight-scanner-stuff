@@ -73,7 +73,7 @@ static struct detail_run {
 } *g_detail;
 
 static int detail_put(const BYTE *p, DWORD n);
-static int detail_start(const char *out, long px);
+static int detail_start(const char *out);
 
 /* ---------------------------------------------------------------- transport */
 
@@ -1398,7 +1398,7 @@ static int cmd_scan(const struct preset *p, long y, long keep,
         return 1;
     }
     /* detailed pass: the worker starts while the carriage moves */
-    if (g_detail && detail_start(out, px)) {
+    if (g_detail && detail_start(out)) {
         send_end(p);
         return 1;
     }
@@ -3079,8 +3079,8 @@ static int detail_put(const BYTE *p, DWORD n)
 }
 
 /* after the calibration lines: open the pass (its files are created
- * here), the ring and the worker thread */
-static int detail_start(const char *out, long px)
+ * here) and the worker thread behind the ring scan_detail allocated */
+static int detail_start(const char *out)
 {
     struct detail_run *r = g_detail;
     char fp[300];
@@ -3102,20 +3102,11 @@ static int detail_start(const char *out, long px)
         printf("detail: %s\n", e.msg);
         return 1;
     }
-    r->r = ring_open((size_t)px * 6, (size_t)r->ring_mb << 20);
-    if (!r->r) {
-        printf("detail: no room for a %d MB ring\n", r->ring_mb);
-        ft_detail_abort(r->d);
-        r->d = NULL;
-        return 1;
-    }
     memset(&r->w, 0, sizeof r->w);
     r->w.r = r->r;
     r->w.d = r->d;
     if (pass_worker_start(&r->w)) {
         printf("detail: cannot start the worker thread\n");
-        ring_close(r->r);
-        r->r = NULL;
         ft_detail_abort(r->d);
         r->d = NULL;
         return 1;
@@ -3296,7 +3287,7 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
     static struct detail_run run;
     static ft_detail_result res;
     static ft_image meta;
-    int maxp = 0, p, i, k;
+    int maxp = 0, npass = 0, p, i, k;
     double need = 0, secs = 0;
     ULARGE_INTEGER avail;
     char dir[260];
@@ -3308,8 +3299,9 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
         struct crop_req q;
         ft_dscan ds;
         long ccd, optic;
-        if (detail_window(j, p, h, &q, &ds))
+        if (!ft_job_pass_todo(j, p) || detail_window(j, p, h, &q, &ds))
             continue;
+        npass++;
         if (crop_check(&q, &ccd, &optic)) {
             printf("pass %d: REFUSED (reason above); nothing scanned\n", p);
             return 1;
@@ -3329,7 +3321,7 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
     if (GetDiskFreeSpaceExA(k ? dir : NULL, &avail, NULL, NULL)) {
         double freeb = (double)avail.QuadPart;
         printf("%s: %d pass(es), ~%.0f min, %.0f MB of files, %.0f MB free\n",
-               path, maxp, secs / 60, need / 1048576, freeb / 1048576);
+               path, npass, secs / 60, need / 1048576, freeb / 1048576);
         if (freeb < need * 1.05) {
             printf("not enough free space (outputs + 5 %%); nothing "
                    "scanned\n");
@@ -3350,7 +3342,7 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
         int rc, n = 0;
         ft_err e;
 
-        if (detail_window(j, p, h, &q, &ds))
+        if (!ft_job_pass_todo(j, p) || detail_window(j, p, h, &q, &ds))
             continue;
         memset(&run, 0, sizeof run);
         run.o.scan = ds;
@@ -3384,6 +3376,15 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
         if (!run.cal || crop_check(&q, &ccd, &optic)) {
             free(run.cal);
             printf("pass %d: out of memory or refused; stopped\n", p);
+            return 1;
+        }
+        /* the ring before the scanner moves: a failed allocation now
+         * stops the job, not the scan halfway through calibration */
+        run.r = ring_open((size_t)ds.px * 6, (size_t)run.ring_mb << 20);
+        if (!run.r) {
+            free(run.cal);
+            printf("pass %d: no room for a %d MB ring (a smaller ring_mb); "
+                   "stopped\n", p, run.ring_mb);
             return 1;
         }
         snprintf(out, sizeof out, "%s_pass%02d.raw", jobbase, p);

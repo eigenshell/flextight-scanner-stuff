@@ -314,8 +314,9 @@ focus, time, file size) and writes the job (`detail*`, `keep_raw`,
 
 `scan --job` checks every pass window and the **free space** (files +
 5 %) before the scanner moves, then scans pass by pass. The scanner's
-lines go into a RAM ring (`ring_mb`, default 64 MB: ~2 min of a stalled
-disk at the scanner's ~0.5 MB/s) and a worker thread develops them
+lines go into a RAM ring (`ring_mb`, 8..1024, default 64 MB: ~2 min of
+a stalled disk at the scanner's ~0.5 MB/s; allocated before the scanner
+moves) and a worker thread develops them
 line by line (flat-field, Faul Pixs, RGB alignment), cuts each frame
 (its preview box + 3 mm, for creep) and appends it to its tiled file:
 nothing is held whole and every file is written once. The reader never
@@ -325,8 +326,8 @@ a pass frame detection runs on a 525 ppi copy; each frame's detected box
 sidecar `<frame>.txt` (`frame_box`, `shift_mm`, `estimated`, `edge`).
 Files are `strip_frameNN.dng|.tif`, written as `.partial` and renamed
 when complete; a failed or interrupted pass leaves its frames
-`.partial` (finished passes are marked done; resuming inside a pass is
-not supported). Every pass prints the ring's peak and the longest
+`.partial` (finished passes are marked done and a re-run skips them;
+resuming inside a pass is not supported). Every pass prints the ring's peak and the longest
 single line: the numbers that tell whether a slower machine keeps up.
 
 `--keep-raw yes` also keeps each pass as it arrived
