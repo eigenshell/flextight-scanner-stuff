@@ -63,7 +63,11 @@ FlexColor software — first on Windows, then on Linux.
   the preview, automatic range and exposure, tint pairs in CC, paper
   grade and curve presets, as a 16-bit sRGB PNG. Formats are entries in
   `libft/ft_out.c`; FlexColor 3F (.fff) output is planned there as a
-  legacy option.
+  legacy option. Scan to share (`ftpoc frames --share`, then
+  `ftdev cut` and `ftdev export`): a low-magnification scan per window of
+  frames, a working DNG per frame, and a 2000 px JPEG in sRGB, Display P3
+  or Adobe RGB with soft gamut compression and an embedded ICC profile
+  (`libft/ft_output.h`; `export` needs libjpeg-turbo).
 - Detailed scans (3150 / 6300 ppi archive files): `ftpoc frames
   --detail neg|pos` previews at the scan's own optics, measures focus per
   selected frame and groups the frames into passes by depth of focus;

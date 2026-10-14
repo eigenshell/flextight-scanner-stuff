@@ -21,6 +21,8 @@ typedef struct {
     int sprockets, straighten, confidence_low, done;
     long focus_offset;            /* per-frame mode: measured offset */
     int pass;                     /* detailed scan: its pass (1..), 0 none */
+    int group;                    /* share job: the window it scans in
+                                     (1..); 0 = not in a share job */
 } ft_job_frame;
 
 /* Detailed scans (sub-project 2b): what the passes write */
@@ -47,6 +49,10 @@ typedef struct {
     ft_detail_bw detail_bw;       /* pos only: off (colour), mono, rgb */
     int keep_raw;                 /* also write the undeveloped lines */
     int ring_mb;                  /* RAM between the scanner and the disk */
+    double share;                 /* scan to share: target px on each
+                                     frame's long side (ft_share.h); 0 =
+                                     an ordinary job, one scan per frame */
+    int hf_half_res;              /* share: half frames at the FF's ppi */
     int nframes;
     ft_job_frame f[FT_MAX_FRAMES];
 } ft_job;

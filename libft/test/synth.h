@@ -46,4 +46,31 @@ void synth_default(synth_spec *s, ft_film film);
 void synth_add(synth_spec *s, double y0, double len, int blank);
 float *synth_preview(const synth_spec *s);      /* caller frees */
 
+
+/* A window scan as ftpoc writes it for a share job: raw lines with the
+ * tri-linear rows offset (aligned row l = R of raw l + 2k, G of l + k, B
+ * of l; k = 12 / bin), dark 300 and white 5000 everywhere, 200 + 50
+ * calibration lines. Film fills the window; frames and base-like patches
+ * at their true places, holder mm. */
+typedef struct {
+    double ppi;
+    int bin;
+    double y0_mm, len_mm;          /* window along */
+    double x0_mm, w_mm;            /* window across (approximately) */
+    int nfr;
+    double fy0[8], flen[8];
+    int npatch;
+    struct { double y0, y1, x0, x1; } patch[4];
+    int open;                      /* no film: open beam everywhere */
+} synth_win;
+
+typedef struct {
+    unsigned short *raw, *cal;     /* NULL: out of memory */
+    int lines, px, cal_lines;
+    long x, y;                     /* first output px, first line (.txt) */
+    float base[3];                 /* the film base transmittance */
+} synth_win_scan;
+
+void synth_window(const synth_win *w, synth_win_scan *s);
+void synth_window_free(synth_win_scan *s);
 #endif

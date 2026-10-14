@@ -75,6 +75,7 @@ ftpoc busreset       IOCTL_STORAGE_RESET_BUS on the Imacon's HBA port only;
 ```
 ftpoc frames [--film neg|slide] [--ppi 2000] [--sprockets yes|no]
              [--preview standard|1000|1500] [-h s] [-o strip]
+             [--share 2000 [--select 1,3-6,8-12] [--hf-half-res on|off]]
 ftpoc scan --job strip.job [-h s]
 ftpoc calibrate-focus <x_mm> <y_mm> <w_mm> [-h s]
 ```
@@ -103,6 +104,50 @@ use the fast, high-magnification optics.
 `strip.raw` keeps the full-resolution preview (render it with
 `ftraw.py`); detection and `strip.png` use a copy box-averaged to
 ~500 ppi.
+
+#### Scan to share (`frames --share`)
+
+A share scan is its own scan, not a detail scan resampled down: the
+lowest magnification that still gives the target size on each frame's
+long side (the detected frame, not the window with the hole rows) puts
+the most light on every sample, so Dmax is higher and noise lower.
+`--share 2000` plans it: the frames you `--select` (job frame numbers;
+default every frame that is not partial) at the needed ppi (2000 px on
+36 mm: 1412; the optics floor is 1500), every usable bin priced (scan
+time, focus time, light, Dmax), the one with the most light chosen.
+`--hf-half-res on` gives half frames the full frame's ppi: the same
+optics and Dmax, ~1333 px on their 24 mm side.
+
+The stock firmware scans one window per scan and calibrates every time
+(the holder travels out and back: that is what makes the film creep
+between runs), so selected frames next to each other share a window and
+an unselected frame between them splits it when skipping it is faster
+(it always is for a whole frame: ~34 s per window against ~210 s per
+full frame at 1500 ppi bin 1). The job gets `share` and `hf_half_res`,
+and each frame a `group` (its window). No focus check: share optics have
+the deepest depth of field; the focus curve is used as is (set
+`focus_offset` by hand if a hardware check says otherwise).
+
+`scan --job` on a share job scans each group as one window, 2 mm beyond
+its first and last frame and the full film width (`<jobbase>_winNN.raw`,
+the share keys appended to its `.txt`). Then, on any OS:
+
+```
+ftdev cut strip_win01.raw          # -> strip_frameNN.dng + .dng.txt
+ftdev export strip_frame03.dng     # -> strip_frame03.jpg, 2000 px, sRGB
+```
+
+`cut` finds the frames again in the window's own pixels (the film moved
+since the preview), cuts each with 0.5 mm bleed and writes the working
+raw (linear 16-bit DNG) plus a sidecar (frame box, export scale, film
+base; a frame detection missed is cut at its preview box, moved by the
+others' shift, and flagged `estimated`). `export` renders (the render
+flags of `-f positive`), crops to the frame (`--crop x,y,w,h` in DNG
+pixels), resizes in linear light to the share size (`--long-edge px`
+for another), maps colour to `--space srgb|p3|adobe` (`--gamut soft`,
+the default, compresses only saturated colours near the edge; `clip`
+clamps) and writes an 8-bit JPEG with its ICC profile; `--raw-too` also
+copies the DNG next to it.
 
 #### Optics per frame (the job's `bin` key, `crop -b`)
 
@@ -138,6 +183,9 @@ film_base     D r g b of unexposed film, measured on the preview (the
               the negative's base or the slide's black. Optional; `frames`
               writes it, `scan --job` copies it to each frame's .txt,
               `ftdev -f positive` renders with it
+share         scan to share: px on each frame's long side (100..20000);
+              absent = an ordinary job (`frames --share`)
+hf_half_res   yes | no: share, half frames at the full frame's ppi
 [frame N]
 type          full | half | panorama | partial (informational)
 include       yes | no: scan this frame or not
@@ -153,11 +201,13 @@ straighten    yes | no: recorded in the .txt for post-processing
 confidence    high | low: detection confidence (informational)
 focus_offset  per-frame mode: the measured offset; 0 = use the strip's
 done          yes | no: scanned already (scan --job skips it; set no to redo)
+group         share jobs only: the window (1..) the frame is scanned in;
+              a group's frames share ppi and bin and follow each other
 ```
 
-Jobs written by this ftpoc contain `film_base`, which older ftpoc
-builds reject ("unknown key"); rebuild ftpoc on the scanner box before
-using them.
+Jobs written by this ftpoc contain `film_base` (and share jobs `share`,
+`hf_half_res`, `group`), which older ftpoc builds reject ("unknown
+key"); rebuild ftpoc on the scanner box before using them.
 
 `scan --job` validates the job and runs every remaining frame's scan
 window through the crop checks before the scanner does anything; a

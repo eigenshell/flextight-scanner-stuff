@@ -206,6 +206,86 @@ int main(void)
         CHECK(ft_job_read(&b, f, &e) == -1);       /* negative D */
         fclose(f);
     }
+    /* share: strip keys and per-frame groups round trip; groups are
+     * written only in a share job */
+    {
+        ft_job c;
+        char buf[4096];
+        size_t n;
+        memset(&c, 0, sizeof c);
+        strcpy(c.holder, "24x217");
+        c.share = 2000;
+        c.hf_half_res = 1;
+        c.nframes = 3;
+        for (n = 0; n < 3; n++) {
+            c.f[n].index = (int)n + 1;
+            c.f[n].type = FT_FRAME_HALF;
+            c.f[n].include = n != 1;
+            c.f[n].ppi = 1500;
+            c.f[n].bin = 1;
+            c.f[n].y0 = 3 + 19.0 * n;
+            c.f[n].x0 = 4;
+            c.f[n].len = 18;
+            c.f[n].width = 24;
+            c.f[n].group = n == 0 ? 1 : n == 2 ? 2 : 0;
+        }
+        f = tmpfile();
+        CHECK(ft_job_write(&c, f) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        CHECK(strstr(buf, "share = 2000") && strstr(buf, "hf_half_res = yes"));
+        CHECK(strstr(buf, "group = 2") != NULL);
+        rewind(f);
+        CHECK(ft_job_read(&b, f, &e) == 0);
+        fclose(f);
+        CHECK(b.share == 2000 && b.hf_half_res == 1);
+        CHECK(b.f[0].group == 1 && b.f[1].group == 0 && b.f[2].group == 2);
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
+        /* an ordinary job writes no share keys and no groups */
+        f = tmpfile();
+        CHECK(ft_job_write(&a, f) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        fclose(f);
+        CHECK(!strstr(buf, "share") && !strstr(buf, "group"));
+        /* share rules */
+        b.f[2].group = 0;                     /* included, no group */
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "without a group") != NULL);
+        b.f[2].group = 2;
+        b.f[2].bin = 2;                       /* own group: fine */
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
+        b.f[2].group = 1;                     /* same group, other bin */
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "differ") != NULL);
+        b.f[2].bin = 1;
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == 0);
+        b.f[1].include = 1;                   /* 1, 2, 1: split */
+        b.f[1].group = 2;
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "split") != NULL);
+        b.f[1].include = 0;
+        b.f[0].y0 = 50;                       /* out of strip order */
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "follow the strip") != NULL);
+        b.f[0].y0 = 3;
+        b.share = 0;                          /* groups without share */
+        CHECK(ft_job_validate(&b, &ft_lens_default, &e) == -1);
+        CHECK(strstr(e.msg, "group without share") != NULL);
+        /* reader limits */
+        f = text("[strip]\nholder = 24x217\nshare = 50\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);
+        fclose(f);
+        f = text("[strip]\nholder = 24x217\nhf_half_res = maybe\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);
+        fclose(f);
+        f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 1500\n"
+                 "window = 50 4 36 24\ngroup = -1\n");
+        CHECK(ft_job_read(&b, f, &e) == -1);
+        fclose(f);
+    }
     /* a job without bin keys (older files) scans with the fastest bin */
     f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\n"
              "window = 50 4 36 24\n");

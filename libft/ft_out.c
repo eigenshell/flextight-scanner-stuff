@@ -4,8 +4,8 @@
 #include <string.h>
 #include "ft_dng.h"
 #include "ft_out.h"
+#include "ft_output.h"
 #include "ft_png.h"
-#include "ft_render.h"
 
 static const ft_writer WRITERS[] = {
     { "dng", ".dng", "linear 16-bit DNG (darktable, RawTherapee, Lightroom)",
@@ -13,7 +13,7 @@ static const ft_writer WRITERS[] = {
     { "png", ".png", "8-bit preview, gamma 2.2, not inverted",
       ft_png_write_preview },
     { "positive", "_positive.png",
-      "rendered positive, 16-bit sRGB PNG (needs a render: --film)",
+      "rendered positive, 16-bit sRGB PNG, soft gamut (needs --film)",
       ft_png_write_positive },
     { NULL, NULL, NULL, NULL },
 };
@@ -53,35 +53,36 @@ int ft_png_write_preview(const char *path, const ft_image *im, ft_err *e)
     return rc;
 }
 
-/* linear Rec.2020 -> linear sRGB (the inverse of ITU-R BT.2087) */
-static const double SRGB_FROM_2020[9] = {
-     1.6604910021, -0.5876411388, -0.0728498633,
-    -0.1245504745,  1.1328998971, -0.0083494226,
-    -0.0181507634, -0.1005788980,  1.1187296614,
-};
-
 int ft_png_write_positive(const char *path, const ft_image *im, ft_err *e)
 {
-    size_t n, i;
-    unsigned short *o;
-    int c, rc;
+    size_t n, i, row;
+    unsigned short *o = NULL;
+    float *enc = NULL;
+    ft_output *out;
+    int rc = -1;
     if (!im->rgb || im->w < 1 || im->h < 1)
         return ft_fail(e, "positive: empty image");
     n = (size_t)im->w * im->h;
-    o = malloc(n * 3 * sizeof *o);
-    if (!o)
-        return ft_fail(e, "positive: out of memory");
-    for (i = 0; i < n; i++) {
-        const float *p = im->rgb + 3 * i;
-        for (c = 0; c < 3; c++) {
-            double v = SRGB_FROM_2020[3 * c] * p[0] +
-                       SRGB_FROM_2020[3 * c + 1] * p[1] +
-                       SRGB_FROM_2020[3 * c + 2] * p[2];
-            /* hard clip for now; gamut mapping comes with the output stage */
-            o[3 * i + c] = (unsigned short)(ft_srgb_encode(v) * 65535 + 0.5);
-        }
+    row = (size_t)im->w;
+    out = malloc(sizeof *out);              /* ~330 KB of tables */
+    if (out)
+        o = malloc(n * 3 * sizeof *o);
+    if (o)
+        enc = malloc(row * 3 * sizeof *enc);
+    if (!enc) {
+        ft_fail(e, "positive: out of memory");
+        goto done;
+    }
+    if (ft_output_compile(FT_SPACE_SRGB, FT_GAMUT_SOFT, out, e))
+        goto done;
+    for (i = 0; i < n; i += row) {
+        ft_output_apply(out, im->rgb + 3 * i, enc, row);
+        ft_output_quantise16(enc, o + 3 * i, row);
     }
     rc = ft_png_write_rgb16(path, o, im->w, im->h, e);
+done:
+    free(enc);
     free(o);
+    free(out);
     return rc;
 }
