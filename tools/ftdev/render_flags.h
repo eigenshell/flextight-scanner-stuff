@@ -45,4 +45,6 @@ int recipe_text(char *buf, size_t cap, const char *look, int frame,
                 const ft_recipe *r, const char *const curve[4],
                 const ft_look_detail *d);
 
+/* v as the shortest "%g" that reads back as the same float */
+const char *fmtf(float v, char *buf, size_t cap);
 #endif

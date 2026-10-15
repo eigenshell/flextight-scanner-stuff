@@ -13,6 +13,9 @@
  *         [--quality q] [--raw-too] [-o out.jpg]
  *         [--edit roll.edit [--frame N]]
  *   ftdev stock learn <roll.edit> <frame.dng>... -o <name.look> [--replace]
+ *   ftdev print <frame.dng>... (--emulsion <id> [--cmyd c,m,y,d] |
+ *         --roll <roll.print> [--job <file.job>]) [-o out.jpg]
+ *   ftdev emulsions
  *
  * Reads <scan.raw> with its .cal, .faul and .txt (ftpoc's output), runs
  * the libft pipeline (ft_develop.h) and writes one file per format to
@@ -30,12 +33,14 @@
  * export --edit renders with a roll's look and the frame's overrides
  * (ft_look.h); every export writes how it was made to <out.jpg>.txt and
  * the JPEG's comment. stock learn (stock.c) saves a roll's look with stock
- * hints learned from its frames.
+ * hints learned from its frames. print (print.c) prints frames through an
+ * emulsion with C/M/Y/D clicks (ft_print.h).
  *
  * Build: make (Linux/macOS), or with mingw:
  *   gcc -std=c99 -O2 -I..\..\libft -I..\detail -o ftdev.exe ftdev.c
- *       detail.c util.c render_flags.c share.c ..\detail\ring.c
- *       ..\detail\worker.c ..\..\libft\ft_jpeg.c <every other libft .c>
+ *       detail.c util.c render_flags.c share.c stock.c print.c
+ *       ..\detail\ring.c ..\detail\worker.c ..\..\libft\ft_jpeg.c
+ *       <every other libft .c>
  *       -ljpeg -lm
  */
 #include <math.h>
@@ -104,6 +109,10 @@ static void usage(void)
                     "[--edit roll.edit [--frame N]]\n"
                     "       ftdev stock learn <roll.edit> <frame.dng>... "
                     "-o <name.look> [--replace]\n"
+                    "       ftdev print <frame.dng>... (--emulsion <id> "
+                    "[--cmyd c,m,y,d] | --roll <roll.print>\n"
+                    "             [--job <file.job>]) [-o out.jpg]\n"
+                    "       ftdev emulsions\n"
                     "formats (default dng):\n");
     for (w = ft_writers(); w->name; w++)
         fprintf(stderr, "  %-8s %s\n", w->name, w->what);
@@ -139,6 +148,10 @@ int main(int argc, char **argv)
         return ftdev_export(argc - 2, argv + 2);
     if (argc > 1 && strcmp(argv[1], "stock") == 0)
         return ftdev_stock(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "print") == 0)
+        return ftdev_print(argc - 2, argv + 2);
+    if (argc > 1 && strcmp(argv[1], "emulsions") == 0)
+        return ftdev_emulsions(argc - 2, argv + 2);
     ft_image_init(&im);
     rflags_init(&rf);
     for (i = 1; i < argc; i++) {
