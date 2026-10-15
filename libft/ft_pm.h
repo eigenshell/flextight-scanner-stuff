@@ -20,8 +20,21 @@ typedef struct {
 } ft_pm_stock_par;
 
 /* balance: classic = ft_render_auto's exposure (highlight at paper
- * white), no tint */
+ * white), no tint; frontier = large-area density with correction slopes
+ * below 1 (ft_pm_frontier.c) */
 extern const ft_pm_balance ft_pm_balance_classic;
+extern const ft_pm_balance ft_pm_balance_frontier;
+typedef struct {
+    double aim;             /* e (D) the frame's mean film density prints at */
+    double k_d;             /* density: share of a frame's deviation from
+                               the roll that is corrected */
+    double k_c;             /* colour: the same for colour, < 1 */
+    double clamp;           /* colour: max per-frame correction, D */
+    double sat;             /* blocks this saturated (max |d_c - mean|, D)
+                               are left out of the means */
+    double aim_c[3];        /* colour reference for short rolls */
+    int min_frames;         /* fewer frames: aim_c, not the roll median */
+} ft_pm_frontier_par;
 
 /* print: classic = ft_render's sigmoid paper */
 extern const ft_pm_print ft_pm_print_classic;
