@@ -10,10 +10,12 @@
  *
  *   film     base and contrast: the recipe's base and range
  *   balance  the per-frame auto filtration: exposure and tint
- *   print    the paper: grade and paper densities (ft_render)
+ *   print    the paper: grade and paper densities (ft_render), or a 3D
+ *            table (lut3d)
  *   output   to linear Rec.2020: the recipe's matrix
  *
- * A frame resolves to an ft_recipe (ft_render.h). Clicks act at the filtration point, after the auto: one
+ * A frame resolves to an ft_recipe (ft_render.h) plus, for a lut3d print,
+ * the table. Clicks act at the filtration point, after the auto: one
  * click = 0.025 D of print exposure (a printer point; 12 clicks = 1
  * stop). + C/M/Y = more of that colour in the print, + D = a denser
  * (darker) print; +1 C +1 M +1 Y = +1 D, as on a colour enlarger.
@@ -117,11 +119,28 @@ typedef struct {
     const void *output_par;
 } ft_emulsion;
 
+/* a 3D table: n^3 RGB nodes, red index fastest (the .cube order), values
+ * sRGB-encoded 0..1 */
+typedef struct {
+    int n;
+    const float *rgb;
+} ft_cube;
+
+#define FT_PRINT_DEC_N 4096         /* sRGB decode table (lut3d) */
+
+typedef struct {
+    float in[3][FT_RENDER_IN_N];    /* T -> cube coordinate 0..n-1 */
+    const ft_cube *cube;
+    float dec[FT_PRINT_DEC_N + 1];
+    float m[9];
+} ft_print_lut;
+
 /* ~380 KB: keep it static or on the heap */
 struct ft_print_render {
-    int lut;                        /* 0: ft_render (u.r) */
+    int lut;                        /* 0: r, 1: l */
     union {
         ft_render r;
+        ft_print_lut l;
     } u;
 };
 

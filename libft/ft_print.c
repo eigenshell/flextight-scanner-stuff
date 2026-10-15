@@ -150,5 +150,8 @@ int ft_print_compile(const ft_emulsion *em, const ft_recipe *r,
 void ft_print_apply(const ft_print_render *c, const float *in, float *out,
                     size_t npx)
 {
-    ft_render_apply(&c->u.r, in, out, npx);
+    if (c->lut)
+        ft_pm_lut3d_apply(&c->u.l, in, out, npx);
+    else
+        ft_render_apply(&c->u.r, in, out, npx);
 }
