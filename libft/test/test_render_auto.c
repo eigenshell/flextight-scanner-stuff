@@ -125,6 +125,18 @@ int main(void)
     CHECK_NEAR(r.exposure,
                -(log(0.015 / 0.985) / 6 + 0.5) * r.range[1] / log10(2),
                1e-5);
+    /* the closed form on its own gives the same exposure, bit for bit,
+     * and follows the paper's grade */
+    CHECK(ft_render_auto_exposure(&r) == r.exposure);
+    {
+        ft_recipe g = r;
+        g.grade = 3;
+        CHECK_NEAR(ft_render_auto_exposure(&g),
+                   -(log(0.015 / 0.985) / 12 + 0.5) * r.range[1] / log10(2),
+                   1e-5);
+        g.grade = 0;
+        CHECK(ft_render_auto_exposure(&g) == 0);
+    }
     CHECK(ft_render_compile(&r, &cr, &e) == 0);
     ft_render_image(&cr, &im);
     {
