@@ -2,6 +2,8 @@
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ft_holder.h"
@@ -28,55 +30,77 @@ int ft_job_pass_todo(const ft_job *j, int pass)
     return n;
 }
 
+/* text into a caller's buffer: n counts every byte asked for, the buffer
+ * keeps what fits and stays NUL-terminated */
+typedef struct {
+    char *b;
+    size_t cap, n;
+} wbuf;
+
+static void putf(wbuf *w, const char *fmt, ...)
+{
+    va_list ap;
+    int k;
+    va_start(ap, fmt);
+    k = vsnprintf(w->n < w->cap ? w->b + w->n : NULL,
+                  w->n < w->cap ? w->cap - w->n : 0, fmt, ap);
+    va_end(ap);
+    if (k > 0)
+        w->n += (size_t)k;
+}
+
 /* "# bin options at P ppi: b: time, light, Dmax | ..." for the frame */
-static void bin_options(FILE *out, const ft_job_frame *f)
+static void bin_options(wbuf *out, const ft_job_frame *f)
 {
     int b[6], n = ft_bins_for_ppi(f->ppi, b), i;
     if (n < 2)
         return;
-    fprintf(out, "# bin options at %g ppi (time, light, Dmax~):", f->ppi);
+    putf(out, "# bin options at %g ppi (time, light, Dmax~):", f->ppi);
     for (i = 0; i < n; i++) {
         double l = ft_light_rel(&ft_lens_default, f->ppi * b[i]);
-        fprintf(out, "%s %d: %.0f s %.1fx %.2f", i ? " |" : "", b[i],
-                ft_scan_seconds(f->ppi, b[i], f->len), l, ft_dmax_est(l));
+        putf(out, "%s %d: %.0f s %.1fx %.2f", i ? " |" : "", b[i],
+             ft_scan_seconds(f->ppi, b[i], f->len), l, ft_dmax_est(l));
     }
-    fprintf(out, "\n");
+    putf(out, "\n");
 }
 
-int ft_job_write(const ft_job *j, FILE *out)
+size_t ft_job_write_buf(const ft_job *j, char *buf, size_t cap)
 {
+    wbuf wb = { buf, cap, 0 }, *out = &wb;
     int i;
+    if (cap)
+        buf[0] = 0;
     for (i = 0; i < j->nframes; i++)
         if ((int)j->f[i].type < 0 || (int)j->f[i].type > 3)
-            return -1;
+            return FT_JOB_BAD;
     if ((int)j->detail < 0 || (int)j->detail > 2 ||
         (int)j->detail_fmt < 0 || (int)j->detail_fmt > 1 ||
         (int)j->detail_bw < 0 || (int)j->detail_bw > 2)
-        return -1;
-    fprintf(out, "[strip]\nholder = %s\nfilm = %s\nfocus = %s\n"
+        return FT_JOB_BAD;
+    putf(out, "[strip]\nholder = %s\nfilm = %s\nfocus = %s\n"
                  "focus_offset = %ld\n", j->holder,
             j->film == FT_FILM_SLIDE ? "slide" : "negative",
             j->focus == FT_FOCUS_PER_FRAME ? "per-frame" : "shifted",
             j->focus_offset);
     if (j->has_film_base)
-        fprintf(out, "film_base = %.4f %.4f %.4f   # D r g b: unexposed film\n",
+        putf(out, "film_base = %.4f %.4f %.4f   # D r g b: unexposed film\n",
                 j->film_base[0], j->film_base[1], j->film_base[2]);
     if (j->detail != FT_DETAIL_NONE)
-        fprintf(out, "detail = %s   # neg: digital negative, pos: archive "
+        putf(out, "detail = %s   # neg: digital negative, pos: archive "
                      "positive\ndetail_fmt = %s\ndetail_bw = %s\n"
                      "keep_raw = %s\nring_mb = %d\n", DETAIL[j->detail],
                 DFMT[j->detail_fmt], BW[j->detail_bw], yn(j->keep_raw),
                 j->ring_mb);
     if (j->share > 0)
-        fprintf(out, "share = %g   # scan to share: px on each frame's long "
+        putf(out, "share = %g   # scan to share: px on each frame's long "
                      "side\nhf_half_res = %s\n", j->share, yn(j->hf_half_res));
     for (i = 0; i < j->nframes; i++) {
         const ft_job_frame *f = &j->f[i];
-        fprintf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
+        putf(out, "\n[frame %d]\ntype = %s\ninclude = %s\nppi = %g\n"
                      "bin = %d   # 0 = fastest; smaller = more light, slower\n",
                 f->index, TYPES[f->type], yn(f->include), f->ppi, f->bin);
         bin_options(out, f);
-        fprintf(out, "window = %.3f %.3f %.3f %.3f   # y0 x0 length width, mm\n"
+        putf(out, "window = %.3f %.3f %.3f %.3f   # y0 x0 length width, mm\n"
                      "tilt = %.2f\nsprockets = %s\nstraighten = %s\n"
                      "confidence = %s\nfocus_offset = %ld\ndone = %s\n",
                 f->y0, f->x0, f->len, f->width, f->tilt_deg,
@@ -84,12 +108,12 @@ int ft_job_write(const ft_job *j, FILE *out)
                 f->confidence_low ? "low" : "high", f->focus_offset,
                 yn(f->done));
         if (j->detail != FT_DETAIL_NONE)
-            fprintf(out, "pass = %d\n", f->pass);
+            putf(out, "pass = %d\n", f->pass);
         if (j->share > 0)
-            fprintf(out, "group = %d   # window: frames of one group scan "
+            putf(out, "group = %d   # window: frames of one group scan "
                          "together\n", f->group);
     }
-    return ferror(out) ? -1 : 0;
+    return wb.n;
 }
 
 static char *trim(char *s)
@@ -167,21 +191,29 @@ static int finish_frame(const ft_job_frame *f, unsigned seen, ft_err *e)
     return 0;
 }
 
-int ft_job_read(ft_job *j, FILE *in, ft_err *e)
+int ft_job_parse(ft_job *j, const char *text, size_t n, ft_err *e)
 {
     char line[256];
+    const char *p = text, *end = text + n;
     int ln = 0, in_strip = 0, strip_line = 0, i;
     unsigned seen = 0;
     ft_job_frame *f = NULL;
 
     memset(j, 0, sizeof *j);
     j->ring_mb = FT_RING_MB_DEFAULT;
-    while (fgets(line, sizeof line, in)) {
+    while (p < end) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t len = (size_t)((nl ? nl : end) - p);
         char *s, *k, *v, *hash;
         int bad = 0, ki;
         ln++;
-        if (!strchr(line, '\n') && !feof(in))
+        if (memchr(p, 0, len))
+            return ft_fail(e, "line %d: NUL byte", ln);
+        if (len >= sizeof line - 1)
             return ft_fail(e, "line %d: too long", ln);
+        memcpy(line, p, len);
+        line[len] = 0;
+        p = nl ? nl + 1 : end;
         if ((hash = strchr(line, '#')) != NULL)
             *hash = 0;
         s = trim(line);

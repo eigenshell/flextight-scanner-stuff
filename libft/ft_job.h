@@ -58,6 +58,16 @@ typedef struct {
     ft_job_frame f[FT_MAX_FRAMES];
 } ft_job;
 
+/* j -> text in buf (NUL-terminated if cap > 0); returns the length the
+ * whole text needs, without the NUL: >= cap means truncated. FT_JOB_BAD
+ * (nothing written) when a frame type or a detail setting is out of
+ * range. */
+#define FT_JOB_BAD ((size_t)-1)
+size_t ft_job_write_buf(const ft_job *j, char *buf, size_t cap);
+/* text[0..n) -> j (no NUL needed); errors name the line: "line 3:
+ * unknown key bogus". -1 with e filled. */
+int ft_job_parse(ft_job *j, const char *text, size_t n, ft_err *e);
+/* the same through a stream (ft_job_io.c; not in the browser build) */
 int ft_job_write(const ft_job *j, FILE *out);
 int ft_job_read(ft_job *j, FILE *in, ft_err *e);
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e);
