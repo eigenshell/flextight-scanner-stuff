@@ -191,7 +191,7 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
 {
     unsigned h[H_N];
     unsigned long tot;
-    double min, st, ex;
+    double min;
     int c, sel, bw = r->mode == FT_RENDER_BW;
     for (c = 0; c < 3; c++)
         r->tint[c] = 0;
@@ -233,6 +233,13 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
     }
     if (bw)
         r->range[1] = r->range[2] = r->range[0];
+    r->exposure = ft_render_auto_exposure(r);
+    return 0;
+}
+
+float ft_render_auto_exposure(const ft_recipe *r)
+{
+    double st, ex;
     /* the highlight (n = 1) at paper white + 0.03 D:
      * s = 0.03 / (black - white), z = logit(s) = 4 grade u,
      * u = -0.5 - lift / range[1], lift = exposure log10(2) */
@@ -249,6 +256,5 @@ int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
         ex = 6;
     if (ex < -6)
         ex = -6;
-    r->exposure = (float)ex;
-    return 0;
+    return (float)ex;
 }

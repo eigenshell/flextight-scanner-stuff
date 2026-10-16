@@ -76,6 +76,9 @@ typedef struct {
     float out[3][FT_RENDER_CURVE_N];
 } ft_render;
 
+/* an input LUT (in[] above) at transmittance t: linear between the two
+ * nodes around t, clamped to the LUT's range (NaN and -inf: the floor) */
+float ft_render_lut_in(const float *tab, float t);
 /* validates r, then builds c; -1 with e filled on a bad recipe */
 int ft_render_compile(const ft_recipe *r, ft_render *c, ft_err *e);
 /* npx interleaved RGB pixels; in == out is allowed. NaN, -inf and values

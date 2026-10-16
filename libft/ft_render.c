@@ -226,7 +226,7 @@ int ft_render_compile(const ft_recipe *r, ft_render *c, ft_err *e)
 
 /* input LUT: node k is the float with bits (K0 + k) << SHIFT, so the low
  * SHIFT mantissa bits are the exact linear position between two nodes */
-static float lut_in(const float *tab, float t)
+float ft_render_lut_in(const float *tab, float t)
 {
     uint32_t b, i;
     float f;
@@ -267,14 +267,15 @@ void ft_render_apply(const ft_render *c, const float *in, float *out,
         int k;
         if (c->mode == FT_RENDER_BW) {
             float y = c->w[0] * s[0] + c->w[1] * s[1] + c->w[2] * s[2];
-            d[0] = d[1] = d[2] = lut_out(c->out[1], lut_in(c->in[1], y));
+            d[0] = d[1] = d[2] = lut_out(c->out[1],
+                                         ft_render_lut_in(c->in[1], y));
             continue;
         }
         t[0] = s[0];
         t[1] = s[1];
         t[2] = s[2];
         for (k = 0; k < 3; k++)
-            l[k] = lut_in(c->in[k], t[k]);
+            l[k] = ft_render_lut_in(c->in[k], t[k]);
         for (k = 0; k < 3; k++)
             d[k] = lut_out(c->out[k], c->m[3 * k] * l[0] +
                                       c->m[3 * k + 1] * l[1] +

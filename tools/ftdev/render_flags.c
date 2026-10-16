@@ -27,7 +27,7 @@ static int parse1(const char *s, float *v)
 }
 
 /* the shortest %g text of v that reads back as the same float */
-static const char *fmtf(float v, char *buf, size_t cap)
+const char *fmtf(float v, char *buf, size_t cap)
 {
     int p;
     for (p = 6; p < 9; p++) {

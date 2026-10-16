@@ -36,4 +36,9 @@ int ft_render_base_from_frames(const ft_image *const *im, int n,
 int ft_render_auto(const ft_image *const *im, int n, ft_recipe *r,
                    ft_err *e);
 
+/* neg/b&w: the exposure that puts the highlight (the frame's range above
+ * base) at paper white + 0.03 D, from r's range[1], grade and paper;
+ * clamped to +-6 stops. ft_render_auto sets this after the range. */
+float ft_render_auto_exposure(const ft_recipe *r);
+
 #endif

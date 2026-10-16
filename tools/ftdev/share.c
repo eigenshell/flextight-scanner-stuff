@@ -321,13 +321,99 @@ int ftdev_denoise(const ft_image *im, const ft_share_sidecar *sc,
     return 0;
 }
 
+int ftdev_finish(const ft_image *cut, double scale, double sharpen,
+                 ft_space space, ft_gamut gamut, int quality,
+                 const char *text, const char *outp)
+{
+    float *small = NULL, *scratch = NULL;
+    unsigned char *px8 = NULL, icc[FT_ICC_MAX];
+    size_t icc_n;
+    int ow, oh, i, rc = 1;
+    ft_err e;
+
+    ft_resize_dims(cut->w, cut->h, scale, &ow, &oh);
+    small = malloc((size_t)ow * oh * 3 * sizeof *small);
+    scratch = malloc(ft_resize_scratch_bytes(cut->w, cut->h, ow, oh));
+    px8 = malloc((size_t)ow * oh * 3);
+    if (!small || !scratch || !px8) {
+        fprintf(stderr, "ftdev: out of memory\n");
+        goto out;
+    }
+    if (ft_resize(cut->rgb, cut->w, cut->h, small, ow, oh, scratch, &e) ||
+        ft_output_compile(space, gamut, &g_output, &e)) {
+        fprintf(stderr, "ftdev: %s\n", e.msg);
+        goto out;
+    }
+    /* output sharpening, after the resize: its scratch reuses the resize
+     * scratch when that is big enough */
+    if (sharpen > 0) {
+        size_t need = ft_sharpen_scratch_bytes(ow, oh);
+        if (need > ft_resize_scratch_bytes(cut->w, cut->h, ow, oh)) {
+            float *s2 = realloc(scratch, need);
+            if (!s2) {
+                fprintf(stderr, "ftdev: out of memory\n");
+                goto out;
+            }
+            scratch = s2;
+        }
+        ft_sharpen(small, ow, oh, sharpen, (double)ow / cut->w, scratch);
+    }
+    for (i = 0; i < oh; i++) {
+        float *row = small + (size_t)i * ow * 3;
+        ft_output_apply(&g_output, row, row, (size_t)ow);
+        ft_output_quantise8(row, px8 + (size_t)i * ow * 3, (size_t)ow,
+                            (size_t)i * ow);
+    }
+    icc_n = ft_icc_build(space, icc, sizeof icc);
+    if (icc_n == 0) {
+        fprintf(stderr, "ftdev: cannot build the ICC profile\n");
+        goto out;
+    }
+    if (ft_jpeg_write(outp, px8, ow, oh, quality,
+                      cut->ppi > 0 ? cut->ppi * ow / cut->w : 0, icc, icc_n,
+                      text, &e)) {
+        fprintf(stderr, "ftdev: %s\n", e.msg);
+        goto out;
+    }
+    printf("%s: %dx%d, %s, gamut %s, q%d\n", outp, ow, oh,
+           ft_space_what(space), gamut == FT_GAMUT_SOFT ? "soft" : "clip",
+           quality);
+    /* how it was made, next to it: <out.jpg>.txt */
+    {
+        char rpath[PATH_CAP];
+        FILE *f;
+        if (path_cat(rpath, sizeof rpath, outp, ".txt")) {
+            rc = 2;
+            goto out;
+        }
+        f = fopen(rpath, "w");
+        if (f) {
+            int bad = fputs(text, f) == EOF;
+            if (fclose(f))
+                bad = 1;
+            if (bad)
+                f = NULL;
+        }
+        if (!f) {
+            fprintf(stderr, "ftdev: cannot write %s\n", rpath);
+            goto out;
+        }
+    }
+    rc = 0;
+out:
+    free(small);
+    free(scratch);
+    free(px8);
+    return rc;
+}
+
 int ftdev_export(int argc, char **argv)
 {
     const char *dng = NULL, *outp = NULL, *edit = NULL;
     const char *space_name = "srgb", *curves[4] = { NULL, NULL, NULL, NULL };
     char outbuf[PATH_CAP], path[PATH_CAP], *side = NULL, rtext[4096];
     int i, rc = 1, crop[4] = { 0, 0, 0, 0 }, has_crop = 0, raw_too = 0;
-    int quality = FT_JPEG_QUALITY, ow, oh, has_side = 0, has_detail = 0;
+    int quality = FT_JPEG_QUALITY, has_side = 0, has_detail = 0;
     int frame = -1;
     long frame_arg = -1;
     ft_taste taste;
@@ -340,10 +426,7 @@ int ftdev_export(int argc, char **argv)
     ft_recipe rcp;
     rflags rf;
     ft_image im, cut;
-    float *small = NULL, *scratch = NULL;
     double nr_sensor = 1, nr_chroma = 2, nr_grain = 0, sharpen = 0.5;
-    unsigned char *px8 = NULL, icc[FT_ICC_MAX];
-    size_t icc_n;
     ft_err e;
 
     ft_image_init(&im);
@@ -604,75 +687,10 @@ int ftdev_export(int argc, char **argv)
             goto out;
         }
     }
-    ft_resize_dims(cut.w, cut.h, scale, &ow, &oh);
-    small = malloc((size_t)ow * oh * 3 * sizeof *small);
-    scratch = malloc(ft_resize_scratch_bytes(cut.w, cut.h, ow, oh));
-    px8 = malloc((size_t)ow * oh * 3);
-    if (!small || !scratch || !px8) {
-        fprintf(stderr, "ftdev: out of memory\n");
+    rc = ftdev_finish(&cut, scale, sharpen, space, gamut, quality, rtext,
+                      outp);
+    if (rc)
         goto out;
-    }
-    if (ft_resize(cut.rgb, cut.w, cut.h, small, ow, oh, scratch, &e) ||
-        ft_output_compile(space, gamut, &g_output, &e)) {
-        fprintf(stderr, "ftdev: %s\n", e.msg);
-        goto out;
-    }
-    /* output sharpening, after the resize: its scratch reuses the resize
-     * scratch when that is big enough */
-    if (sharpen > 0) {
-        size_t need = ft_sharpen_scratch_bytes(ow, oh);
-        if (need > ft_resize_scratch_bytes(cut.w, cut.h, ow, oh)) {
-            float *s2 = realloc(scratch, need);
-            if (!s2) {
-                fprintf(stderr, "ftdev: out of memory\n");
-                goto out;
-            }
-            scratch = s2;
-        }
-        ft_sharpen(small, ow, oh, sharpen, (double)ow / cut.w, scratch);
-    }
-    for (i = 0; i < oh; i++) {
-        float *row = small + (size_t)i * ow * 3;
-        ft_output_apply(&g_output, row, row, (size_t)ow);
-        ft_output_quantise8(row, px8 + (size_t)i * ow * 3, (size_t)ow,
-                            (size_t)i * ow);
-    }
-    icc_n = ft_icc_build(space, icc, sizeof icc);
-    if (icc_n == 0) {
-        fprintf(stderr, "ftdev: cannot build the ICC profile\n");
-        goto out;
-    }
-    if (ft_jpeg_write(outp, px8, ow, oh, quality,
-                      cut.ppi > 0 ? cut.ppi * ow / cut.w : 0, icc, icc_n,
-                      rtext, &e)) {
-        fprintf(stderr, "ftdev: %s\n", e.msg);
-        goto out;
-    }
-    printf("%s: %dx%d, %s, gamut %s, q%d\n", outp, ow, oh,
-           ft_space_what(space), gamut == FT_GAMUT_SOFT ? "soft" : "clip",
-           quality);
-    /* how it was made, next to it: <out.jpg>.txt */
-    {
-        char rpath[PATH_CAP];
-        FILE *f;
-        if (path_cat(rpath, sizeof rpath, outp, ".txt")) {
-            rc = 2;
-            goto out;
-        }
-        f = fopen(rpath, "w");
-        if (f) {
-            int bad = fputs(rtext, f) == EOF;
-            if (fclose(f))
-                bad = 1;
-            if (bad)
-                f = NULL;
-        }
-        if (!f) {
-            fprintf(stderr, "ftdev: cannot write %s\n", rpath);
-            goto out;
-        }
-    }
-    rc = 0;
     if (raw_too) {
         char to[PATH_CAP], to_txt[PATH_CAP];
         if (path_swap(to, sizeof to, outp, ".jpg", ".dng")) {
@@ -699,9 +717,6 @@ int ftdev_export(int argc, char **argv)
 out:
     ft_image_free(&im);
     ft_image_free(&cut);
-    free(small);
-    free(scratch);
-    free(px8);
     free(side);
     return rc;
 }
