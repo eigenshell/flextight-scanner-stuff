@@ -98,6 +98,18 @@ int ft_share_select(const ft_job *j, const char *list, ft_share_frame *out,
  * every other frame excluded (group 0) */
 void ft_share_apply(ft_job *j, const ft_share_frame *sel, int n,
                     const ft_share_opts *o, const ft_share_est *est);
+/* The web page's sizes: px on the frame's long side (3:2 at ~4 / 6 MP) */
+#define FT_SHARE_4MP 2450.0
+#define FT_SHARE_6MP 3000.0
+/* sizes per frame: target_px[i] for j->f[i], 0 = not shared. The chosen
+ * frames, in strip order, split into runs of one size; each run is priced
+ * (ft_share_candidates) and keeps the most light (ft_share_pick_max_dmax);
+ * runs never share a window. Writes the plan into j: share = the smallest
+ * size, share_px on frames of another size, groups numbered along the
+ * strip, every other frame excluded, focus the curve as is (shifted,
+ * offset 0). Returns the number of groups; -1 with e filled. */
+int ft_share_plan_sizes(ft_job *j, const double *target_px, int hf_half_res,
+                        const ft_lens *lens, double scan_len_mm, ft_err *e);
 /* group g's scan window along, as the planner priced it: from the first
  * included frame's y0 - margin to the last's end + margin, clipped to
  * 0..scan_len_mm. -1 if no included frame is in group g. */

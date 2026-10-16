@@ -269,6 +269,81 @@ void ft_share_apply(ft_job *j, const ft_share_frame *sel, int n,
     }
 }
 
+int ft_share_plan_sizes(ft_job *j, const double *target_px, int hf_half_res,
+                        const ft_lens *lens, double scan_len_mm, ft_err *e)
+{
+    ft_share_frame sel[FT_MAX_FRAMES];
+    double tg[FT_MAX_FRAMES], least = 0;
+    ft_share_est c[6];
+    int i, k, m = 0, a, b, groups = 0;
+
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        ft_share_frame s;
+        double t = target_px[i];
+        if (t == 0)
+            continue;
+        if (!(t >= 100 && t <= 20000))
+            return ft_fail(e, "share: frame %d: %g px is out of range "
+                              "(100..20000)", f->index, t);
+        s.index = f->index;
+        s.type = f->type;
+        s.y0 = f->y0;
+        s.len = f->len;
+        s.x0 = f->x0;
+        s.width = f->width;
+        for (k = m; k > 0 && sel[k - 1].y0 > s.y0; k--) {
+            sel[k] = sel[k - 1];
+            tg[k] = tg[k - 1];
+        }
+        sel[k] = s;
+        tg[k] = t;
+        m++;
+        if (least == 0 || t < least)
+            least = t;
+    }
+    if (!m)
+        return ft_fail(e, "share: no frames selected");
+    for (i = 0; i < j->nframes; i++) {
+        j->f[i].include = 0;
+        j->f[i].group = 0;
+        j->f[i].share_px = 0;
+    }
+    for (a = 0; a < m; a = b + 1) {
+        ft_share_opts o;
+        const ft_share_est *est;
+        int nc, q, w;
+        for (b = a; b + 1 < m && tg[b + 1] == tg[a]; b++)
+            ;
+        ft_share_opts_default(&o, scan_len_mm);
+        o.target_px = tg[a];
+        o.hf_half_res = hf_half_res;
+        nc = ft_share_candidates(sel + a, b - a + 1, &o, lens, c, e);
+        if (nc < 1)
+            return -1;
+        est = &c[ft_share_pick_max_dmax(c, nc)];
+        for (q = a; q <= b; q++) {
+            for (w = 0; w < est->nwin && q - a > est->win[w].last; w++)
+                ;
+            for (i = 0; i < j->nframes; i++)
+                if (j->f[i].index == sel[q].index) {
+                    ft_job_frame *f = &j->f[i];
+                    f->include = 1;
+                    f->ppi = est->ppi;
+                    f->bin = est->bin;
+                    f->group = groups + w + 1;
+                    f->share_px = tg[a] == least ? 0 : tg[a];
+                }
+        }
+        groups += est->nwin;
+    }
+    j->share = least;
+    j->hf_half_res = hf_half_res;
+    j->focus = FT_FOCUS_SHIFTED;
+    j->focus_offset = 0;
+    return groups;
+}
+
 int ft_share_group_window(const ft_job *j, int g, const ft_share_opts *o,
                           double *y0, double *len)
 {
