@@ -147,10 +147,16 @@ int ft_share_meta_parse(const char *text, size_t n, ft_share_meta *m,
 
 int ft_share_meta_write(FILE *out, const ft_job *j, int g)
 {
+    double share = j->share;            /* the group's target */
     int i;
+    for (i = 0; i < j->nframes; i++)
+        if (j->f[i].include && j->f[i].group == g) {
+            share = ft_job_share_px(j, &j->f[i]);
+            break;
+        }
     fprintf(out, "film=%s\nholder=%s\nshare=%g\nhf_half_res=%d\n",
             j->film == FT_FILM_SLIDE ? "slide" : "negative", j->holder,
-            j->share, j->hf_half_res ? 1 : 0);
+            share, j->hf_half_res ? 1 : 0);
     if (j->has_film_base)
         fprintf(out, "film_base=%.4f %.4f %.4f\n", j->film_base[0],
                 j->film_base[1], j->film_base[2]);

@@ -22,6 +22,11 @@ int ft_job_bin(const ft_job_frame *f)
     return f->bin ? f->bin : ft_bin_for_ppi(f->ppi);
 }
 
+double ft_job_share_px(const ft_job *j, const ft_job_frame *f)
+{
+    return f->share_px > 0 ? f->share_px : j->share;
+}
+
 int ft_job_pass_todo(const ft_job *j, int pass)
 {
     int i, n = 0;
@@ -112,6 +117,9 @@ size_t ft_job_write_buf(const ft_job *j, char *buf, size_t cap)
         if (j->share > 0)
             putf(out, "group = %d   # window: frames of one group scan "
                          "together\n", f->group);
+        if (f->share_px > 0)
+            putf(out, "share_px = %g   # this frame's target, px on its "
+                      "long side\n", f->share_px);
     }
     return wb.n;
 }
@@ -155,8 +163,8 @@ static const char *STRIP_KEYS[] = { "holder", "film", "focus", "focus_offset",
 #define N_STRIP_KEYS 12
 static const char *FRAME_KEYS[] = { "type", "include", "ppi", "window", "tilt",
     "sprockets", "straighten", "confidence", "focus_offset", "done",
-    "bin", "pass", "group" };
-#define N_FRAME_KEYS 13
+    "bin", "pass", "group", "share_px" };
+#define N_FRAME_KEYS 14
 #define K_PPI 2
 #define K_WINDOW 3
 
@@ -373,6 +381,10 @@ int ft_job_parse(ft_job *j, const char *text, size_t n, ft_err *e)
                     f->group = (int)g;
                 break;
             }
+            case 13:
+                bad = num(v, &f->share_px) ||
+                      !(f->share_px >= 100 && f->share_px <= 20000);
+                break;
             default: bad = yesno(v, &f->done); break;
             }
         }
@@ -410,6 +422,12 @@ static int share_groups(const ft_job *j, ft_err *e)
                 where(w, sizeof w, &j->f[i]);
                 return ft_fail(e, "%s: group without share in [strip]", w);
             }
+        for (i = 0; i < j->nframes; i++)
+            if (j->f[i].share_px > 0) {
+                where(w, sizeof w, &j->f[i]);
+                return ft_fail(e, "%s: share_px without share in [strip]",
+                               w);
+            }
         return 0;
     }
     for (i = 0; i < j->nframes; i++) {
@@ -430,6 +448,10 @@ static int share_groups(const ft_job *j, ft_err *e)
         if (prev >= 0 && f->group == j->f[prev].group &&
             (f->ppi != j->f[prev].ppi || f->bin != j->f[prev].bin))
             return ft_fail(e, "%s: frames of group %d differ in ppi or bin",
+                           w, f->group);
+        if (prev >= 0 && f->group == j->f[prev].group &&
+            ft_job_share_px(j, f) != ft_job_share_px(j, &j->f[prev]))
+            return ft_fail(e, "%s: frames of group %d differ in share_px",
                            w, f->group);
         prev = i;
     }

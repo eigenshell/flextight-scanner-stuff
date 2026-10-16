@@ -256,6 +256,23 @@ int main(void)
             CHECK(ft_share_meta_parse(all, strlen(all), &m, &e) == 0);
         }
         CHECK(m.nframes == 1 && m.f[0].index == 2 && m.f[0].len == 36);
+        /* a group with its own target (share_px): the window's share is
+         * that target, so ftdev cut sizes its frames by it */
+        j.f[1].share_px = 3000;
+        f = tmpfile();
+        CHECK(ft_share_meta_write(f, &j, 2) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        fclose(f);
+        CHECK(strstr(buf, "share=3000\n") && !strstr(buf, "share=2000\n"));
+        f = tmpfile();                        /* group 1 keeps the strip's */
+        CHECK(ft_share_meta_write(f, &j, 1) == 0);
+        rewind(f);
+        n = fread(buf, 1, sizeof buf - 1, f);
+        buf[n] = 0;
+        fclose(f);
+        CHECK(strstr(buf, "share=2000\n") != NULL);
     }
 
     /* sidecar round trip */

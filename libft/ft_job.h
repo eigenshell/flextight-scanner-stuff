@@ -23,6 +23,9 @@ typedef struct {
     int pass;                     /* detailed scan: its pass (1..), 0 none */
     int group;                    /* share job: the window it scans in
                                      (1..); 0 = not in a share job */
+    double share_px;              /* share job: this frame's target, px
+                                     on its long side; 0 = the strip's
+                                     share. One target per group */
 } ft_job_frame;
 
 /* Detailed scans (sub-project 2b): what the passes write */
@@ -73,6 +76,8 @@ int ft_job_read(ft_job *j, FILE *in, ft_err *e);
 int ft_job_validate(const ft_job *j, const ft_lens *lens, ft_err *e);
 /* the bin a frame scans with: its own, or the fastest for its ppi */
 int ft_job_bin(const ft_job_frame *f);
+/* share job: the frame's target px, its own or the strip's share */
+double ft_job_share_px(const ft_job *j, const ft_job_frame *f);
 /* detailed scan: the included frames of pass `pass` not yet done; 0 =
  * nothing to scan in it (finished, or no frame) */
 int ft_job_pass_todo(const ft_job *j, int pass);

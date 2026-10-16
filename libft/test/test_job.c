@@ -308,6 +308,41 @@ int main(void)
                  "window = 50 4 36 24\ngroup = -1\n");
         CHECK(ft_job_read(&b, f, &e) == -1);
         fclose(f);
+
+        /* share_px: a frame's own target (the web page's 4MP / 6MP);
+         * written only when set, one target per group */
+        b = c;
+        CHECK(ft_job_share_px(&b, &b.f[0]) == 2000);
+        b.f[2].share_px = 3000;
+        CHECK(ft_job_share_px(&b, &b.f[2]) == 3000);
+        n = ft_job_write_buf(&b, buf, sizeof buf);
+        CHECK(n < sizeof buf);
+        CHECK(strstr(buf, "group = 2   # window: frames of one group scan "
+                          "together\nshare_px = 3000   # this frame's "
+                          "target, px on its long side\n") != NULL);
+        CHECK(strstr(strstr(buf, "share_px") + 1, "share_px") == NULL);
+        {
+            ft_job d;
+            CHECK(ft_job_parse(&d, buf, n, &e) == 0);
+            CHECK(d.f[0].share_px == 0 && d.f[2].share_px == 3000);
+            CHECK(ft_job_validate(&d, &ft_lens_default, &e) == 0);
+            d.f[0].group = 2;                 /* one window, two targets */
+            CHECK(ft_job_validate(&d, &ft_lens_default, &e) == -1);
+            CHECK(strstr(e.msg, "(frame 3): frames of group 2 differ in "
+                                "share_px") != NULL);
+            d.f[0].share_px = 3000;           /* same target: fine */
+            CHECK(ft_job_validate(&d, &ft_lens_default, &e) == 0);
+            d.share = 0;                      /* share_px needs share */
+            d.f[0].group = d.f[2].group = 0;
+            CHECK(ft_job_validate(&d, &ft_lens_default, &e) == -1);
+            CHECK(strstr(e.msg, "(frame 1): share_px without share in "
+                                "[strip]") != NULL);
+        }
+        f = text("[strip]\nholder = 24x217\nshare = 2000\n[frame 1]\n"
+                 "ppi = 1500\nwindow = 50 4 36 24\nshare_px = 50\n");
+        CHECK(ft_job_read(&b, f, &e) == -1 &&
+              strcmp(e.msg, "line 7: bad value for share_px: 50") == 0);
+        fclose(f);
     }
     /* a job without bin keys (older files) scans with the fastest bin */
     f = text("[strip]\nholder = 24x217\n[frame 1]\nppi = 2000\n"
