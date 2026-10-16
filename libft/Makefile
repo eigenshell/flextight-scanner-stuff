@@ -59,15 +59,26 @@ purity: $(PURE) ft_image.o
 	@sh test/purity.sh ft_image.o >/dev/null; test $$? -eq 1 || \
 	    { echo "purity: the check did not reject calloc in ft_image.o"; exit 1; }
 
-test: $(TESTS) purity
+test: $(TESTS) purity purity-web
 	@for t in $(TESTS); do ./$$t || exit 1; done
 
 clean:
-	rm -f $(OBJ) libft.a $(TESTS) test/png_dump test/window_dump
+	rm -f $(OBJ) libft.a $(TESTS) test/png_dump test/window_dump test/web/*.o
 
 # the emulsions' 3D tables (libft/emulsions/README.md): needs Python 3;
 # the generated header is committed
 luts:
 	python3 ../tools/cube2c.py emulsions ft_emulsion_luts.h
 
-.PHONY: test clean purity luts
+# the browser tier (WASM with a libc): heap and formatting into buffers
+# are fine; file and stream I/O, threads and processes are not
+WEB = $(PURE) ft_image.o
+test/web/%.o: test/web/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+purity-web: $(WEB) test/web/web_good.o test/web/web_bad.o
+	@sh test/purity_web.sh $(WEB) test/web/web_good.o
+	@sh test/purity_web.sh test/web/web_bad.o >/dev/null; test $$? -eq 1 || \
+	    { echo "purity-web: the check did not reject fopen"; exit 1; }
+
+.PHONY: test clean purity purity-web luts
