@@ -37,6 +37,8 @@ int ftdev_export(int argc, char **argv);
 int ftdev_print(int argc, char **argv);
 /* ftdev emulsions: the emulsion table */
 int ftdev_emulsions(int argc, char **argv);
+/* ftdev plan <strip.job> --size 4mp|6mp|px:frames ... (plan.c) */
+int ftdev_plan(int argc, char **argv);
 /* ftdev stock learn <roll.edit> <frame.dng>... -o <name.look> [--replace] */
 int ftdev_stock(int argc, char **argv);
 
