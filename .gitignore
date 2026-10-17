@@ -64,4 +64,6 @@ CLAUDE.md
 
 # ftdev build output
 tools/ftdev/ftdev
+tools/ftwebd/ftwebd
+tools/ftwebd/ftwebd.exe
 tools/detail/test_ring
