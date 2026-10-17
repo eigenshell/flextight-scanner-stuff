@@ -3,6 +3,7 @@
 (the engine driven from files) against ftdev cut + ftdev print --roll on
 synthetic window scans; and the engine compiled to wasm32 makes the same
 bytes as native (skipped without the wasi-sdk or node)."""
+import json
 import os
 import shutil
 import subprocess
@@ -132,3 +133,75 @@ def test_engine_display_copy(both):
     assert len(data) == w * h * 4
     assert set(data[3::4]) == {255}               # opaque
     assert len(set(data[0::4])) > 20              # an image, not flat
+
+
+WASI_SDK = Path(os.environ.get(
+    "WASI_SDK", Path.home() / ".local/opt/wasi-sdk-34.0-x86_64-linux"))
+
+
+def node_bin():
+    """a node of 22 or later: NODE, the PATH's, /usr/bin/node. Node 20's
+    V8 crashes in its GC while the wasm memory grows (SIGSEGV)."""
+    for n in (os.environ.get("NODE"), shutil.which("node"), "/usr/bin/node"):
+        if not n or not Path(n).exists():
+            continue
+        r = subprocess.run([n, "-p", "process.versions.node.split('.')[0]"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and int(r.stdout) >= 22:
+            return n
+    return None
+
+
+NODE = node_bin()
+needs_wasm = pytest.mark.skipif(
+    not (WASI_SDK / "bin" / "clang").exists() or NODE is None,
+    reason="needs the wasi-sdk (WASI_SDK) and node >= 22 (NODE)")
+
+# libc's own (stdio flushed at exit, the clock): the page stubs them.
+# Nothing that opens or reads files.
+WASM_IMPORTS = {"clock_time_get", "fd_close", "fd_seek", "fd_write"}
+
+
+@pytest.fixture(scope="module")
+def wasm(tools):
+    make("-C", FTWEB, "wasm", "WASI_SDK=%s" % WASI_SDK)
+    return FTWEB / "ftweb.wasm", FTWEB / "ftweb_cli.wasm"
+
+
+@needs_cc
+@needs_wasm
+def test_wasm_module_imports_and_exports(wasm):
+    js = ("const m=new WebAssembly.Module(require('fs').readFileSync("
+          "process.argv[1]));console.log(JSON.stringify([WebAssembly.Module"
+          ".imports(m),WebAssembly.Module.exports(m).map(e=>e.name)]))")
+    r = subprocess.run([NODE, "-e", js, str(wasm[0])], capture_output=True,
+                       text=True)
+    assert r.returncode == 0, r.stderr
+    imports, exports = json.loads(r.stdout)
+    assert {i["module"] for i in imports} == {"wasi_snapshot_preview1"}
+    assert {i["name"] for i in imports} == WASM_IMPORTS
+    for name in ("ftw_new", "ftw_cut", "ftw_measure", "ftw_jpeg",
+                 "ftw_display", "ftw_zip", "ftw_alloc", "memory"):
+        assert name in exports
+    assert wasm[0].stat().st_size < 400_000       # light: ~200 KB
+
+
+@needs_cc
+@needs_wasm
+def test_wasm_makes_the_native_bytes(wasm, both, tmp_path):
+    _, native, _, wr = both
+    b = windows(tmp_path / "web")
+    out = tmp_path / "web" / "out"
+    out.mkdir()
+    r = subprocess.run([NODE, "--no-warnings", str(FTWEB / "wasi_run.mjs"),
+                        str(wasm[1]), str(tmp_path), "--print",
+                        str(tmp_path / "web" / "strip.print"), "-o", str(out),
+                        "--display", "2", "400", *map(str, b)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    names = sorted(p.name for p in native.iterdir())
+    assert names == sorted(p.name for p in out.iterdir())
+    for name in names:
+        assert (out / name).read_bytes() == (native / name).read_bytes(), \
+            name
+    assert r.stderr == wr.stderr

@@ -69,4 +69,5 @@ tools/ftwebd/ftwebd.exe
 tools/ftweb/ftweb_cli
 tools/ftweb/*.o
 tools/ftweb/*.wasm
+tools/ftweb/wasm/
 tools/detail/test_ring
