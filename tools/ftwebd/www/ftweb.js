@@ -106,11 +106,27 @@ const ops = {
     });
   },
   frames: () => ints(256, p => X.ftw_frames(w, p, 256)),
+  // the preview's strip.raw, .cal, .txt and .faul (or null): its frames
+  previewLoad(raw, cal, meta, faul) {
+    return withPut([raw, cal, faul, meta], (pr, pc, pf, pm) =>
+      ok(X.ftw_preview_load(w, pr, raw.length, pc, cal.length, pf,
+                            faul ? faul.length : 0, pm, meta.length)));
+  },
   measure: () => (ok(X.ftw_measure(w)), text()),
   display(f, edge) {
     const p = X.ftw_alloc(8);
     try {
       ok(X.ftw_display(w, f, edge, p, p + 4));
+      const d = new Int32Array(M.buffer, p, 2);
+      return { w: d[0], h: d[1], rgba: out() };
+    } finally {
+      X.ftw_release(p);
+    }
+  },
+  previewDisplay(f, edge) {
+    const p = X.ftw_alloc(8);
+    try {
+      ok(X.ftw_preview_display(w, f, edge, p, p + 4));
       const d = new Int32Array(M.buffer, p, 2);
       return { w: d[0], h: d[1], rgba: out() };
     } finally {

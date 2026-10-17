@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ft_develop.h"
 #include "ft_dng.h"
 #include "ft_emulsion.h"
 #include "ft_focus.h"
@@ -36,6 +37,14 @@ typedef struct {
     ft_image proxy;             /* the stats proxy (ftdev print's) */
 } wframe;
 
+/* a frame of the preview (strip.raw): its box cut from the developed
+ * preview, x along, as a share frame is */
+typedef struct {
+    int frame;
+    ft_image im;
+    ft_image proxy;
+} pframe;
+
 struct ftw {
     ft_lens lens;
     ft_job job;                 /* the preview's: every plan's base */
@@ -49,6 +58,11 @@ struct ftw {
     int measured;
     ft_print_roll roll;
     ft_print_frame pfr[FT_MAX_FRAMES];
+    int npv;                    /* the preview's frames (ftw_preview_load) */
+    pframe pv[FT_MAX_FRAMES];
+    int pv_measured;
+    ft_print_roll pv_roll;
+    ft_print_frame pv_pfr[FT_MAX_FRAMES];
     int disp_frame;             /* the cached screen copy's frame, 0 none */
     int disp_edge;              /* and the long edge it was asked at */
     ft_image disp;
@@ -155,6 +169,17 @@ static void frame_free(wframe *f)
     memset(f, 0, sizeof *f);
 }
 
+static void preview_free(ftw *w)
+{
+    int i;
+    for (i = 0; i < w->npv; i++) {
+        ft_image_free(&w->pv[i].im);
+        ft_image_free(&w->pv[i].proxy);
+    }
+    w->npv = 0;
+    w->pv_measured = 0;
+}
+
 void ftw_free(ftw *w)
 {
     int i;
@@ -162,6 +187,7 @@ void ftw_free(ftw *w)
         return;
     for (i = 0; i < w->n; i++)
         frame_free(&w->f[i]);
+    preview_free(w);
     ft_image_free(&w->disp);
     free(w->out);
     free(w);
@@ -255,23 +281,29 @@ static const ft_job *job_now(const ftw *w)
     return w->has_plan ? &w->plan : w->has_job ? &w->job : NULL;
 }
 
-/* the "x=" line's value in the preview's metadata; -1 if none */
-static long preview_x(const char *t, size_t n)
+/* the "key=" line's value in the preview's metadata; -1 if none */
+static long meta_key(const char *t, size_t n, const char *key)
 {
-    size_t at = 0;
+    size_t at = 0, kl = strlen(key);
     long v = -1;
     while (t && at < n) {
         const char *s = t + at, *nl = memchr(s, '\n', n - at);
         size_t len = nl ? (size_t)(nl - s) : n - at;
-        if (len > 2 && len < 24 && s[0] == 'x' && s[1] == '=') {
+        if (len > kl + 1 && len < kl + 24 && memcmp(s, key, kl) == 0 &&
+            s[kl] == '=') {
             char b[24];
-            memcpy(b, s + 2, len - 2);
-            b[len - 2] = 0;
+            memcpy(b, s + kl + 1, len - kl - 1);
+            b[len - kl - 1] = 0;
             v = atol(b);
         }
         at += len + 1;
     }
     return v;
+}
+
+static long preview_x(const char *t, size_t n)
+{
+    return meta_key(t, n, "x");
 }
 
 int ftw_job_json(ftw *w, const char *preview_txt, size_t n)
@@ -369,6 +401,7 @@ int ftw_print_load(ftw *w, const char *text, size_t n)
     w->pf = pf;
     w->has_print = 1;
     w->measured = 0;
+    w->pv_measured = 0;
     w->disp_frame = 0;
     return 0;
 }
@@ -380,6 +413,7 @@ int ftw_print_new(ftw *w, const char *emulsion)
     ft_print_file_init(&w->pf, emulsion);
     w->has_print = 1;
     w->measured = 0;
+    w->pv_measured = 0;
     w->disp_frame = 0;
     return 0;
 }
@@ -405,6 +439,7 @@ int ftw_print_emulsion(ftw *w, const char *emulsion)
     }
     w->pf = pf;
     w->measured = 0;
+    w->pv_measured = 0;
     out_reset(w);
     return outf(w, "%s", em->id) ? -1 : dropped;
 }
@@ -730,18 +765,97 @@ int ftw_jpeg(ftw *w, int frame)
     return 0;
 }
 
-int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
+/* src (transmittance) printed with em's recipe for roll/fr and clicks k,
+ * turned rot degrees, sRGB 8-bit -> out: RGBA rows; *pw x *ph */
+static int rgba_out(ftw *w, const ft_emulsion *em, const ft_print_roll *roll,
+                    const ft_print_frame *fr, ft_cmyd k, const ft_image *src,
+                    int rot, int *pw, int *ph)
 {
-    const ft_emulsion *em;
     static ft_print_render pr;
     static ft_output out;
     ft_print_auto a;
     ft_recipe r;
     ft_err e;
     float *px = NULL;
-    size_t npx, k;
-    int i = frame_at(w, frame), y, rw, rh;
-    int rot = ft_print_file_rotation(&w->pf, frame);
+    size_t npx, i;
+    int y, rw, rh;
+    if (ft_print_recipe(em, roll, fr, k, &r, &a, NULL, &e) ||
+        ft_print_compile(em, &r, &pr, &e) ||
+        ft_output_compile(FT_SPACE_SRGB, FT_GAMUT_SOFT, &out, &e))
+        return fail_e(w, &e);
+    npx = (size_t)src->w * src->h;
+    px = malloc(npx * 3 * sizeof *px);
+    out_reset(w);
+    if (!px || out_room(w, npx * 4)) {
+        free(px);
+        return fail(w, "out of memory");
+    }
+    ft_print_apply(&pr, src->rgb, px, npx);
+    rw = src->w;
+    rh = src->h;
+    if (rot) {                          /* the print's turn */
+        ft_image ia, ib;
+        ft_image_init(&ia);
+        ft_image_init(&ib);
+        ia.w = rw;
+        ia.h = rh;
+        ia.rgb = px;
+        if (ft_image_rotate(&ia, rot, &ib, &e)) {
+            free(px);
+            return fail_e(w, &e);
+        }
+        free(px);
+        px = ib.rgb;
+        rw = ib.w;
+        rh = ib.h;
+    }
+    for (y = 0; y < rh; y++) {
+        float *row = px + (size_t)y * rw * 3;
+        unsigned char *o = w->out + (size_t)y * rw * 4;
+        ft_output_apply(&out, row, row, (size_t)rw);
+        /* RGB at the row's end, then spread to RGBA in place */
+        ft_output_quantise8(row, o + (size_t)rw, (size_t)rw, (size_t)y * rw);
+        for (i = 0; i < (size_t)rw; i++) {
+            const unsigned char *s = o + (size_t)rw + i * 3;
+            unsigned char t0 = s[0], t1 = s[1], t2 = s[2];
+            o[i * 4] = t0;
+            o[i * 4 + 1] = t1;
+            o[i * 4 + 2] = t2;
+            o[i * 4 + 3] = 255;
+        }
+    }
+    free(px);
+    w->nout = npx * 4;
+    *pw = rw;
+    *ph = rh;
+    return 0;
+}
+
+/* src resized so its long side is at most long_edge (never up) -> dst */
+static int fit(ftw *w, const ft_image *src, int long_edge, ft_image *dst)
+{
+    ft_err e;
+    void *scratch;
+    int dw, dh, big = src->w > src->h ? src->w : src->h;
+    double s = (double)long_edge / big;
+    ft_image_init(dst);
+    ft_resize_dims(src->w, src->h, s > 1 ? 1 : s, &dw, &dh);
+    scratch = malloc(ft_resize_scratch_bytes(src->w, src->h, dw, dh));
+    if (!scratch || ft_image_alloc(dst, dw, dh, &e) ||
+        ft_resize(src->rgb, src->w, src->h, dst->rgb, dw, dh, scratch, &e)) {
+        free(scratch);
+        ft_image_free(dst);
+        return scratch ? fail_e(w, &e) : fail(w, "out of memory");
+    }
+    free(scratch);
+    return 0;
+}
+
+int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
+{
+    const ft_emulsion *em;
+    ft_err e;
+    int i = frame_at(w, frame);
     if (i < 0)
         return fail(w, "no such frame");
     if (long_edge < 16)
@@ -751,10 +865,6 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
     if (w->disp_frame != frame || w->disp_edge != long_edge) {
         const wframe *f = &w->f[i];
         ft_image im, cut;
-        void *scratch;
-        int dw, dh, big = f->sc.box[2] > f->sc.box[3] ? f->sc.box[2]
-                                                       : f->sc.box[3];
-        double s = (double)long_edge / big;
         ft_image_free(&w->disp);
         w->disp_frame = 0;
         if (frame_image(f, &im, &e))
@@ -765,73 +875,141 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
             return fail_e(w, &e);
         }
         ft_image_free(&im);
-        ft_resize_dims(cut.w, cut.h, s > 1 ? 1 : s, &dw, &dh);
-        scratch = malloc(ft_resize_scratch_bytes(cut.w, cut.h, dw, dh));
-        if (!scratch || ft_image_alloc(&w->disp, dw, dh, &e) ||
-            ft_resize(cut.rgb, cut.w, cut.h, w->disp.rgb, dw, dh, scratch,
-                      &e)) {
-            free(scratch);
+        if (fit(w, &cut, long_edge, &w->disp)) {
             ft_image_free(&cut);
-            ft_image_free(&w->disp);
-            return scratch ? fail_e(w, &e) : fail(w, "out of memory");
+            return -1;
         }
-        free(scratch);
         ft_image_free(&cut);
         w->disp_frame = frame;
         w->disp_edge = long_edge;
     }
-    if (ft_print_recipe(em, &w->roll, &w->pfr[i],
-                        ft_print_file_clicks(&w->pf, frame), &r, &a, NULL,
-                        &e) ||
-        ft_print_compile(em, &r, &pr, &e) ||
-        ft_output_compile(FT_SPACE_SRGB, FT_GAMUT_SOFT, &out, &e))
+    return rgba_out(w, em, &w->roll, &w->pfr[i],
+                    ft_print_file_clicks(&w->pf, frame), &w->disp,
+                    ft_print_file_rotation(&w->pf, frame), pw, ph);
+}
+
+/* ------------------------------------------------------------ preview */
+
+int ftw_preview_load(ftw *w, const unsigned short *raw, size_t raw_n,
+                     const unsigned short *cal, size_t cal_n,
+                     const char *faul, size_t faul_n, const char *meta,
+                     size_t meta_n)
+{
+    const ft_preview *pm = ft_preview_find("standard");
+    const ft_job *j = &w->job;
+    long px = meta_key(meta, meta_n, "px"), x = meta_key(meta, meta_n, "x"),
+         bin = meta_key(meta, meta_n, "bin");
+    ft_develop_opts o;
+    ft_axes ax;
+    ft_err e;
+    float *t;
+    int i, nl = 0, lines, cl;
+
+    preview_free(w);
+    if (!w->has_job)
+        return fail(w, "no strip.job");
+    if (px < 1 || px > 20000 || x < 0 || bin != pm->bin)
+        return fail(w, "preview: not a standard preview (px, x, bin=12)");
+    if (!raw || !cal)
+        return fail(w, "no scan or no calibration");
+    lines = (int)(raw_n / ((size_t)px * 6));
+    cl = (int)(cal_n / ((size_t)px * 6));
+    memset(&o, 0, sizeof o);
+    o.x = (int)x;
+    o.bin = (int)bin;
+    t = ft_develop_t(raw, lines, (int)px, cal, cl, faul, faul ? faul_n : 0,
+                     &o, &nl, &e);
+    if (!t)
         return fail_e(w, &e);
-    npx = (size_t)w->disp.w * w->disp.h;
-    px = malloc(npx * 3 * sizeof *px);
-    out_reset(w);
-    if (!px || out_room(w, npx * 4)) {
-        free(px);
-        return fail(w, "out of memory");
-    }
-    ft_print_apply(&pr, w->disp.rgb, px, npx);
-    rw = w->disp.w;
-    rh = w->disp.h;
-    if (rot) {                          /* the print's turn */
-        ft_image a, b;
-        ft_image_init(&a);
-        ft_image_init(&b);
-        a.w = rw;
-        a.h = rh;
-        a.rgb = px;
-        if (ft_image_rotate(&a, rot, &b, &e)) {
-            free(px);
+    ft_preview_axes(pm, x, &ax);
+    for (i = 0; i < j->nframes; i++) {
+        const ft_job_frame *f = &j->f[i];
+        pframe *p = &w->pv[w->npv];
+        ft_develop_opts co;
+        long l0 = (long)((f->y0 - ax.y_mm0) / ax.y_mm_per_line + 0.5),
+             l1 = (long)((f->y0 + f->len - ax.y_mm0) / ax.y_mm_per_line + 0.5),
+             c0 = (long)((f->x0 - ax.x_mm0) / ax.x_mm_per_px + 0.5),
+             c1 = (long)((f->x0 + f->width - ax.x_mm0) / ax.x_mm_per_px + 0.5);
+        if (l0 < 0) l0 = 0;
+        if (c0 < 0) c0 = 0;
+        if (l1 > nl) l1 = nl;
+        if (c1 > px) c1 = px;
+        if (l1 - l0 < 8 || c1 - c0 < 8)
+            continue;                   /* off the preview: no frame */
+        memset(&co, 0, sizeof co);
+        co.crop_x = (int)c0;
+        co.crop_y = (int)l0;
+        co.crop_w = (int)(c1 - c0);
+        co.crop_h = (int)(l1 - l0);
+        ft_image_init(&p->im);
+        ft_image_init(&p->proxy);
+        if (ft_crop_orient(t, nl, (int)px, &co, &p->im, &e) ||
+            ft_share_print_proxy(&p->im, &p->proxy, &e)) {
+            ft_image_free(&p->im);
+            ft_image_free(&p->proxy);
+            free(t);
+            preview_free(w);
             return fail_e(w, &e);
         }
-        free(px);
-        px = b.rgb;
-        rw = b.w;
-        rh = b.h;
+        p->frame = f->index;
+        w->npv++;
     }
-    for (y = 0; y < rh; y++) {
-        float *row = px + (size_t)y * rw * 3;
-        unsigned char *o = w->out + (size_t)y * rw * 4;
-        ft_output_apply(&out, row, row, (size_t)rw);
-        /* RGB at the row's end, then spread to RGBA in place */
-        ft_output_quantise8(row, o + (size_t)rw, (size_t)rw, (size_t)y * rw);
-        for (k = 0; k < (size_t)rw; k++) {
-            const unsigned char *s = o + (size_t)rw + k * 3;
-            unsigned char t0 = s[0], t1 = s[1], t2 = s[2];
-            o[k * 4] = t0;
-            o[k * 4 + 1] = t1;
-            o[k * 4 + 2] = t2;
-            o[k * 4 + 3] = 255;
-        }
+    free(t);
+    return w->npv;
+}
+
+/* the strip's balance over the preview's frames (no clicks) */
+static int preview_measure(ftw *w, const ft_emulsion *em)
+{
+    const ft_image *proxies[FT_MAX_FRAMES];
+    const ft_job *j = &w->job;
+    float base[3];
+    ft_err e;
+    int i;
+    if (w->pv_measured)
+        return 0;
+    if (w->npv == 0)
+        return fail(w, "no preview frames");
+    if ((j->film == FT_FILM_SLIDE) != (em->mode == FT_RENDER_SLIDE))
+        return fail(w, j->film == FT_FILM_SLIDE
+                       ? "the strip is slide film; the emulsion prints "
+                         "negatives"
+                       : "the strip is negative film; the emulsion prints "
+                         "slides");
+    for (i = 0; i < w->npv; i++)
+        proxies[i] = &w->pv[i].proxy;
+    if (j->has_film_base) {
+        for (i = 0; i < 3; i++)
+            base[i] = (float)j->film_base[i];
+    } else if (ft_render_base_from_frames(proxies, w->npv, em->mode, base,
+                                          &e)) {
+        return fail_e(w, &e);
     }
-    free(px);
-    w->nout = npx * 4;
-    *pw = rw;
-    *ph = rh;
+    if (ft_print_roll_measure(em, base, proxies, w->npv, w->pv_pfr,
+                              &w->pv_roll, &e))
+        return fail_e(w, &e);
+    w->pv_measured = 1;
     return 0;
+}
+
+int ftw_preview_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
+{
+    static const ft_cmyd none;
+    const ft_emulsion *em;
+    ft_image d;
+    int i, rc;
+    for (i = 0; i < w->npv && w->pv[i].frame != frame; i++)
+        ;
+    if (i == w->npv)
+        return fail(w, "no such frame in the preview");
+    if (long_edge < 16)
+        return fail(w, "display: too small");
+    if (!(em = emulsion(w)) || preview_measure(w, em) ||
+        fit(w, &w->pv[i].im, long_edge, &d))
+        return -1;
+    rc = rgba_out(w, em, &w->pv_roll, &w->pv_pfr[i], none, &d, 0, pw, ph);
+    ft_image_free(&d);
+    return rc;
 }
 
 int ftw_zip(ftw *w, const char *base)

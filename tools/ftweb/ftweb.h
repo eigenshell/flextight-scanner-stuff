@@ -90,6 +90,18 @@ int ftw_jpeg(ftw *w, int frame);
 /* the screen copy: the frame printed at long_edge px (never up), sRGB,
  * no NR or sharpening -> out: RGBA rows; *pw x *ph */
 int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph);
+/* the preview (strip.raw, .cal, .faul or NULL/0, strip.raw.txt: a
+ * standard 525 ppi preview) with the preview's job (ftw_job_load): each
+ * frame's box cut as a share frame is (x along). Returns the number of
+ * frames; replaces any earlier preview. ftw_preview_display: one of them
+ * printed with strip.print's emulsion, the strip's balance over the
+ * preview's frames, the job's film base, no clicks and no turn, at most
+ * long_edge px -> out: RGBA rows; *pw x *ph. */
+int ftw_preview_load(ftw *w, const unsigned short *raw, size_t raw_n,
+                     const unsigned short *cal, size_t cal_n,
+                     const char *faul, size_t faul_n, const char *meta,
+                     size_t meta_n);
+int ftw_preview_display(ftw *w, int frame, int long_edge, int *pw, int *ph);
 /* every landed frame's JPEG and text, <base>_frameNN.jpg(.txt), in a
  * store-only zip -> out */
 int ftw_zip(ftw *w, const char *base);

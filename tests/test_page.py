@@ -151,6 +151,85 @@ def test_worker_print_file(built, tmp_path):
                             "rotate = 270\n")
 
 
+BASE_D = (0.21, 0.40, 0.60)          # an orange mask: D r g b
+
+
+def preview_files(d, boxes, px=666, lines=4797):
+    """a synthetic standard preview (strip.raw, .cal, .txt) of the
+    preview job's frames: film base outside, each frame dense (a
+    negative's highlight) along its first half, thin along its second"""
+    import numpy as np
+    dark, white = 400.0, 14000.0
+    dens = np.zeros((lines, px, 3))
+    dens[:] = BASE_D
+    for b in boxes:
+        l0, l1 = int(b["x"]), int(b["x"] + b["w"])
+        c0, c1 = int(b["y"]), int(b["y"] + b["h"])
+        mid = (l0 + l1) // 2
+        dens[l0:mid, c0:c1] += 1.2
+        dens[mid:l1, c0:c1] += 0.3
+    raw = dark + 10 ** -dens * (white - dark)
+    cal = np.concatenate([np.full((200, px, 3), dark),
+                          np.full((50, px, 3), white)])
+    (d / "strip.raw").write_bytes(raw.round().astype("<u2").tobytes())
+    (d / "strip.raw.cal").write_bytes(cal.astype("<u2").tobytes())
+    (d / "strip.raw.txt").write_text("px=%d\nx=2\nbin=12\n" % px)
+    return d / "strip.raw", d / "strip.raw.cal", d / "strip.raw.txt"
+
+
+def test_worker_positive_preview(built, tmp_path):
+    """the preview's own raw printed (no clicks): every frame of the
+    preview's job, its box's size, a positive (the dense half of the
+    negative prints light); the film base from the job or estimated;
+    an emulsion of the other film refused"""
+    pytest.importorskip("numpy")
+    pv = (FIX / "preview.job").read_text()
+    meta = "px=666\nx=2\nbin=12\n"
+    boxes = worker(tmp_path, [{"op": "job", "a": [pv]},
+                              {"op": "jobJson", "a": [meta]}])[1]["r"]["frames"]
+    raw, cal, txt = preview_files(tmp_path, boxes)
+    based = pv.replace("hf_half_res = no\n", "hf_half_res = no\nfilm_base = "
+                       "%.4f %.4f %.4f\n" % BASE_D)
+    files = [{"file": str(raw)}, {"file": str(cal)}, meta, None]
+    rep = worker(tmp_path, [
+        {"op": "printNew", "a": ["generic-neg"]},
+        {"op": "job", "a": [pv]},
+        {"op": "previewLoad", "a": files},
+        {"op": "previewDisplay", "a": [1, 2000],
+         "out": str(tmp_path / "f1.rgba")},
+        {"op": "previewDisplay", "a": [3, 120]},
+        {"op": "previewDisplay", "a": [9, 120]},
+        {"op": "job", "a": [based]},
+        {"op": "previewLoad", "a": files},
+        {"op": "previewDisplay", "a": [1, 2000],
+         "out": str(tmp_path / "b1.rgba")},
+        {"op": "printNew", "a": ["generic-slide"]},
+        {"op": "previewDisplay", "a": [1, 120]},
+        {"op": "previewLoad", "a": [files[0], files[1], "px=666\nx=2\nbin=6\n",
+                                    None]},
+    ])
+    assert rep[2]["r"] == 6
+    d = rep[3]["r"]
+    b = boxes[0]
+    assert abs(d["w"] - b["w"]) <= 2 and abs(d["h"] - b["h"]) <= 2
+    assert d["w"] > d["h"]                    # along the strip, as shown
+    assert max(rep[4]["r"]["w"], rep[4]["r"]["h"]) == 120
+    assert rep[5] == {"err": "no such frame in the preview"}
+    for name in ("f1.rgba", "b1.rgba"):
+        px = (tmp_path / name).read_bytes()
+        assert len(px) == d["w"] * d["h"] * 4
+        row = d["w"] * 4
+        y = d["h"] // 2
+        line = px[y * row:(y + 1) * row]
+        lum = [sum(line[i:i + 3]) for i in range(0, row, 4)]
+        q = d["w"] // 4
+        dense, thin = sum(lum[q // 2:q]), sum(lum[3 * q:3 * q + q // 2])
+        assert dense > thin * 1.5, name      # a positive: dense prints light
+    assert rep[7]["r"] == 6
+    assert "slide" in rep[10]["err"]
+    assert "standard preview" in rep[11]["err"]
+
+
 def run_page(built, tmp_path):
     """the page in Chromium: new strip, preview, taps (3: 6MP, 4: ARC,
     5: skip), scan, clicks c c M and a turn (r) on frame 1, zooms (z, a
