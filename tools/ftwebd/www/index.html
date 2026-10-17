@@ -20,7 +20,13 @@ button:disabled{opacity:.35;cursor:default}
 .strip{position:relative;min-width:640px;margin:0 10px;line-height:0;background:#f3ede2}
 .strip img{width:100%}
 .strip:empty::after{content:"no preview yet";display:block;line-height:120px;text-align:center;color:#6b5e52;font-size:12px;letter-spacing:.2em}
-.fr{position:absolute;border:2px solid #fff4;background:none;padding:0;min-height:0;color:var(--amber)}
+.fr{position:absolute;border:2px solid #fff4;color:var(--amber);cursor:pointer}
+.fr canvas{position:absolute;inset:0;width:100%;height:100%;display:none}
+.fr .t{position:absolute;right:3px;bottom:3px;min-height:0;padding:0 6px;line-height:1.4;font-size:14px;background:#000a;border:0}
+.fr[data-fz]{animation:fz .8s infinite alternate}@keyframes fz{to{border-color:#7fd17f;box-shadow:0 0 0 3px #7fd17f55}}
+.strip.pos>img{filter:brightness(.18)}
+#fz{display:block;margin:2px 16px;width:240px;height:64px}
+[aria-pressed=true]{color:var(--amber);border-color:var(--amber)}
 .fr span{position:absolute;left:4px;font-size:11px;line-height:1.2;background:#000a;padding:1px 4px}
 .fr .n{top:4px}.fr .s{bottom:4px}
 .fr.on{border-color:var(--amber);background:#ff9a1f14}
@@ -51,10 +57,10 @@ ul{list-style:none;padding:0}li a{color:var(--ink)}
 <button id="preview" class="go">Preview</button>
 </div>
 <div class="box"><div class="strip" id="sv"></div></div>
-<div class="legend"><span class="zm"><button id="zo" aria-label="Zoom out">−</button> <button id="zi" aria-label="Zoom in">+</button></span>tap a frame: <i>—</i> · <i>4MP</i> · <i>6MP</i> · <i>ARC</i> archive &nbsp; <span id="plan"></span></div>
+<div class="legend"><span class="zm"><button id="pn" aria-pressed="false" title="the preview as prints (no clicks)" disabled>pos</button> <button id="zo" aria-label="Zoom out">−</button> <button id="zi" aria-label="Zoom in">+</button></span>tap a frame: <i>—</i> · <i>4MP</i> · <i>6MP</i> · <i>ARC</i> archive &nbsp; <span id="plan"></span></div>
 <div class="bar"><select id="em" aria-label="Emulsion"></select><button id="scan" class="go">Scan</button><button id="stop" class="stop" disabled>Stop</button></div>
 <div class="prog"><div id="pb"></div></div>
-<div id="st"></div>
+<div id="st"></div><canvas id="fz" hidden></canvas>
 <div id="grid"></div>
 <div id="bw"><canvas id="big" width="0" height="0"></canvas></div>
 <div class="bar" id="keys"></div>
@@ -84,7 +90,7 @@ async function strips(s){const l=await api("/api/strips");l.sort((a,b)=>b.name<a
  let c=0;while(l.some(x=>x.name===today()+"_"+String.fromCharCode(97+c)))c++;
  $("newname").value=today()+"_"+String.fromCharCode(97+c%26);
  if(s)$("strip").value=s;cur=$("strip").value;await load()}
-async function load(){await PR;const sv=$("sv");sv.innerHTML="";frames=[];landed=[];sel=0;shown.clear();$("grid").innerHTML="";$("plan").textContent="";$("notes").textContent="";draw(null);
+async function load(){await PR;pvReset();const sv=$("sv");sv.innerHTML="";frames=[];landed=[];sel=0;shown.clear();$("grid").innerHTML="";$("plan").textContent="";$("notes").textContent="";draw(null);
  if(!cur)return;files();const s=cur,pv=await get(F("strip.preview.job"))||await get(S("strip.job"));if(!pv||s!==cur)return;
  try{await ft("job",pv);const j=await get(S("strip.job"));if(j)await ft("planLoad",j)}catch(e){return st(e.message,1)}
  await layout();const p=await get(S("strip.print"));
@@ -92,10 +98,11 @@ async function load(){await PR;const sv=$("sv");sv.innerHTML="";frames=[];landed
  $("em").value=(await ft("printText")).match(/emulsion = (\S+)/)[1];
  const img=new Image();img.alt="strip "+cur;img.src=F("strip.png")+"?t="+Date.now();
  img.onload=()=>{sv.innerHTML="";sv.append(img);const iw=img.naturalWidth,ih=img.naturalHeight;
-  for(const fr of frames){const b=document.createElement("button");b.className="fr";
+  for(const fr of frames){const b=document.createElement("div");b.className="fr";b.setAttribute("role","button");b.tabIndex=0;
    Object.assign(b.style,{left:fr.x/iw*100+"%",top:fr.y/ih*100+"%",width:fr.w/iw*100+"%",height:fr.h/ih*100+"%"});
-   b.innerHTML='<span class="n">'+fr.n+'</span><span class="s"></span>';b.onclick=()=>cycle(fr);fr.el=b;sv.append(b);paint(fr)}};
- const l=await api(S("files")).catch(()=>[]);for(const f of l.map(x=>x.name).filter(n=>/^strip_win\d\d\.raw$/.test(n)).sort())await cut(f,1);await reprint()}
+   b.innerHTML='<canvas></canvas><span class="n">'+fr.n+'</span><span class="s"></span><button class="t" title="turn">↻</button>';
+   b.onclick=e=>e.target.closest(".t")?turnFrame(fr):cycle(fr);b.onkeydown=e=>{if(e.key==="Enter"&&e.target===b)cycle(fr)};fr.el=b;sv.append(b);paint(fr)}paintStrip()};
+ const l=await api(S("files")).catch(()=>[]);pvOk=["strip.raw","strip.raw.cal"].every(n=>l.some(x=>x.name===n));paintStrip();for(const f of l.map(x=>x.name).filter(n=>/^strip_win\d\d\.raw$/.test(n)).sort())await cut(f,1);await reprint()}
 // frames, buckets and windows from the job (C: ftw_job_json)
 async function layout(){const t=await get(F("strip.raw.txt")),j=await ft("jobJson",t),arc=(ls("arc:"+cur)||"").split(",");
  const o=frames;$("film").value=j.film;frames=j.frames;for(const f of frames)f.el=(o.find(x=>x.n===f.n)||{}).el,f.b=arc.includes(""+f.n)?3:PX.indexOf(f.px)>0?PX.indexOf(f.px):f.px?1:0;
@@ -116,10 +123,10 @@ function busy(b){for(const id of["preview","scan","new","strip","film"])$(id).di
 let run={n:1,i:1};
 function onLine(t){const lg=$("log");lg.textContent+=t+"\n";if(lg.textContent.length>2e4)lg.textContent=lg.textContent.slice(-15e3);lg.scrollTop=1e9;
  const w=t.split(" ");if(w[0]!=="progress"){if(t.startsWith("ftwebd exit"))done(+w[2]);return}
- if(w[1]==="begin"){run={kind:w[2],n:+w[3]||1,i:1};st(w[2]+" …")}
- else if(w[1]==="unit"){run.i=+w[3];st(run.kind+" "+run.i+"/"+run.n)}
- else if(w[1]==="lines"){const[k,n]=w[2].split("/").map(Number);$("pb").style.width=((run.i-1+k/n)/run.n*100).toFixed(1)+"%";st(run.kind+" "+run.i+"/"+run.n+" · line "+k+"/"+n)}
- else if(w[1]==="focus")st(run.kind+" "+run.i+"/"+run.n+" · focus crop "+w[2]);else if(w[1]==="file"){files();const m=t.match(/[\\/]([^\\/]+)[\\/](strip_win\d\d\.raw)$/);if(m&&m[1]===cur&&task.op==="scan")land(m[2])}
+ if(w[1]==="begin"){run={kind:w[2],n:+w[3]||1,i:1};fzReset();st(w[2]+" …")}
+ else if(w[1]==="unit"){run.i=+w[3];fzReset();st(run.kind+" "+run.i+"/"+run.n)}
+ else if(w[1]==="lines"){fzFrame(0);const[k,n]=w[2].split("/").map(Number);$("pb").style.width=((run.i-1+k/n)/run.n*100).toFixed(1)+"%";st(run.kind+" "+run.i+"/"+run.n+" · line "+k+"/"+n)}
+ else if(/^(focus|focused|sharp)$/.test(w[1]))onFocus(w);else if(w[1]==="file"){files();const m=t.match(/[\\/]([^\\/]+)[\\/](strip_win\d\d\.raw)$/);if(m&&m[1]===cur&&task.op==="scan")land(m[2])}
  else if(w[1]==="end"){if(w[2]==="ok")$("pb").style.width="100%";st(run.kind+" "+w[2],w[2]!=="ok")}}
 function watch(t){task=t;busy(t.state==="running");if(es)es.close();$("log").textContent="";
  es=new EventSource("/api/tasks/"+t.id+"/events?since=0");es.onmessage=e=>onLine(e.data);

@@ -6,7 +6,11 @@ print in the browser: a grid of the strip's frames, the selected one
 large, C/M/Y/D clicks, a turn per frame (↺ ↻, `r` / `R`; "↻ all" gives
 every frame the selected one's), Download (JPEG + its `.txt`) and All
 (zip). Tap the large print (or `z`) for one image pixel per screen
-pixel; − + zoom the strip preview.
+pixel; − + zoom the strip preview. Each frame on the strip preview has
+its own ↻ (the same turn, set before the scan too), and `pos` shows the
+strip as prints: the preview's own raw (`strip.raw`, fetched once)
+printed by the engine with the emulsion and the strip's balance, no
+clicks.
 
 The box does no image or planning work. The page does, in C compiled to
 wasm (`tools/ftweb`, `ftweb.wasm` in a worker): it plans the share
@@ -47,7 +51,11 @@ strip from these files (the windows are cut again in the browser).
 
 Scan runs up to three steps in one task, each after the last one ends
 well: the share windows (`ftpoc scan --job strip.job`, each window
-focused at its own optics first: the status shows the focus crops), then
+focused first: a bracket on the first window, the rest carry its
+offset on the curve, a 3-crop check where a window's scale is above
+1.25 x the measured one. The status names the frame and the crop, that
+frame pulses on the strip, and a small plot shows sharpness against the
+offset and the offset taken: measured, checked or carried), then
 the `ARC`
 frames as a detailed scan of their own into `<archive>\<strip>\`
 (`ftpoc frames --detail neg --ppi 6300 --select ...`, then `ftpoc scan

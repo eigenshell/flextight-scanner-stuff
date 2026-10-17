@@ -232,8 +232,16 @@ def test_worker_positive_preview(built, tmp_path):
 
 def run_page(built, tmp_path):
     """the page in Chromium: new strip, preview, taps (3: 6MP, 4: ARC,
-    5: skip), scan, clicks c c M and a turn (r) on frame 1, zooms (z, a
-    tap, the strip's +), Download and All"""
+    5: skip), frame 2 turned on the strip, pos, scan, clicks c c M and a
+    turn (r) on frame 1, zooms (z, a tap, the strip's +), Download and
+    All"""
+    pytest.importorskip("numpy")
+    meta = "px=666\nx=2\nbin=12\n"
+    boxes = worker(tmp_path, [
+        {"op": "job", "a": [(FIX / "preview.job").read_text()]},
+        {"op": "jobJson", "a": [meta]}])[1]["r"]["frames"]
+    (tmp_path / "pv").mkdir()
+    preview_files(tmp_path / "pv", boxes)
     win = tmp_path / "wd" / "win"
     win.parent.mkdir()
     subprocess.run([str(ROOT / "libft" / "test" / "window_dump"), str(win)],
@@ -244,7 +252,8 @@ def run_page(built, tmp_path):
     dl.mkdir()
     srv = Server(ROOT / "tools" / "ftwebd" / "ftwebd", box, 0.001,
                  args=["--archive", box / "archive"],
-                 env={"FAKE_FTPOC_WINDOW": str(win)})
+                 env={"FAKE_FTPOC_WINDOW": str(win),
+                      "FAKE_FTPOC_PREVIEW": str(tmp_path / "pv" / "strip")})
     try:
         r = subprocess.run([NODE, "--no-warnings", str(FIX / "page_e2e.mjs"),
                             CHROME, "http://127.0.0.1:%d/" % srv.port,
@@ -263,7 +272,16 @@ def test_page_end_to_end(built, tmp_path):
     strip = box / "strips" / s
     assert out["landed"] == [1, 3]            # one fake frame per window
     assert out["print"] == ("emulsion = generic-neg\n\n[frame 1]\n"
-                            "cmyd = 2 -1 0 0\nrotate = 90\n")
+                            "cmyd = 2 -1 0 0\nrotate = 90\n\n[frame 2]\n"
+                            "rotate = 90\n")
+    # pos: frame 1's dense half printed light (a positive, not strip.png)
+    assert sum(out["posPx"][:3]) > 3 * 150, out["posPx"]
+    # what focus did, as the status said it
+    seen = "\n".join(out["seen"])
+    assert "window 1/2 · focusing frame 1 · crop 1 at -500" in seen
+    assert "window 1/2 · focus +250 (measured)" in seen
+    assert "window 2/2 · focus +250 carried: no crops" in seen
+    assert out["plot"]
     log = [json.loads(l) for l in (box / "fake_ftpoc.log").read_text()
            .splitlines()]
     arc = str(box / "archive" / s / "strip")

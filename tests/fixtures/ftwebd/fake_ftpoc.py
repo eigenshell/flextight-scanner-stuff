@@ -12,7 +12,10 @@ FAKE_FTPOC_DELAY: seconds per progress line (default 0.01).
 FAKE_FTPOC_WINDOW: a window scan's base (libft/test/window_dump: <w>.raw,
 .raw.cal, .raw.txt); scan copies it as each window, the window's first
 frame as its share_frame, so the page can cut and print real pixels.
-Otherwise windows are 64 zero bytes."""
+Otherwise windows are 64 zero bytes. FAKE_FTPOC_PREVIEW: a preview's base
+(<p>.raw, .raw.cal, .raw.txt) frames copies as strip.raw (else 64 zero
+bytes). scan says what focus does: window 1 a bracket, the rest carry
+it."""
 import json
 import os
 import re
@@ -76,8 +79,13 @@ def frames(args):
     if not lines(4795):
         say("progress end stopped")
         return 1
-    Path(base + ".raw").write_bytes(b"\0" * 64)
-    Path(base + ".raw.txt").write_text("px=666\nx=2\nbin=12\n")
+    pv = os.environ.get("FAKE_FTPOC_PREVIEW")
+    if pv:
+        for ext in (".raw", ".raw.cal", ".raw.txt"):
+            shutil.copy(pv + ext, base + ext)
+    else:
+        Path(base + ".raw").write_bytes(b"\0" * 64)
+        Path(base + ".raw.txt").write_text("px=666\nx=2\nbin=12\n")
     say("progress file " + base + ".raw")
     job = (HERE / "preview.job").read_text()
     Path(base + ".job").write_text(job)
@@ -118,11 +126,20 @@ def scan(args):
     say("progress begin window %d" % len(groups))
     for i, g in enumerate(groups, 1):
         say("progress unit window %d %d" % (i, g))
+        first = min(n for n, inc, gg, _, _ in secs if inc and gg == g)
+        if i == 1:
+            for k, (o, s) in enumerate(((-500, 0.031), (0, 0.044),
+                                        (500, 0.040)), 1):
+                say("progress focus %d frame %d at %+d" % (k, first, o))
+                time.sleep(DELAY)
+                say("progress sharp %+d %.4f" % (o, s))
+            say("progress focused +250 measured")
+        else:
+            say("progress focused +250 carried")
         if not lines(1890):
             say("progress end stopped")
             return 1
         raw = "%s_win%02d.raw" % (base, g)
-        first = min(n for n, inc, gg, _, _ in secs if inc and gg == g)
         if win:
             shutil.copy(win + ".raw", raw)
             shutil.copy(win + ".raw.cal", raw + ".cal")

@@ -84,6 +84,18 @@ try {
   await tap(5, 3);
   await until('[...document.querySelectorAll(".fr .s")].map(s=>s.textContent).join() === "4MP,4MP,6MP,ARC,—,—"', "buckets");
   await until('/window/.test(document.getElementById("plan").textContent)', "plan");
+  // frame 2 turned on the strip (its canvas shows the turn); the strip as
+  // prints (pos): every frame's canvas, from the preview's raw
+  const box = n => '[...document.querySelectorAll(".fr")].find(b=>b.querySelector(".n").textContent==="' + n + '")';
+  await ev(box(2) + '.querySelector(".t").click()');
+  await until(box(2) + '.querySelector("canvas").style.display === "block"', "strip turn");
+  await until('fetch(S("strip.print")).then(r=>r.text()).then(t=>/\\[frame 2\\]\\nrotate = 90\\n/.test(t))', "strip turn saved");
+  await until('!document.getElementById("pn").disabled', "pos available");
+  await ev('document.getElementById("pn").click()');
+  await until('[...document.querySelectorAll(".fr canvas")].every(c=>c.style.display==="block") && pvImg.size === 6', "pos");
+  const posPx = await ev('(()=>{const c=' + box(1) + '.querySelector("canvas");return [...c.getContext("2d").getImageData(c.width/4|0,c.height/2|0,1,1).data]})()');
+  // the status as the scan goes: focus crops, the offset taken
+  await ev('window.stSeen=[];new MutationObserver(()=>stSeen.push(document.getElementById("st").textContent)).observe(document.getElementById("st"),{childList:true,characterData:true,subtree:true})');
   await ev('document.getElementById("scan").click()');
   await until('/ftwebd exit 0/.test(document.getElementById("log").textContent)', "scan");
   await until('document.querySelectorAll("#grid canvas").length >= 2 && document.getElementById("big").width > 0', "prints");
@@ -111,7 +123,8 @@ try {
   const want = [strip + "_frame01.jpg", strip + "_frame01.jpg.txt", strip + ".zip"];
   for (let t = 0; t < 600 && !want.every(f => existsSync(join(dl, f))); t++) await sleep(100);
   await sleep(300);
-  const out = await ev('(async()=>({landed, notes: document.getElementById("notes").textContent,' +
+  const out = await ev('(async()=>({landed, posPx: ' + JSON.stringify(posPx) + ', seen: stSeen,' +
+    ' plot: !document.getElementById("fz").hidden, notes: document.getElementById("notes").textContent,' +
     ' print: await fetch(S("strip.print")).then(r=>r.text()),' +
     ' log: document.getElementById("log").textContent}))()');
   console.log(JSON.stringify(Object.assign({ strip }, out)));

@@ -3,9 +3,10 @@
 // is needed before frames land): cut each finished window in the
 // engine, the strip's balance, the grid and the large view, C/M/Y/D
 // clicks (buttons, keys c m y d, Shift: minus, arrows: frames) and the
-// downloads; each frame's turn (buttons, keys r R); the large view's zoom
-// (tap, z) and the strip preview's (- +). Shares index.html's globals
-// ($, ft, api, cur, ...).
+// downloads; each frame's turn (buttons, keys r R, the strip's own ↻);
+// the large view's zoom (tap, z) and the strip preview's (- +); the strip
+// as prints (pos); what focus is doing. Shares index.html's globals ($,
+// ft, api, cur, ...).
 "use strict";
 // a finished window: its files -> the engine's cut
 async function cut(name,quiet){const s=cur,[raw,cal,meta,faul]=await Promise.all([get(F(name),1),get(F(name+".cal"),1),get(F(name+".txt"),1),get(F(name+".faul"),1)]);
@@ -42,13 +43,16 @@ let clickQ=Promise.resolve();
 const click=(i,d)=>clickQ=clickQ.then(async()=>{if(!sel)return;const f=sel,k=kk[f].slice();k[i]+=d;
  try{await ft("clicks",f,k);kk[f]=k;if(f===sel){draw(k);await show(f,1)}savePrint()}catch(e){st(e.message,1)}});
 // the print's turn (strip.print rotate): the screen copies, the JPEGs
-const turn=d=>clickQ=clickQ.then(async()=>{if(!sel)return;const f=sel;
- try{await ft("rotate",f,((await ft("rotation",f))+d+360)%360);savePrint();await show(f,f===sel)}catch(e){st(e.message,1)}});
+const turn=d=>clickQ=clickQ.then(async()=>{if(!sel)return;const f=sel,r=((await ft("rotation",f))+d+360)%360;
+ try{await ft("rotate",f,r);savePrint();await show(f,f===sel);await turned(f,r)}catch(e){st(e.message,1)}});
 const turnAll=()=>clickQ=clickQ.then(async()=>{if(!sel)return;
- try{const r=await ft("rotation",sel);for(const f of landed)if(f!==sel&&await ft("rotation",f)!==r){await ft("rotate",f,r);await show(f,0)}savePrint()}catch(e){st(e.message,1)}});
+ try{const r=await ft("rotation",sel);for(const f of landed)if(f!==sel&&await ft("rotation",f)!==r){await ft("rotate",f,r);await show(f,0);await turned(f,r)}savePrint()}catch(e){st(e.message,1)}});
+// the strip's ↻: the same turn, before or after the scan
+const turnFrame=fr=>clickQ=clickQ.then(async()=>{const r=((await ft("rotation",fr.n))+90)%360;
+ try{await ft("rotate",fr.n,r);savePrint();await turned(fr.n,r);if(landed.includes(fr.n))await show(fr.n,fr.n===sel)}catch(e){st(e.message,1)}});
 function savePrint(){clearTimeout(putT);putT=setTimeout(async()=>{try{await api(S("strip.print"),{method:"PUT",body:await ft("printText")})}catch(e){st(e.message,1)}},400)}
 function save(name,bytes,type){const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([bytes],{type}));a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),6e4)}
-$("em").onchange=async()=>{const n=await ft("printEmulsion",$("em").value);if(n)st(n+" frame(s) back to auto: their clicks do not fit");savePrint();await reprint()};
+$("em").onchange=async()=>{const n=await ft("printEmulsion",$("em").value);if(n)st(n+" frame(s) back to auto: their clicks do not fit");savePrint();pvImg.clear();paintStrip();await reprint()};
 $("dl").onclick=async()=>{try{st("printing frame "+sel+" …");const r=await ft("jpeg",sel),n=cur+"_frame"+String(sel).padStart(2,"0")+".jpg";save(n,r.jpg,"image/jpeg");save(n+".txt",r.text,"text/plain");st("")}catch(e){st(e.message,1)}};
 $("all").onclick=async()=>{try{st("printing every frame …");save(cur+".zip",await ft("zip",cur),"application/zip");st("")}catch(e){st(e.message,1)}};
 addEventListener("keydown",e=>{if(/INPUT|SELECT/.test(e.target.tagName)||!sel||e.ctrlKey||e.metaKey||e.altKey)return;const i="cmyd".indexOf(e.key.toLowerCase()),j=landed.indexOf(sel);
@@ -60,5 +64,45 @@ const ZS=[1,1.5,2,3,4];let sz=+ls("zoom")||1;
 function szoom(d){const b=$("sv").parentNode,c=(b.scrollLeft+b.clientWidth/2)/b.scrollWidth;
  sz=ZS[Math.max(0,Math.min(ZS.length-1,ZS.indexOf(sz)+d))];ls("zoom",""+sz);
  Object.assign($("sv").style,{width:sz>1?"calc("+sz*100+"% - 20px)":"",minWidth:640*sz+"px"});
- b.scrollLeft=c*b.scrollWidth-b.clientWidth/2;$("zo").disabled=sz===1;$("zi").disabled=sz===ZS[ZS.length-1]}
+ b.scrollLeft=c*b.scrollWidth-b.clientWidth/2;$("zo").disabled=sz===1;$("zi").disabled=sz===ZS[ZS.length-1];if(frames.length)paintStrip()}
 $("zo").onclick=()=>szoom(-1);$("zi").onclick=()=>szoom(1);szoom(0);
+// the strip preview's frames: each turned as strip.print turns it and
+// (pos) printed from the preview's own raw by the engine: the strip's
+// balance, the emulsion, no clicks. Off and unturned: strip.png itself.
+let pos=ls("pos")==="1",pvOk=0,pvLoad=null,psQ=Promise.resolve();const pvImg=new Map();
+function pvReset(){pvOk=0;pvLoad=null;pvImg.clear()}
+async function pvFiles(){const[raw,cal,meta,faul]=await Promise.all([get(F("strip.raw"),1),get(F("strip.raw.cal"),1),get(F("strip.raw.txt")),get(F("strip.raw.faul"),1)]);
+ if(!raw||!cal||!meta)throw new Error("no preview raw");await ft("previewLoad",raw,cal,meta,faul)}
+async function pvSource(fr){if(!pos||!pvOk){const i=$("sv").querySelector("img");return[i,fr.x,fr.y,fr.w,fr.h]}
+ if(!pvImg.has(fr.n)){const d=await ft("previewDisplay",fr.n,4000),c=document.createElement("canvas");c.width=d.w;c.height=d.h;
+  c.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(d.rgba.buffer),d.w,d.h),0,0);pvImg.set(fr.n,c)}
+ const c=pvImg.get(fr.n);return[c,0,0,c.width,c.height]}
+async function frameDraw(fr){const b=fr.el,r=fr.rot||0;if(!b)return;const c=b.querySelector("canvas");
+ if(!(pos&&pvOk)&&!r)return c.style.display="none";const[im,sx,sy,sw,sh]=await pvSource(fr);
+ const W=Math.max(1,Math.round(b.clientWidth*devicePixelRatio)),H=Math.max(1,Math.round(b.clientHeight*devicePixelRatio)),k=r%180?Math.min(W/sh,H/sw):Math.min(W/sw,H/sh),x=c.getContext("2d");
+ c.width=W;c.height=H;x.fillStyle="#000";x.fillRect(0,0,W,H);x.translate(W/2,H/2);x.rotate(r*Math.PI/180);x.drawImage(im,sx,sy,sw,sh,-sw*k/2,-sh*k/2,sw*k,sh*k);c.style.display="block"}
+async function paintStrip_(){const s=cur;$("pn").disabled=!pvOk;$("pn").setAttribute("aria-pressed",pos&&pvOk);$("sv").classList.toggle("pos",pos&&pvOk);
+ for(const f of frames)f.rot=await ft("rotation",f.n).catch(()=>0);
+ if(pos&&pvOk){pvLoad=pvLoad||pvFiles();try{await pvLoad}catch(e){pvLoad=null;st("pos: "+e.message,1);pos=0;return paintStrip_()}}
+ for(const f of frames)if(s===cur)await frameDraw(f).catch(e=>st("pos: "+e.message,1))}
+const paintStrip=()=>psQ=psQ.then(paintStrip_).catch(e=>st(e.message,1));
+async function turned(n,r){const f=frames.find(x=>x.n===n);if(f){f.rot=r;await frameDraw(f)}}
+$("pn").onclick=()=>{pos=!pos;ls("pos",pos?"1":"0");paintStrip()};
+// focus: ftpoc's crops (progress focus K frame F at O, sharp O S, focused
+// O how) as the status, the frame pulsing on the strip and a plot of
+// sharpness against the offset with the offset taken
+let fz=[],fzAt=null;
+function fzFrame(n){for(const f of frames)if(f.el)f.el.toggleAttribute("data-fz",f.n===n)}
+function fzReset(){fz=[];fzAt=null;fzFrame(0);$("fz").hidden=true}
+function onFocus(w){const u=run.kind+" "+run.i+"/"+run.n+" · ";
+ if(w[1]==="focus"){fzFrame(+w[4]||0);st(u+"focusing"+(w[4]?" frame "+w[4]:"")+" · crop "+w[2]+(w[6]?" at "+w[6]:""))}
+ else if(w[1]==="sharp"){fz.push([+w[2],+w[3]]);plot()}
+ else{fzAt=[+w[2],w[2]+" "+w[3]];fzFrame(0);st(u+(w[3]==="carried"?"focus "+w[2]+" carried: no crops":w[3]==="none"?"no focus peak: "+w[2]+" as it was":"focus "+w[2]+" ("+w[3]+")"),w[3]==="none");plot()}}
+function plot(){const c=$("fz"),d=devicePixelRatio,W=240*d,H=64*d,P=8*d;c.hidden=false;c.width=W;c.height=H;const x=c.getContext("2d"),
+ os=fz.map(p=>p[0]).concat(fzAt?[fzAt[0]]:[]),lo=Math.min(...os)-250,hi=Math.max(...os)+250,ss=fz.map(p=>p[1]),a=Math.min(...ss),b=Math.max(...ss),
+ X=o=>P+(o-lo)/(hi-lo)*(W-2*P),Y=v=>H-P-(b>a?(v-a)/(b-a):.5)*(H-3*P);
+ x.fillStyle="#171311";x.fillRect(0,0,W,H);x.lineWidth=d;x.strokeStyle="#ff9a1f88";x.beginPath();
+ [...fz].sort((p,q)=>p[0]-q[0]).forEach((p,i)=>i?x.lineTo(X(p[0]),Y(p[1])):x.moveTo(X(p[0]),Y(p[1])));x.stroke();x.fillStyle="#ff9a1f";
+ for(const p of fz){x.beginPath();x.arc(X(p[0]),Y(p[1]),2.5*d,0,7);x.fill()}
+ x.font=10*d+"px "+getComputedStyle(document.body).fontFamily;x.fillStyle="#8a7d70";x.fillText(fz.length?"sharpness":"no crops",P,P+4*d);
+ if(fzAt){const m=X(fzAt[0]);x.strokeStyle="#7fd17f";x.beginPath();x.moveTo(m,P);x.lineTo(m,H-P);x.stroke();x.fillStyle="#7fd17f";x.textAlign=m>W/2?"right":"left";x.fillText(fzAt[1],m+(m>W/2?-4:4)*d,H-P)}}
