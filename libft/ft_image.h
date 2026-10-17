@@ -34,5 +34,9 @@ void ft_image_init(ft_image *im);
 /* allocates w x h pixels (zeroed); -1 with e filled on failure */
 int ft_image_alloc(ft_image *im, int w, int h, ft_err *e);
 void ft_image_free(ft_image *im);
+/* the box x,y,w,h of im as a new image (allocated in cut, ppi kept); -1
+ * with e filled if it does not fit */
+int ft_image_crop(const ft_image *im, const int box[4], ft_image *cut,
+                  ft_err *e);
 
 #endif

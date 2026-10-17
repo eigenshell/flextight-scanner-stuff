@@ -39,3 +39,22 @@ void ft_image_free(ft_image *im)
     im->rgb = NULL;
     im->w = im->h = 0;
 }
+
+int ft_image_crop(const ft_image *im, const int box[4], ft_image *cut,
+                  ft_err *e)
+{
+    int y;
+    if (box[0] < 0 || box[1] < 0 || box[2] < 1 || box[3] < 1 ||
+        box[2] > im->w || box[3] > im->h || box[0] > im->w - box[2] ||
+        box[1] > im->h - box[3])
+        return ft_fail(e, "box %d,%d %dx%d outside the %dx%d image", box[0],
+                       box[1], box[2], box[3], im->w, im->h);
+    if (ft_image_alloc(cut, box[2], box[3], e))
+        return -1;
+    for (y = 0; y < box[3]; y++)
+        memcpy(cut->rgb + (size_t)y * box[2] * 3,
+               im->rgb + ((size_t)(box[1] + y) * im->w + box[0]) * 3,
+               (size_t)box[2] * 3 * sizeof *cut->rgb);
+    cut->ppi = im->ppi;
+    return 0;
+}
