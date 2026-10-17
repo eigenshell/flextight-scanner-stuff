@@ -2188,7 +2188,11 @@ static int focus_bracket(double ppi, double xc, double yc, double w,
                          long centre, long step, int n, int max_samples,
                          int ccd_only, long *best)
 {
-    const long lim = ccd_only ? FT_CAL_BRACKET_MAX : FT_BRACKET_MAX;
+    /* a wide bracket (low magnification: share_focus) may reach as far
+     * as it spans; every crop still goes through crop_check */
+    const long lim = ccd_only ? FT_CAL_BRACKET_MAX
+                     : (long)(n - 1) * step > FT_BRACKET_MAX
+                     ? (long)(n - 1) * step : FT_BRACKET_MAX;
     long off[FB_SAMPLES];
     double sh[FB_SAMPLES];
     int ns = 0, tries, i, k, m, dir = 0;
@@ -3625,15 +3629,34 @@ static int share_request(const ft_job *j, const ft_holder *h, int g,
 
 #define SHARE_FOCUS_TRIES 2  /* frames of a window tried for a peak */
 
+/* The 95 % depth of field in tandem steps at an optical scale and bin:
+ * ~980 (1+m)/m^2 x bin (focus survey 2026-10-15/16, RESULTS.md 4: 636
+ * at 6300, 3651 at 2000, 5653 at 1500, bin 1). */
+static double focus_dof95(double scale, int bin)
+{
+    double m = g_lens.p * scale;
+    return 980.0 * (1 + m) / (m * m) * (bin > 0 ? bin : 1);
+}
+
+/* A share bracket's step: half the depth of field (5 crops span +-1
+ * DOF95, so the peak stands out of the 3 % flat cut-off), never under
+ * the 500 the high-magnification brackets use. ~2200 at 1705 bin 1. */
+static long share_focus_step(double scale, int bin)
+{
+    long st = (long)(focus_dof95(scale, bin) / 2 / 50 + 0.5) * 50;
+    return st > 500 ? st : 500;
+}
+
 /* A share window's focus: a bracket of n crops at the window's own
- * optics (q: its ppi, bin and reach across) on the centre band of its
- * first included frame, the next one if that gives no peak, centred on
- * centre. 0 with *off, FB_NO_PEAK (no frame gave one), -1 on a scan or
- * file failure. */
+ * optics (q: its ppi, bin and reach across), share_focus_step apart, on
+ * the centre band of its first included frame, the next one if that
+ * gives no peak, centred on centre. 0 with *off, FB_NO_PEAK (no frame
+ * gave one), -1 on a scan or file failure. */
 static int share_focus(const ft_job *j, int g, const struct crop_req *q,
                        long centre, int n, long *off)
 {
     double a = q->x + FOCUS_X_MARGIN, b = q->x + q->w - FOCUS_X_MARGIN;
+    long step = share_focus_step(q->ppi * q->bin, q->bin);
     int i, tried = 0, rc = FB_NO_PEAK, keep = g_focus_bin;
     g_focus_bin = q->bin;
     for (i = 0; i < j->nframes && tried < SHARE_FOCUS_TRIES; i++) {
@@ -3650,11 +3673,12 @@ static int share_focus(const ft_job *j, int g, const struct crop_req *q,
         }
         tried++;
         printf("focus, window %d: frame %d at %.1f mm (%.1f..%.1f mm "
-               "across), %g ppi, bin %d\n", g, fr->index,
-               fr->y0 + fr->len / 2, lo, hi, q->ppi, q->bin);
+               "across), %g ppi, bin %d, %d crops %ld apart\n", g,
+               fr->index, fr->y0 + fr->len / 2, lo, hi, q->ppi, q->bin, n,
+               step);
         g_pg_frame = fr->index;
         rc = focus_bracket(q->ppi, (lo + hi) / 2, fr->y0 + fr->len / 2,
-                           hi - lo, centre, 500, n, FB_FRAME_SAMPLES, 0,
+                           hi - lo, centre, step, n, FB_FRAME_SAMPLES, 0,
                            off);
         g_pg_frame = 0;
         if (rc != FB_NO_PEAK)

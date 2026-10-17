@@ -283,13 +283,23 @@ Other commands are stopped by Ctrl+C at once, as before.
 
 Focus: the curve comes from `focus.txt` in the current directory
 (written there by `calibrate-focus` on a textured window) or the
-built-in curve for the development scanner. Focus offsets move the CCD
+built-in curve for the development scanner. Below scale ~3000 the
+thin-lens curve drifts from the true focus (focus survey 2026-10-15/16,
+the same trend on three films): the built-in curve carries a correction
+per scale, tandem steps added to the CCD and the lens alike, linear
+between its points: -11278 at 1200, -4778 at 1500, -1358 at 2000, 0 from
+3000 up. `focus.txt` may carry its own (`correct = <scale> <offset>`
+lines, scales ascending); a fitted `focus.txt` (`calibrate-focus`) has
+none. Focus offsets move the CCD
 and the lens together (tandem, as the manual's manual focus does): the
 gap between them, and so the magnification, stays, and only the focus
 plane on the film side moves. Moving the CCD alone also changes the
 magnification (~1 % for 9000 steps at 6300 ppi) and is ~5x less
 sensitive. The check points and the per-frame brackets step 500 and stay
-within ±4000 of the curve. If the three check points agree within ±300
+within ±4000 of the curve. A share window's bracket steps half its depth
+of field (~980 (1+m)/m^2 x bin tandem steps for 95 %, m = p x scale;
+~2200 at 1705 ppi bin 1), at least 500, and may reach as far as it
+spans. If the three check points agree within ±300
 steps of their mean the curve is shifted by the mean; otherwise every
 frame gets its own focus bracket before it is
 scanned, centred on its `focus_offset` (the strip's when 0); a frame

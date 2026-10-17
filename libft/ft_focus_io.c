@@ -8,9 +8,13 @@
 
 int ft_lens_write(const ft_lens *l, FILE *f)
 {
+    int i;
     fprintf(f, "# ftpoc focus curve (thin lens, motor steps)\n"
                "film = %.1f\nw = %.1f\nfl = %.1f\np = %.6e\n",
             l->film, l->w, l->fl, l->p);
+    for (i = 0; i < l->ncorr && i < FT_LENS_CORR_MAX; i++)
+        fprintf(f, "correct = %.0f %.0f\n", l->corr_scale[i],
+                l->corr_off[i]);
     return ferror(f) ? -1 : 0;
 }
 

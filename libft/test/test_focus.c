@@ -41,13 +41,27 @@ int main(void)
     CHECK(c == 285187 && o == 998540);
     CHECK(ft_optics_for(&ft_lens_default, 6300, &c, &o) == 0);
     CHECK(c == 259254 && o == 1005789);
-    /* low scales (previews), checked against the scanner's FP table */
+    /* low scales: the thin lens (checked against the scanner's FP table)
+     * plus the survey's correction, tandem: -4778 at 1500, -1358 at 2000 */
     CHECK(ft_optics_for(&ft_lens_default, 1500, &c, &o) == 0);
-    CHECK(c == 326230 && o == 541866);
+    CHECK(c == 326230 - 4778 && o == 541866 - 4778);
     CHECK(ft_positions_ok(c, o));
     CHECK(ft_optics_for(&ft_lens_default, 2000, &c, &o) == 0);
-    CHECK(c == 423152 && o == 694091);
+    CHECK(c == 423152 - 1358 && o == 694091 - 1358);
     CHECK(ft_positions_ok(c, o));
+    /* the correction: linear between its points, held past the ends, 0
+     * from 3000 up (the high scales above stay the 2026-10-12 fit) */
+    CHECK_NEAR(ft_lens_correction(&ft_lens_default, 1750), -3068, 1e-9);
+    CHECK_NEAR(ft_lens_correction(&ft_lens_default, 2500), -679, 1e-9);
+    CHECK(ft_lens_correction(&ft_lens_default, 3807) == 0);
+    CHECK(ft_lens_correction(&ft_lens_default, 1000) == -11278);
+    {
+        ft_lens bare = ft_lens_default;
+        bare.ncorr = 0;
+        CHECK(ft_lens_correction(&bare, 1500) == 0);
+        CHECK(ft_optics_for(&bare, 1500, &c, &o) == 0);
+        CHECK(c == 326230 && o == 541866);
+    }
     CHECK(ft_optics_for(&ft_lens_default, 1499, &c, &o) == -1);
     CHECK(FT_OPTIC_MIN == 530000);
     CHECK(ft_positions_ok(317523, 530820));     /* FP entry 6, m 0.51 */
@@ -164,6 +178,8 @@ int main(void)
         CHECK(ft_lens_read(&b, f, &e) == 0);
         CHECK_NEAR(b.film, a.film, 0.05);
         CHECK_NEAR(b.p, a.p, 1e-9);
+        CHECK(b.ncorr == a.ncorr && b.ncorr == 5);
+        CHECK(b.corr_scale[1] == 1500 && b.corr_off[1] == -4778);
         fclose(f);
         f = tmpfile();
         fputs("film = 1\nw = 2\n", f);
@@ -179,10 +195,18 @@ int main(void)
                       289987, 265226 };
         long L[8] = { 911050, 922360, 938639, 959966, 981011, 989872,
                       997296, 1004246 };
-        ft_lens l = { 1460000.0, 270000.0, 320000.0, 3.5e-4 };
+        ft_lens l = { 1460000.0, 270000.0, 320000.0, 3.5e-4, 0, {0}, {0} };
         double rc, rl;
         CHECK(ft_lens_fit(M, C, L, 8, &l, &rc, &rl) == 0);
         CHECK(rc < 240 && rl < 130);
+        CHECK(l.ncorr == 0);                    /* a fit stands alone */
+        {   /* from the default (with its table): the fit drops it */
+            ft_lens d = ft_lens_default;
+            d.ncorr = 0x5a5a;               /* what garbage would look like */
+            d = ft_lens_default;
+            CHECK(ft_lens_fit(M, C, L, 8, &d, &rc, &rl) == 0);
+            CHECK(d.ncorr == 0 && ft_lens_correction(&d, 1500) == 0);
+        }
         CHECK_NEAR(l.film, ft_lens_default.film, 3000);
         CHECK_NEAR(l.p, ft_lens_default.p, 2e-6);
         CHECK(ft_lens_fit(M, C, L, 3, &l, &rc, &rl) == -1);
@@ -220,7 +244,7 @@ int main(void)
 
     /* focus file parsing is strict and leaves *l alone on failure */
     {
-        ft_lens keep = { 1, 2, 3, 4 }, l = keep;
+        ft_lens keep = { 1, 2, 3, 4, 0, {0}, {0} }, l = keep;
         ft_err e;
         char big[400];
         static const char *bad[] = {
@@ -253,7 +277,7 @@ int main(void)
     /* focus file from a buffer (the page's planner): the stream reader's
      * rules, n bytes only (no NUL needed) */
     {
-        ft_lens keep = { 1, 2, 3, 4 }, l = keep, s;
+        ft_lens keep = { 1, 2, 3, 4, 0, {0}, {0} }, l = keep, s;
         ft_err e;
         char line[200], text[400];
         static const char good[] = "# fit\n  # x\nfilm = 1\nw = 2\nfl = 3\n"
@@ -322,8 +346,8 @@ int main(void)
                       289987, 265226 };
         long L[8] = { 911050, 922360, 938639, 959966, 981011, 989872,
                       997296, 1004246 };
-        ft_lens l = { 1.2e6, 3.2e5, 3.8e5, 4.2e-4 };
-        ft_lens z = { 1.0e6, 3.0e5, 0, 4.0e-4 };
+        ft_lens l = { 1.2e6, 3.2e5, 3.8e5, 4.2e-4, 0, {0}, {0} };
+        ft_lens z = { 1.0e6, 3.0e5, 0, 4.0e-4, 0, {0}, {0} };
         double rc, rl, Mbad[8];
         memcpy(Mbad, M, sizeof M);
         CHECK(ft_lens_fit(M, C, L, 8, &l, &rc, &rl) == 0);

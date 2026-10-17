@@ -11,8 +11,21 @@
 #include <stdio.h>
 #include "ft.h"
 
-typedef struct { double film, w, fl, p; } ft_lens;
+/* Below ~3000 the thin-lens curve drifts from the true focus on this
+ * unit (focus survey 2026-10-15/16, notes/hw/focusmap/RESULTS.md; the
+ * same trend on three films): a correction per scale, tandem steps added
+ * to both carriers (a film-side focus plane shift), linear between the
+ * points and held past the ends. Ascending scales; ncorr 0: none. */
+#define FT_LENS_CORR_MAX 16
+typedef struct {
+    double film, w, fl, p;
+    int ncorr;
+    double corr_scale[FT_LENS_CORR_MAX];
+    double corr_off[FT_LENS_CORR_MAX];
+} ft_lens;
 extern const ft_lens ft_lens_default;
+/* l's correction at scale (0 without a table) */
+double ft_lens_correction(const ft_lens *l, double scale);
 
 /* The fit spans 3807..6230; the scanner's own focus table (FP<serial>.txt)
  * sits within ~2400 tandem steps of the curve down to scale ~1475
@@ -72,13 +85,15 @@ int ft_peak(const long *x, const double *y, int n, double *peak);
 /* offsets are averaged in double; per-frame if any is > margin from mean */
 ft_focus_mode ft_focus_decide(const long off[3], long *shift);
 
-/* focus.txt ("key = number" lines: film, w, fl, p; '#' comments) from
+/* focus.txt ("key = number" lines: film, w, fl, p; '#' comments; any
+ * number of "correct = <scale> <offset>" lines, scales ascending) from
  * text[0..n) or a stream; -1 with e filled and *l untouched on error */
 int ft_lens_parse(ft_lens *l, const char *text, size_t n, ft_err *e);
 int ft_lens_read(ft_lens *l, FILE *f, ft_err *e);
 int ft_lens_write(const ft_lens *l, FILE *f);
 /* least-squares fit of l (start value in, result out) to n >= 4 in-focus
- * points (scale M[i], CCD C[i], lens L[i]); rms residuals out */
+ * points (scale M[i], CCD C[i], lens L[i]); rms residuals out. The fit
+ * has no correction table: it is fitted to the points as they are. */
 int ft_lens_fit(const double *M, const long *C, const long *L, int n,
                 ft_lens *l, double *rms_ccd, double *rms_lens);
 

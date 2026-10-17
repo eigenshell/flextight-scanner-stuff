@@ -5,7 +5,30 @@
 #include <string.h>
 #include "ft_focus.h"
 
-const ft_lens ft_lens_default = { 1468601.0, 268105.0, 317836.0, 3.4799e-4 };
+/* the curve: eight focus brackets 2026-10-12 (3807..6230); the
+ * correction: the focus survey's tandem peaks (frame 6 centre) less its
+ * 6300 peak, 0 from 3000 up (within the film's height there) */
+const ft_lens ft_lens_default = {
+    1468601.0, 268105.0, 317836.0, 3.4799e-4,
+    5, { 1200, 1500, 2000, 3000, 6300 },
+    { -11278, -4778, -1358, 0, 0 }
+};
+
+double ft_lens_correction(const ft_lens *l, double scale)
+{
+    int i, n = l->ncorr;
+    if (n < 1 || n > FT_LENS_CORR_MAX)
+        return 0;
+    if (scale <= l->corr_scale[0])
+        return l->corr_off[0];
+    for (i = 1; i < n; i++)
+        if (scale <= l->corr_scale[i]) {
+            double a = l->corr_scale[i - 1], b = l->corr_scale[i];
+            return l->corr_off[i - 1] + (scale - a) / (b - a) *
+                   (l->corr_off[i] - l->corr_off[i - 1]);
+        }
+    return l->corr_off[n - 1];
+}
 
 int ft_bin_for_ppi(double ppi)
 {
@@ -38,7 +61,7 @@ int ft_optics_for(const ft_lens *l, double scale, long *ccd, long *optic)
     m = l->p * scale;
     u = l->fl * (1 + 1 / m);
     v = l->fl * (1 + m);
-    lens = l->film - u;
+    lens = l->film - u + ft_lens_correction(l, scale);
     cc = lens + l->w - v;
     if (!isfinite(lens) || !isfinite(cc) || lens < 0 || lens > 2e9 ||
         cc < 0 || cc > 2e9)
@@ -200,7 +223,8 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
     double q[4], lambda = 1e-3, cost;
     double sc = 0, so = 0, c, o;
     int it, i, j, k, r, stepped = 0;
-    ft_lens res_l;
+    static const ft_lens zero;
+    ft_lens res_l = zero;               /* the fit has no correction table */
     if (n < 4)
         return -1;
     for (i = 0; i < n; i++)
@@ -282,7 +306,8 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
  * is a comment */
 int ft_lens_parse(ft_lens *l, const char *text, size_t n, ft_err *e)
 {
-    ft_lens t = { 0, 0, 0, 0 };
+    static const ft_lens zero;
+    ft_lens t = zero;
     size_t at = 0;
     int ln = 0, seen = 0;
     while (at < n) {
@@ -304,6 +329,26 @@ int ft_lens_parse(ft_lens *l, const char *text, size_t n, ft_err *e)
             continue;
         if (over)
             return ft_fail(e, "focus file line %d: too long", ln);
+        if (strncmp(p, "correct", 7) == 0 && (p[7] == ' ' || p[7] == '=')) {
+            double sc, off;
+            if (sscanf(p, "correct = %lf %lf %n", &sc, &off, &used) != 2 ||
+                p[used] != '\0')
+                return ft_fail(e, "focus file line %d: expected correct = "
+                                  "scale offset", ln);
+            if (!isfinite(sc) || !isfinite(off) || !(sc > 0) ||
+                fabs(off) > 50000)
+                return ft_fail(e, "focus file line %d: correction out of "
+                                  "range", ln);
+            if (t.ncorr == FT_LENS_CORR_MAX)
+                return ft_fail(e, "focus file line %d: more than %d "
+                                  "corrections", ln, FT_LENS_CORR_MAX);
+            if (t.ncorr && !(sc > t.corr_scale[t.ncorr - 1]))
+                return ft_fail(e, "focus file line %d: correction scales "
+                                  "must ascend", ln);
+            t.corr_scale[t.ncorr] = sc;
+            t.corr_off[t.ncorr++] = off;
+            continue;
+        }
         if (sscanf(p, "%15[a-z] = %lf %n", key, &v, &used) != 2 ||
             p[used] != '\0')
             return ft_fail(e, "focus file line %d: expected key = number", ln);
