@@ -94,6 +94,8 @@ const ops = {
   printEmulsion: id => withPut([id], p => ok(X.ftw_print_emulsion(w, p))),
   printGet: f => ints(4, p => (ok(X.ftw_print_get(w, f, p)), 4)),
   clicks: (f, k) => (ok(X.ftw_print_clicks(w, f, k[0], k[1], k[2], k[3])), null),
+  rotate: (f, deg) => (ok(X.ftw_print_rotate(w, f, deg)), null),
+  rotation: f => ok(X.ftw_print_rotation(w, f)),
   printText: () => (ok(X.ftw_print_text(w)), text()),
   // one window: its raw, .cal, .txt and .faul (or null) as bytes
   cut(raw, cal, meta, faul) {

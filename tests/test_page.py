@@ -126,6 +126,12 @@ def test_worker_print_file(built, tmp_path):
         {"op": "printEmulsion", "a": ["generic-neg"]},
         {"op": "printEmulsion", "a": ["nope"]},
         {"op": "clicks", "a": [5, [100, 0, 0, 0]]},
+        {"op": "rotate", "a": [2, 270]},
+        {"op": "rotation", "a": [2]},
+        {"op": "rotation", "a": [7]},
+        {"op": "rotate", "a": [7, 45]},
+        {"op": "printEmulsion", "a": ["generic-bw"]},
+        {"op": "printText"},
     ])
     ems = rep[0]["r"]
     assert {"id", "name", "mode"} <= set(ems[0])
@@ -137,11 +143,18 @@ def test_worker_print_file(built, tmp_path):
     assert rep[6]["r"] == 0                   # nothing dropped
     assert rep[7] == {"err": "not an emulsion"}
     assert rep[8] == {"err": "cmyd: C 100 is out of range (-99..99)"}
+    # the turn: read and set; it stays when the emulsion drops the clicks
+    assert rep[10]["r"] == 270 and rep[11]["r"] == 0
+    assert rep[12] == {"err": "rotate: 45 is not 0, 90, 180 or 270"}
+    assert rep[13]["r"] == 2                  # both frames' clicks dropped
+    assert rep[14]["r"] == ("emulsion = generic-bw\n\n[frame 2]\n"
+                            "rotate = 270\n")
 
 
 def run_page(built, tmp_path):
     """the page in Chromium: new strip, preview, taps (3: 6MP, 4: ARC,
-    5: skip), scan, clicks c c M on frame 1, Download and All"""
+    5: skip), scan, clicks c c M and a turn (r) on frame 1, zooms (z, a
+    tap, the strip's +), Download and All"""
     win = tmp_path / "wd" / "win"
     win.parent.mkdir()
     subprocess.run([str(ROOT / "libft" / "test" / "window_dump"), str(win)],
@@ -171,7 +184,7 @@ def test_page_end_to_end(built, tmp_path):
     strip = box / "strips" / s
     assert out["landed"] == [1, 3]            # one fake frame per window
     assert out["print"] == ("emulsion = generic-neg\n\n[frame 1]\n"
-                            "cmyd = 2 -1 0 0\n")
+                            "cmyd = 2 -1 0 0\nrotate = 90\n")
     log = [json.loads(l) for l in (box / "fake_ftpoc.log").read_text()
            .splitlines()]
     arc = str(box / "archive" / s / "strip")
@@ -197,6 +210,7 @@ def test_page_end_to_end(built, tmp_path):
     assert (dl / (s + "_frame01.jpg.txt")).read_bytes() == \
         (strip / "strip_frame01.jpg.txt").read_bytes()
     assert "\ncmyd=2 -1 0 0\n" in (strip / "strip_frame01.jpg.txt").read_text()
+    assert "\nrotate=90\n" in (strip / "strip_frame01.jpg.txt").read_text()
     with zipfile.ZipFile(dl / (s + ".zip")) as z:
         assert z.testzip() is None
         assert z.namelist() == [s + "_frame01.jpg", s + "_frame01.jpg.txt",

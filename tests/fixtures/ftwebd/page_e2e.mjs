@@ -92,7 +92,20 @@ try {
   for (const key of ["c", "c", "M"])
     await ev('dispatchEvent(new KeyboardEvent("keydown",{key:"' + key + '"}))');
   await until('[...document.querySelectorAll("#keys b")].map(b=>b.textContent).join() === "+2,-1,0,0"', "clicks");
-  await until('fetch(S("strip.print")).then(r=>r.text()).then(t=>/cmyd = 2 -1 0 0/.test(t))', "strip.print saved");
+  // a quarter turn (r); the large view turns with it
+  const big = 'document.getElementById("big")';
+  const was = await ev('[' + big + '.width,' + big + '.height]');
+  await ev('dispatchEvent(new KeyboardEvent("keydown",{key:"r"}))');
+  await until(big + '.width === ' + was[1] + ' && ' + big + '.height === ' + was[0], "turned");
+  // zoom in (z): one image pixel per device pixel, then a tap: fit again
+  await ev('dispatchEvent(new KeyboardEvent("keydown",{key:"z"}))');
+  await until(big + '.width > ' + was[1] + ' && document.getElementById("bw").className === "z"', "zoomed");
+  await ev(big + '.click()');
+  await until(big + '.width === ' + was[1] + ' && document.getElementById("bw").className === ""', "unzoomed");
+  // the strip preview zooms
+  await ev('document.getElementById("zi").click()');
+  await until('document.getElementById("sv").style.minWidth === "960px"', "strip zoomed");
+  await until('fetch(S("strip.print")).then(r=>r.text()).then(t=>/cmyd = 2 -1 0 0\\nrotate = 90\\n/.test(t))', "strip.print saved");
   await ev('document.getElementById("dl").click()');
   await ev('document.getElementById("all").click()');
   const want = [strip + "_frame01.jpg", strip + "_frame01.jpg.txt", strip + ".zip"];
