@@ -250,6 +250,71 @@ int main(void)
         fclose(f);
     }
 
+    /* focus file from a buffer (the page's planner): the stream reader's
+     * rules, n bytes only (no NUL needed) */
+    {
+        ft_lens keep = { 1, 2, 3, 4 }, l = keep, s;
+        ft_err e;
+        char line[200], text[400];
+        static const char good[] = "# fit\n  # x\nfilm = 1\nw = 2\nfl = 3\n"
+                                   "p = 4";             /* no last '\n' */
+        static const char *bad[] = {
+            "film = 1\nw = 2\nfl = 3\np = nan\n",
+            "film = 1\nw = 2\nfl = 3\np = 1 junk\n",
+            "film = 1\nw = 2\nfl = 3\np = 1\nbogus = 5\n",
+            "film = 1\nw = 2\nfl = 3\np = 0\n",
+            "film = 1\nw = 2\n",
+        };
+        static const char *msg[] = {
+            "focus file line 4: value not finite",
+            "focus file line 4: expected key = number",
+            "focus file line 5: unknown key bogus",
+            "focus file: fl and p must be positive",
+            "focus file: needs film, w, fl and p",
+        };
+        int i;
+        FILE *f;
+        CHECK(ft_lens_parse(&l, good, sizeof good - 1, &e) == 0);
+        CHECK(l.film == 1 && l.w == 2 && l.fl == 3 && l.p == 4);
+        /* n bytes only: "p = 4" cut to "p = " */
+        l = keep;
+        CHECK(ft_lens_parse(&l, good, sizeof good - 2, &e) == -1);
+        CHECK(strcmp(e.msg, "focus file line 6: expected key = number") == 0);
+        for (i = 0; i < 5; i++) {
+            l = keep;
+            CHECK(ft_lens_parse(&l, bad[i], strlen(bad[i]), &e) == -1);
+            CHECK(strcmp(e.msg, msg[i]) == 0);
+            CHECK(l.film == 1 && l.w == 2 && l.fl == 3 && l.p == 4);
+            /* the stream reader says the same */
+            f = tmpfile();
+            fputs(bad[i], f);
+            rewind(f);
+            CHECK(ft_lens_read(&s, f, &e) == -1);
+            CHECK(strcmp(e.msg, msg[i]) == 0);
+            fclose(f);
+        }
+        /* a long comment is fine, a long key line is not (158 chars of
+         * content fit fgets' 160, 159 do not) */
+        memset(line, 'x', 190);
+        line[190] = 0;
+        snprintf(text, sizeof text, "# %s\nfilm = 1\nw = 2\nfl = 3\np = 4\n",
+                 line);
+        CHECK(ft_lens_parse(&l, text, strlen(text), &e) == 0);
+        for (i = 158; i <= 159; i++) {
+            int k = snprintf(text, sizeof text, "film = 1%*s\nw = 2\nfl = 3\n"
+                             "p = 4\n", i - 8, "");
+            int rp = ft_lens_parse(&l, text, (size_t)k, &e), rs;
+            f = tmpfile();
+            fputs(text, f);
+            rewind(f);
+            rs = ft_lens_read(&s, f, &e);
+            fclose(f);
+            CHECK(rp == rs);
+            CHECK(rp == (i == 158 ? 0 : -1));
+        }
+        CHECK(strcmp(e.msg, "focus file line 1: too long") == 0);
+    }
+
     /* fit converges from a start 20 % off, and keeps *l on failure */
     {
         double M[8] = { 3807, 4000, 4309, 4787, 5384, 5678, 5947, 6230 };

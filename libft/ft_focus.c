@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "ft_focus.h"
@@ -273,5 +274,51 @@ int ft_lens_fit(const double *M, const long *C, const long *L, int n,
     *l = res_l;
     *rms_ccd = sqrt(sc / n);
     *rms_lens = sqrt(so / n);
+    return 0;
+}
+
+/* text[0..n) a line at a time, as fgets(line, 160) would see it: a line
+ * of 159 or more characters (without its '\n') is "too long" unless it
+ * is a comment */
+int ft_lens_parse(ft_lens *l, const char *text, size_t n, ft_err *e)
+{
+    ft_lens t = { 0, 0, 0, 0 };
+    size_t at = 0;
+    int ln = 0, seen = 0;
+    while (at < n) {
+        char line[160], key[16];
+        const char *s = text + at, *nl = memchr(s, '\n', n - at);
+        size_t len = nl ? (size_t)(nl - s) : n - at, k = len;
+        double v;
+        int used = 0, over = len >= sizeof line - 1;
+        const char *p = line;
+        at += len + (nl != NULL);
+        ln++;
+        if (over)
+            k = sizeof line - 1;
+        memcpy(line, s, k);
+        line[k] = 0;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '#' || *p == '\0' || *p == '\r')
+            continue;
+        if (over)
+            return ft_fail(e, "focus file line %d: too long", ln);
+        if (sscanf(p, "%15[a-z] = %lf %n", key, &v, &used) != 2 ||
+            p[used] != '\0')
+            return ft_fail(e, "focus file line %d: expected key = number", ln);
+        if (!isfinite(v))
+            return ft_fail(e, "focus file line %d: value not finite", ln);
+        if (strcmp(key, "film") == 0)    { t.film = v; seen |= 1; }
+        else if (strcmp(key, "w") == 0)  { t.w = v;    seen |= 2; }
+        else if (strcmp(key, "fl") == 0) { t.fl = v;   seen |= 4; }
+        else if (strcmp(key, "p") == 0)  { t.p = v;    seen |= 8; }
+        else return ft_fail(e, "focus file line %d: unknown key %s", ln, key);
+    }
+    if (seen != 15)
+        return ft_fail(e, "focus file: needs film, w, fl and p");
+    if (!(t.fl > 0) || !(t.p > 0) || !isfinite(t.film))
+        return ft_fail(e, "focus file: fl and p must be positive");
+    *l = t;
     return 0;
 }

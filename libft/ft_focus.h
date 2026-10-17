@@ -72,6 +72,9 @@ int ft_peak(const long *x, const double *y, int n, double *peak);
 /* offsets are averaged in double; per-frame if any is > margin from mean */
 ft_focus_mode ft_focus_decide(const long off[3], long *shift);
 
+/* focus.txt ("key = number" lines: film, w, fl, p; '#' comments) from
+ * text[0..n) or a stream; -1 with e filled and *l untouched on error */
+int ft_lens_parse(ft_lens *l, const char *text, size_t n, ft_err *e);
 int ft_lens_read(ft_lens *l, FILE *f, ft_err *e);
 int ft_lens_write(const ft_lens *l, FILE *f);
 /* least-squares fit of l (start value in, result out) to n >= 4 in-focus
