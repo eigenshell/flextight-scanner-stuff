@@ -6,10 +6,15 @@ wasm32 for the browser. The page's JS only moves bytes between the box
 (`ftwebd`), this engine and the DOM. The box scans and serves files; it
 does no image work.
 
-`ftweb.h` is the API (`ftw_*`): `strip.job` (load, describe as JSON,
-re-plan a size per frame, write), `strip.print` (load, emulsion, clicks,
-write), cut a window scan, measure the strip's balance, a frame's share
-JPEG and its text, a screen copy (RGBA) and a zip of every print.
+`ftweb.h` is the API (`ftw_*`): the box's focus fit, `strip.job` (the
+preview's job as the base, the box's plan, re-plan a size per frame from
+the base, describe with the frame boxes in `strip.png` pixels, write),
+`strip.print` (load, emulsion, read and set clicks, write), cut a window
+scan, measure the strip's balance, a frame's share JPEG and its text, a
+screen copy (RGBA) and a zip of every print.
+
+The page (`tools/ftwebd/www`) runs it in a worker: `ftweb.js` turns one
+message into one call, `make www` puts `ftweb.wasm` beside it.
 
 ## Same bytes as the CLI
 
@@ -27,7 +32,8 @@ build against native.
 
 ```
 make                    # ftweb_cli (native) + the browser-tier check
-make wasm               # ftweb.wasm (the page's, ~200 KB) + ftweb_cli.wasm
+make wasm               # ftweb.wasm (the page's, ~210 KB) + ftweb_cli.wasm
+make www                # ... and a copy in ../ftwebd/www for the page
 ```
 
 `make wasm` needs the [wasi-sdk](https://github.com/WebAssembly/wasi-sdk)
