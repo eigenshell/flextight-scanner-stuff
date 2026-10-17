@@ -28,11 +28,12 @@ re-plan starts from it), and `strip_winNN.raw` per scanned window.
 
 ## Not yet (web UI plans 2-3)
 
-Share JPEGs and C/M/Y/D printing in the browser (the wasm engine), the
-`.print` file and emulsion menu, ARC (detail) frames, byte ranges. Until
-then, per window: `ftdev cut strip_winNN.raw` and `ftdev print` on a PC.
-The share-size planner runs in ftwebd (libft's pure planner) until the
-page does it in wasm.
+The page does not load the engine yet: share JPEGs and C/M/Y/D printing
+in the browser (`tools/ftweb`, built and tested, plan 2), the `.print`
+file and emulsion menu, ARC (detail) frames, byte ranges. Until then,
+per window: `ftdev cut strip_winNN.raw` and `ftdev print` on a PC. The
+share-size planner runs in ftwebd (libft's pure planner) until the page
+does it in wasm (`ftw_plan`).
 
 ## Linux
 
