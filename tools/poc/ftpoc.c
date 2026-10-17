@@ -44,6 +44,7 @@
 #include "ft_plan.h"
 #include "ft_png.h"
 #include "ft_preview.h"
+#include "ft_progress.h"
 #include "ft_share.h"
 #include "ft_share_cut.h"
 #include "ft_upload.h"
@@ -471,6 +472,71 @@ static BOOL WINAPI on_ctrl(DWORD type)
         return TRUE;
     }
     return FALSE;
+}
+
+/* --progress (any position): machine-readable lines for the web server
+ * (ft_progress.h) instead of the \r line counter. Lines are counted only
+ * while a unit's own scan runs (g_pg_track), not during focus crops. */
+static int g_progress, g_pg_track, g_pg_refused;
+
+static void pg_emit(const ft_progress *p)
+{
+    char buf[320];
+    if (g_progress && ft_progress_fmt(p, buf, sizeof buf) < sizeof buf) {
+        fputs(buf, stdout);
+        fflush(stdout);
+    }
+}
+
+static void pg_begin(ft_pg_kind kind, int n)
+{
+    ft_progress p;
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_BEGIN;
+    p.kind = kind;
+    p.n = n;
+    pg_emit(&p);
+}
+
+static void pg_unit(ft_pg_kind kind, int i, int label)
+{
+    ft_progress p;
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_UNIT;
+    p.kind = kind;
+    p.n = i;
+    p.label = label;
+    pg_emit(&p);
+}
+
+static void pg_lines(long k, long total)
+{
+    ft_progress p;
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_LINES;
+    p.k = k;
+    p.total = total;
+    pg_emit(&p);
+}
+
+static void pg_file(const char *path)
+{
+    ft_progress p;
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_FILE;
+    if (strlen(path) < sizeof p.path) {
+        strcpy(p.path, path);
+        pg_emit(&p);
+    }
+}
+
+static void pg_end(ft_pg_status s)
+{
+    ft_progress p;
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_END;
+    p.status = s;
+    pg_emit(&p);
 }
 
 /* The first scan of the process holds at least this long before its
@@ -1213,8 +1279,13 @@ static long read_flood(long n, WORD blklen, FILE *f)
                 last_full = GetTickCount();
             }
             done++;
-            if (!err && kept && kept % 500 == 0 && got == blklen)
+            if (g_progress) {
+                if (g_pg_track && !err && got == blklen &&
+                    (kept % 50 == 0 || kept == n))
+                    pg_lines(kept, n);
+            } else if (!err && kept && kept % 500 == 0 && got == blklen) {
                 printf("  %ld/%ld\r", kept, n), fflush(stdout);
+            }
         }
     }
 out:
@@ -2800,7 +2871,12 @@ static int cmd_frames(int argc, char **argv)
 
     g_lamp = 255;                    /* the lamp level persists: set it */
     /* the preview is the run's first scan: it holds g_first_hold (-h) */
-    if (preview_scan(pm, 0, g_first_hold, raw))
+    pg_begin(FT_PG_PREVIEW, 1);
+    pg_unit(FT_PG_PREVIEW, 1, 1);
+    g_pg_track = 1;
+    rc = preview_scan(pm, 0, g_first_hold, raw);
+    g_pg_track = 0;
+    if (rc)
         return 1;
     if (pm->bin == 12) {
         /* the axes below assume SCAN_WIN's geometry: 666 px from pixel 2 */
@@ -2886,9 +2962,12 @@ static int cmd_frames(int argc, char **argv)
         free(t);
         return 1;
     }
+    pg_file(path);
     snprintf(path, sizeof path, "%s.png", base);
     rc = write_strip_png(path, t, lines, px, &ax, &j);
     free(t);
+    if (!rc)
+        pg_file(path);
     print_job(&j);
     if (!(share > 0))
         print_options(&j);
@@ -3304,6 +3383,7 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
         npass++;
         if (crop_check(&q, &ccd, &optic)) {
             printf("pass %d: REFUSED (reason above); nothing scanned\n", p);
+            g_pg_refused = 1;
             return 1;
         }
         need += detail_bytes(j, p, &ds);
@@ -3333,6 +3413,8 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
 
     ft_image_init(&meta);
     g_lamp = 255;
+    pg_begin(FT_PG_PASS, npass);
+    npass = 0;                          /* now: passes started */
     for (p = 1; p <= maxp && !g_abort; p++) {
         struct crop_req q;
         ft_dscan ds;
@@ -3393,9 +3475,12 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
                q.y + q.h, ft_scan_seconds(q.ppi, 1, q.h), q.focus_offset);
         g_detail = &run;
         t0 = ring_ms();
+        pg_unit(FT_PG_PASS, ++npass, p);
+        g_pg_track = 1;
         rc = synth_scan("detail", "detailed-scan pass", q.ppi, 1, ds.x_out,
                         ds.y_line, ds.px, ds.lines, ccd, optic, 0, q.hold,
                         out);
+        g_pg_track = 0;
         g_detail = NULL;
         if (run.d) {
             ring_end(run.r);
@@ -3444,6 +3529,8 @@ static int scan_detail(ft_job *j, const char *path, const char *jobbase,
                 j->f[i].done = 1;
         if (save_job(path, j))
             return 1;
+        for (i = 0; i < res.nframes; i++)
+            pg_file(res.f[i].path);
     }
     if (g_abort) {
         save_job(path, j);
@@ -3527,11 +3614,13 @@ static int scan_share(ft_job *j, const char *path, const char *jobbase,
                    g);
             ref[g] = 1;
             nref++;
+            g_pg_refused = 1;
         } else {
             ntodo++;
         }
     }
     printf("%s: share job, %d window(s) to scan\n", path, ntodo);
+    pg_begin(FT_PG_WINDOW, ntodo);
     g_lamp = 255;                       /* the lamp level persists: set it */
     for (g = 1; g <= ng && !g_abort; g++) {
         struct crop_req q;
@@ -3546,11 +3635,15 @@ static int scan_share(ft_job *j, const char *path, const char *jobbase,
         printf("\n=== window %d: %.1f..%.1f mm, %g ppi, bin %d (~%.0f s)\n",
                g, q.y, q.y + q.h, q.ppi, q.bin,
                ft_scan_seconds(q.ppi, q.bin, q.h));
+        pg_unit(FT_PG_WINDOW, nscan + 1, g);
+        g_pg_track = 1;
         rc = crop_scan(&q);
+        g_pg_track = 0;
         if (rc == CROP_REFUSED) {
             printf("window %d: REFUSED (reason above); not scanned\n", g);
             ref[g] = 1;
             nref++;
+            g_pg_refused = 1;
             continue;
         }
         if (rc) {
@@ -3576,6 +3669,8 @@ static int scan_share(ft_job *j, const char *path, const char *jobbase,
                 j->f[i].done = 1;
         if (save_job(path, j))
             return 1;
+        if (m)                          /* the window, its share keys too */
+            pg_file(out);
         printf("next: ftdev cut %s\n", out);
     }
     for (g = 1, i = 0; g <= ng; g++)
@@ -3682,10 +3777,12 @@ static int cmd_scanjob(int argc, char **argv)
                    fr->index);
             ref[i] = 1;
             nref++;
+            g_pg_refused = 1;
         } else {
             ntodo++;
         }
     }
+    pg_begin(FT_PG_FRAME, ntodo);
     printf("%s: %d frame(s) to scan%s", path, ntodo,
            nref ? ", refused:" : "\n");
     for (i = 0; nref && i < j.nframes; i++)
@@ -3704,6 +3801,7 @@ static int cmd_scanjob(int argc, char **argv)
 
         if (!fr->include || fr->done || ref[i])
             continue;
+        pg_unit(FT_PG_FRAME, nscan + 1, fr->index);
         if (j.focus == FT_FOCUS_PER_FRAME) {
             long base = frame_focus_base(&j, fr);
             double lo, hi;
@@ -3739,12 +3837,15 @@ static int cmd_scanjob(int argc, char **argv)
                "%ld\n", fr->index, type_name(fr->type), fr->ppi,
                ft_job_bin(fr), ft_scan_seconds(fr->ppi, ft_job_bin(fr), q.h),
                off);
+        g_pg_track = 1;
         rc = crop_scan(&q);
+        g_pg_track = 0;
         if (rc == CROP_REFUSED) {
             printf("frame %d: REFUSED (reason above); not scanned, left "
                    "not done\n", fr->index);
             ref[i] = 1;
             nref++;
+            g_pg_refused = 1;
             continue;
         }
         if (rc) {
@@ -3759,6 +3860,7 @@ static int cmd_scanjob(int argc, char **argv)
         fr->done = 1;
         if (save_job(path, &j))
             return 1;
+        pg_file(out);
     }
     for (i = left = 0; i < j.nframes; i++)
         left += j.f[i].include && !j.f[i].done && !ref[i];
@@ -4019,8 +4121,16 @@ static int scan_args(int argc, char **argv)
 int main(int argc, char **argv)
 {
     const char *cmd;
-    int rc = 0;
+    int rc = 0, i, k;
 
+    /* --progress anywhere: taken out before the commands parse argv */
+    for (i = k = 1; i < argc; i++)
+        if (strcmp(argv[i], "--progress") == 0)
+            g_progress = 1;
+        else
+            argv[k++] = argv[i];
+    argc = k;
+    argv[argc] = NULL;
     load_lens();
     if (argc < 2) {
         fprintf(stderr,
@@ -4092,6 +4202,9 @@ int main(int argc, char **argv)
             "                     memory read, idle only; everything else is\n"
             "                     refused (README: Maintenance writes)\n"
             "  upload <file>      MICROCOD.3XX upload (loader mode only!)\n"
+            "  --progress         (frames, scan) machine-readable progress lines\n"
+            "                     for the web server: progress begin|unit|lines|\n"
+            "                     file|end ... (libft/ft_progress.h)\n"
             "\n"
             "CLOSE FlexColor first. Motion is slow and clamped. The first scan of a\n"
             "run holds at least 10 s, except that frames, scan --job and\n"
@@ -4163,6 +4276,9 @@ int main(int argc, char **argv)
         }
     }
 
+    if (strcmp(cmd, "frames") == 0 || strcmp(cmd, "scan") == 0)
+        pg_end(rc == 0 ? FT_PG_OK : g_abort ? FT_PG_STOPPED
+               : g_pg_refused ? FT_PG_REFUSED : FT_PG_FAILED);
     if (g_dev != INVALID_HANDLE_VALUE)
         CloseHandle(g_dev);
     return rc;
