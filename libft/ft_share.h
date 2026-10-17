@@ -22,12 +22,16 @@
 #define FT_SHARE_MARGIN_MM 2.0     /* along, at each window end: creep */
 #define FT_SHARE_BLEED_MM  0.5     /* kept around each cut frame */
 #define FT_SHARE_FF_LONG_MM 36.0   /* half-res half frames get the FF ppi */
-/* Focus: a share job (focus = per-frame) gets one focus bracket per
- * window in scan --job, at the window's own optics, before its scan: ~
+/* Focus: a share job (focus = per-frame) gets one focus bracket in scan
+ * --job, at its first window's optics, before that scan: ~
  * FT_SHARE_FOCUS_CROPS crops of ~FT_FOCUS_SAMPLE_S each (more when the
- * peak sits at an edge). focus = shifted: the curve and the strip's
- * offset as they are, no bracket. */
+ * peak sits at an edge). Later windows carry its offset on the curve (a
+ * tandem offset moves the film-side focus plane, the same at any
+ * scale): no crops, but a 3-crop check at a scale above
+ * FT_SHARE_FOCUS_RECHECK x the measured one (not priced). focus =
+ * shifted: the curve and the strip's offset as they are, no bracket. */
 #define FT_SHARE_FOCUS_CROPS 5
+#define FT_SHARE_FOCUS_RECHECK 1.25
 #define FT_FOCUS_SAMPLE_S  12.0
 
 typedef struct {
@@ -106,7 +110,7 @@ void ft_share_apply(ft_job *j, const ft_share_frame *sel, int n,
  * (ft_share_candidates) and keeps the most light (ft_share_pick_max_dmax);
  * runs never share a window. Writes the plan into j: share = the smallest
  * size, share_px on frames of another size, groups numbered along the
- * strip, every other frame excluded, focus a bracket per window
+ * strip, every other frame excluded, focus measured on the first window
  * (per-frame, offset 0: the first bracket's centre). Returns the number
  * of groups; -1 with e filled. */
 int ft_share_plan_sizes(ft_job *j, const double *target_px, int hf_half_res,

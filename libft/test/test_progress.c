@@ -29,7 +29,14 @@ static void both(const ft_progress *p, const char *want)
         CHECK(q.status == p->status);
         break;
     case FT_PG_FOCUS:
-        CHECK(q.k == p->k);
+        CHECK(q.k == p->k && q.label == p->label && q.off == p->off);
+        break;
+    case FT_PG_SHARP:
+        CHECK(q.off == p->off && q.sharp > p->sharp - 5e-5 &&
+              q.sharp < p->sharp + 5e-5);
+        break;
+    case FT_PG_FOCUSED:
+        CHECK(q.off == p->off && q.how == p->how);
         break;
     }
 }
@@ -70,10 +77,32 @@ int main(void)
     both(&p, "progress end failed\n");
     p.status = FT_PG_REFUSED;
     both(&p, "progress end refused\n");
-    p.type = FT_PG_FOCUS; p.k = 3;
+    p.type = FT_PG_FOCUS; p.k = 3; p.label = 0;
     both(&p, "progress focus 3\n");
+    p.label = 2; p.off = 500;           /* crop 3: frame 2, offset +500 */
+    both(&p, "progress focus 3 frame 2 at +500\n");
+    p.off = -1250;
+    both(&p, "progress focus 3 frame 2 at -1250\n");
+    p.off = 0;
+    both(&p, "progress focus 3 frame 2 at +0\n");
     p.k = 0;                            /* crops count from 1 */
     CHECK(ft_progress_fmt(&p, buf, sizeof buf) == FT_PG_BAD);
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_SHARP; p.off = -500; p.sharp = 0.0412;
+    both(&p, "progress sharp -500 0.0412\n");
+    p.off = 750; p.sharp = 1.5;
+    both(&p, "progress sharp +750 1.5000\n");
+    p.sharp = -1;                       /* sharpness is >= 0 */
+    CHECK(ft_progress_fmt(&p, buf, sizeof buf) == FT_PG_BAD);
+    memset(&p, 0, sizeof p);
+    p.type = FT_PG_FOCUSED; p.off = 620; p.how = FT_PG_MEASURED;
+    both(&p, "progress focused +620 measured\n");
+    p.how = FT_PG_CHECKED;
+    both(&p, "progress focused +620 checked\n");
+    p.off = -300; p.how = FT_PG_CARRIED;
+    both(&p, "progress focused -300 carried\n");
+    p.off = 0; p.how = FT_PG_NONE;
+    both(&p, "progress focused +0 none\n");
 
     /* parse: without the '\n', a '\r\n' ending, exactly n bytes */
     {
@@ -108,6 +137,19 @@ int main(void)
     CHECK(bad("progress focus 0\n"));
     CHECK(bad("progress focus 2 of 9\n"));
     CHECK(bad("progress focus -1\n"));
+    CHECK(bad("progress focus 2 frame 0 at +5\n"));
+    CHECK(bad("progress focus 2 frame 3\n"));
+    CHECK(bad("progress focus 2 frame 3 at\n"));
+    CHECK(bad("progress focus 2 frame 3 at 5x\n"));
+    CHECK(bad("progress focus 2 frame 3 at +\n"));
+    CHECK(bad("progress sharp +5\n"));
+    CHECK(bad("progress sharp +5 x\n"));
+    CHECK(bad("progress sharp +5 0.\n"));
+    CHECK(bad("progress sharp +5 -0.1\n"));
+    CHECK(bad("progress sharp +5 0.1 more\n"));
+    CHECK(bad("progress focused +5\n"));
+    CHECK(bad("progress focused +5 guessed\n"));
+    CHECK(bad("progress focused 5x measured\n"));
     /* a path the line cannot carry: nothing written */
     memset(&p, 0, sizeof p);
     p.type = FT_PG_FILE;

@@ -113,7 +113,7 @@ int ft_share_estimate(const ft_share_frame *f, int n, const ft_share_opts *o,
     for (j = n, k = 0; j > 0; j = from[j])
         window(f, o, from[j], j - 1, &out->win[k++]);
     out->nwin = k;
-    out->focus_s = k * FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S;
+    out->focus_s = (k > 0) * FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S;
     out->seconds = out->scan_s + out->focus_s;
     for (i = 0; i < k / 2; i++) {
         ft_share_window t = out->win[i];
@@ -338,7 +338,7 @@ int ft_share_plan_sizes(ft_job *j, const double *target_px, int hf_half_res,
     }
     j->share = least;
     j->hf_half_res = hf_half_res;
-    j->focus = FT_FOCUS_PER_FRAME;      /* a bracket per window */
+    j->focus = FT_FOCUS_PER_FRAME;      /* measured on the first window */
     j->focus_offset = 0;
     return groups;
 }

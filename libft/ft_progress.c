@@ -6,6 +6,7 @@
 
 static const char *KIND[] = { "preview", "window", "frame", "pass" };
 static const char *STATUS[] = { "ok", "stopped", "failed", "refused" };
+static const char *HOW[] = { "measured", "checked", "carried", "none" };
 
 size_t ft_progress_fmt(const ft_progress *p, char *buf, size_t cap)
 {
@@ -42,8 +43,21 @@ size_t ft_progress_fmt(const ft_progress *p, char *buf, size_t cap)
             k = snprintf(buf, cap, "progress end %s\n", STATUS[p->status]);
         break;
     case FT_PG_FOCUS:
-        if (p->k >= 1)
+        if (p->k >= 1 && p->label > 0)
+            k = snprintf(buf, cap, "progress focus %ld frame %d at %+ld\n",
+                         p->k, p->label, p->off);
+        else if (p->k >= 1 && p->label == 0)
             k = snprintf(buf, cap, "progress focus %ld\n", p->k);
+        break;
+    case FT_PG_SHARP:
+        if (p->sharp >= 0 && p->sharp < 1e9)
+            k = snprintf(buf, cap, "progress sharp %+ld %.4f\n", p->off,
+                         p->sharp);
+        break;
+    case FT_PG_FOCUSED:
+        if ((unsigned)p->how <= FT_PG_NONE)
+            k = snprintf(buf, cap, "progress focused %+ld %s\n", p->off,
+                         HOW[p->how]);
         break;
     }
     if (k < 0) {
@@ -90,10 +104,46 @@ static long digits(const char **s, const char *end, char stop)
     return v;
 }
 
+/* a sign ('+' or '-', optional) and digits up to stop or the end; 0 ok */
+static int offset(const char **s, const char *end, char stop, long *v)
+{
+    int neg = 0;
+    long d;
+    if (*s < end && (**s == '+' || **s == '-')) {
+        neg = **s == '-';
+        (*s)++;
+    }
+    d = digits(s, end, stop);
+    if (d < 0)
+        return -1;
+    *v = neg ? -d : d;
+    return 0;
+}
+
+/* digits '.' digits (a sharpness: no sign, no exponent) to the end */
+static int decimal(const char *s, const char *end, double *v)
+{
+    double x = 0, f = 1;
+    const char *a = s;
+    while (s < end && *s >= '0' && *s <= '9')
+        x = x * 10 + (*s++ - '0');
+    if (s == a || s == end || *s++ != '.' || s == end)
+        return -1;
+    while (s < end && *s >= '0' && *s <= '9') {
+        f /= 10;
+        x += (*s++ - '0') * f;
+    }
+    if (s != end)
+        return -1;
+    *v = x;
+    return 0;
+}
+
 int ft_progress_parse(const char *line, size_t n, ft_progress *p)
 {
     static const char *const TYPE[] = { "begin", "unit", "lines", "file",
-                                        "end", "focus" };
+                                        "end", "focus", "sharp",
+                                        "focused" };
     const char *s = line, *end = line + n;
     long a, b, c;
     int t;
@@ -106,7 +156,7 @@ int ft_progress_parse(const char *line, size_t n, ft_progress *p)
         return -1;
     s += 9;
     memset(p, 0, sizeof *p);
-    t = word(&s, end, TYPE, 6);
+    t = word(&s, end, TYPE, 8);
     if (t < 0 || s >= end)
         return -1;
     p->type = (ft_pg_type)t;
@@ -150,9 +200,29 @@ int ft_progress_parse(const char *line, size_t n, ft_progress *p)
         return 0;
     case FT_PG_FOCUS:
         a = digits(&s, end, ' ');
-        if (a < 1 || s != end)
+        if (a < 1)
             return -1;
         p->k = a;
+        if (s == end)
+            return end[-1] == ' ' ? -1 : 0;
+        if (end - s < 6 || memcmp(s, "frame ", 6) != 0)
+            return -1;
+        s += 6;
+        b = digits(&s, end, ' ');
+        if (b < 1 || b > INT_MAX || end - s < 4 || memcmp(s, "at ", 3) != 0)
+            return -1;
+        s += 3;
+        p->label = (int)b;
+        return offset(&s, end, ' ', &p->off) || s != end ? -1 : 0;
+    case FT_PG_SHARP:
+        if (offset(&s, end, ' ', &p->off) || s >= end || s[-1] != ' ')
+            return -1;
+        return decimal(s, end, &p->sharp);
+    case FT_PG_FOCUSED:
+        if (offset(&s, end, ' ', &p->off) || s >= end || s[-1] != ' ' ||
+            (t = word(&s, end, HOW, 4)) < 0 || s != end)
+            return -1;
+        p->how = (ft_pg_how)t;
         return 0;
     }
     return -1;

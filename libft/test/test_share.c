@@ -118,6 +118,9 @@ int main(void)
         CHECK(ft_share_estimate(sel, n, &o, 1500, 1, &ft_lens_default,
                                 &est, &e) == 0);
         CHECK(est.nwin == 3);
+        /* one focus bracket for the strip: windows 2 and 3 carry it */
+        CHECK_NEAR(est.focus_s, FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S,
+                   1e-12);
         CHECK(sel[est.win[0].first].index == 1 &&
               sel[est.win[0].last].index == 1);
         CHECK(sel[est.win[1].first].index == 3 &&
@@ -172,9 +175,10 @@ int main(void)
         CHECK(ok);                              /* a bin ft_plan accepts */
         CHECK(i == 0 || c[i].dmax >= c[i - 1].dmax);   /* less magnif. */
     }
-    for (i = 0; i < n; i++)                     /* a bracket per window */
-        CHECK_NEAR(c[i].focus_s,
-                   c[i].nwin * FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S, 1e-9);
+    for (i = 0; i < n; i++) {   /* one bracket a strip: later windows carry it */
+        CHECK_NEAR(c[i].focus_s, FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S,
+                   1e-9);
+    }
     CHECK(c[0].scan_s < c[3].scan_s);           /* larger bin is faster */
     k = ft_share_pick_max_dmax(c, n);
     CHECK(c[k].bin == 1 && c[k].ppi == 1500);
