@@ -38,5 +38,9 @@ void ft_image_free(ft_image *im);
  * with e filled if it does not fit */
 int ft_image_crop(const ft_image *im, const int box[4], ft_image *cut,
                   ft_err *e);
+/* im turned by deg clockwise (0, 90, 180 or 270) as a new image in out
+ * (allocated; metadata copied, w and h swapped at 90 and 270); -1 with e
+ * filled on another angle or out of memory */
+int ft_image_rotate(const ft_image *im, int deg, ft_image *out, ft_err *e);
 
 #endif

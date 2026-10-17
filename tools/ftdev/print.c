@@ -327,6 +327,7 @@ int ftdev_print(int argc, char **argv)
     for (i = 0; i < n; i++) {
         pframe *f = &fs[i];
         ft_cmyd k = roll_path ? ft_print_file_clicks(&g_pf, f->frame) : k1;
+        int rot = roll_path ? ft_print_file_rotation(&g_pf, f->frame) : 0;
         ft_share_print_info info;
         ft_image im;
         unsigned char *jpg;
@@ -357,7 +358,7 @@ int ftdev_print(int argc, char **argv)
                             "full size\n", f->dng);
         printf("print: %s frame %d, %s, cmyd %d %d %d %d\n", f->dng,
                f->frame, em->id, k.c, k.m, k.y, k.d);
-        if (ft_share_print_frame(em, &roll, &pfr[i], k, &im,
+        if (ft_share_print_frame(em, &roll, &pfr[i], k, rot, &im,
                                  f->has_side ? &f->sc : NULL, f->frame, &jpg,
                                  &nj, text, &info, &e)) {
             fprintf(stderr, "ftdev: %s: %s\n", f->dng, e.msg);

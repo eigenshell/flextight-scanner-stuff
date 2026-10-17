@@ -205,7 +205,7 @@ int ft_share_print_text(char *buf, size_t cap, const ft_emulsion *em,
 }
 
 int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
-                         const ft_print_frame *pf, ft_cmyd k,
+                         const ft_print_frame *pf, ft_cmyd k, int rotate,
                          const ft_image *im, const ft_share_sidecar *sc,
                          int frame, unsigned char **jpg, size_t *n,
                          char text[FT_SHARE_TEXT_MAX],
@@ -215,7 +215,7 @@ int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
     ft_print_render *pr = NULL;
     ft_print_auto a;
     ft_recipe r;
-    ft_image cut;
+    ft_image cut, turned;
     int box[4], t, rc = -1;
     double scale;
 
@@ -223,6 +223,9 @@ int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
     *n = 0;
     memset(info, 0, sizeof *info);
     ft_image_init(&cut);
+    ft_image_init(&turned);
+    if (rotate != 0 && rotate != 90 && rotate != 180 && rotate != 270)
+        return ft_fail(e, "rotate: %d is not 0, 90, 180 or 270", rotate);
     if (ft_print_recipe(em, roll, pf, k, &r, &a, &info->clamped, e))
         return -1;
     pr = malloc(sizeof *pr);
@@ -241,8 +244,18 @@ int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
         ft_share_denoise(im, sc, &cut, d, &info->nr_notes, e))
         goto done;
     ft_print_apply(pr, cut.rgb, cut.rgb, (size_t)cut.w * cut.h);
+    if (rotate) {
+        if (ft_image_rotate(&cut, rotate, &turned, e))
+            goto done;
+        ft_image_free(&cut);
+        cut = turned;
+        ft_image_init(&turned);
+    }
     t = ft_share_print_text(text, FT_SHARE_TEXT_MAX, em, frame, k, &a, &r,
                             d);
+    if (rotate && t >= 0 && t < FT_SHARE_TEXT_MAX)
+        t += snprintf(text + t, FT_SHARE_TEXT_MAX - (size_t)t,
+                      "rotate=%d\n", rotate);
     if (t >= FT_SHARE_TEXT_MAX) {
         ft_fail(e, "print text too long");
         goto done;
@@ -253,6 +266,7 @@ int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
                          jpg, n, &info->w, &info->h, e);
 done:
     ft_image_free(&cut);
+    ft_image_free(&turned);
     free(pr);
     return rc;
 }

@@ -50,6 +50,7 @@ struct ftw {
     ft_print_roll roll;
     ft_print_frame pfr[FT_MAX_FRAMES];
     int disp_frame;             /* the cached screen copy's frame, 0 none */
+    int disp_edge;              /* and the long edge it was asked at */
     ft_image disp;
     unsigned char *out;
     size_t nout, cap;
@@ -398,6 +399,9 @@ int ftw_print_emulsion(ftw *w, const char *emulsion)
         if (ft_print_clicks_ok(em, w->pf.f[i].k, &e) ||
             ft_print_file_set(&pf, w->pf.f[i].index, w->pf.f[i].k, &e))
             dropped++;
+        /* the turn stays whatever the clicks do */
+        ft_print_file_set_rotation(&pf, w->pf.f[i].index, w->pf.f[i].rotate,
+                                   &e);
     }
     w->pf = pf;
     w->measured = 0;
@@ -432,6 +436,23 @@ int ftw_print_clicks(ftw *w, int frame, int c, int m, int y, int d)
         ft_print_file_set(&w->pf, frame, k, &e))
         return fail_e(w, &e);
     return 0;
+}
+
+int ftw_print_rotate(ftw *w, int frame, int deg)
+{
+    ft_err e;
+    if (!w->has_print)
+        return fail(w, "no strip.print");
+    if (ft_print_file_set_rotation(&w->pf, frame, deg, &e))
+        return fail_e(w, &e);
+    return 0;
+}
+
+int ftw_print_rotation(ftw *w, int frame)
+{
+    if (!w->has_print)
+        return fail(w, "no strip.print");
+    return ft_print_file_rotation(&w->pf, frame);
 }
 
 int ftw_print_text(ftw *w)
@@ -682,7 +703,8 @@ static int print_one(ftw *w, int i, unsigned char **jpg, size_t *n)
     if (frame_image(f, &im, &e))
         return fail_e(w, &e);
     rc = ft_share_print_frame(em, &w->roll, &w->pfr[i],
-                              ft_print_file_clicks(&w->pf, f->frame), &im,
+                              ft_print_file_clicks(&w->pf, f->frame),
+                              ft_print_file_rotation(&w->pf, f->frame), &im,
                               &f->sc, f->frame, jpg, n, w->text, &info, &e);
     ft_image_free(&im);
     return rc ? fail_e(w, &e) : 0;
@@ -718,14 +740,15 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
     ft_err e;
     float *px = NULL;
     size_t npx, k;
-    int i = frame_at(w, frame), y;
+    int i = frame_at(w, frame), y, rw, rh;
+    int rot = ft_print_file_rotation(&w->pf, frame);
     if (i < 0)
         return fail(w, "no such frame");
     if (long_edge < 16)
         return fail(w, "display: too small");
     if (ensure_measured(w) || !(em = emulsion(w)))
         return -1;
-    if (w->disp_frame != frame) {
+    if (w->disp_frame != frame || w->disp_edge != long_edge) {
         const wframe *f = &w->f[i];
         ft_image im, cut;
         void *scratch;
@@ -755,6 +778,7 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
         free(scratch);
         ft_image_free(&cut);
         w->disp_frame = frame;
+        w->disp_edge = long_edge;
     }
     if (ft_print_recipe(em, &w->roll, &w->pfr[i],
                         ft_print_file_clicks(&w->pf, frame), &r, &a, NULL,
@@ -770,15 +794,32 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
         return fail(w, "out of memory");
     }
     ft_print_apply(&pr, w->disp.rgb, px, npx);
-    for (y = 0; y < w->disp.h; y++) {
-        float *row = px + (size_t)y * w->disp.w * 3;
-        unsigned char *o = w->out + (size_t)y * w->disp.w * 4;
-        ft_output_apply(&out, row, row, (size_t)w->disp.w);
+    rw = w->disp.w;
+    rh = w->disp.h;
+    if (rot) {                          /* the print's turn */
+        ft_image a, b;
+        ft_image_init(&a);
+        ft_image_init(&b);
+        a.w = rw;
+        a.h = rh;
+        a.rgb = px;
+        if (ft_image_rotate(&a, rot, &b, &e)) {
+            free(px);
+            return fail_e(w, &e);
+        }
+        free(px);
+        px = b.rgb;
+        rw = b.w;
+        rh = b.h;
+    }
+    for (y = 0; y < rh; y++) {
+        float *row = px + (size_t)y * rw * 3;
+        unsigned char *o = w->out + (size_t)y * rw * 4;
+        ft_output_apply(&out, row, row, (size_t)rw);
         /* RGB at the row's end, then spread to RGBA in place */
-        ft_output_quantise8(row, o + (size_t)w->disp.w, (size_t)w->disp.w,
-                            (size_t)y * w->disp.w);
-        for (k = 0; k < (size_t)w->disp.w; k++) {
-            const unsigned char *s = o + (size_t)w->disp.w + k * 3;
+        ft_output_quantise8(row, o + (size_t)rw, (size_t)rw, (size_t)y * rw);
+        for (k = 0; k < (size_t)rw; k++) {
+            const unsigned char *s = o + (size_t)rw + k * 3;
             unsigned char t0 = s[0], t1 = s[1], t2 = s[2];
             o[k * 4] = t0;
             o[k * 4 + 1] = t1;
@@ -788,8 +829,8 @@ int ftw_display(ftw *w, int frame, int long_edge, int *pw, int *ph)
     }
     free(px);
     w->nout = npx * 4;
-    *pw = w->disp.w;
-    *ph = w->disp.h;
+    *pw = rw;
+    *ph = rh;
     return 0;
 }
 

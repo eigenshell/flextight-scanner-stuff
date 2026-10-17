@@ -6,8 +6,9 @@
  *
  *   one frame: recipe (ft_print_recipe: roll, frame, clicks), compile,
  *   crop the DNG image to the sidecar's box, noise reduction, the print,
- *   resize to the share size, output sharpening, output colour (sRGB,
- *   soft gamut), 8-bit, JPEG (q90, ICC, the print text as its comment). */
+ *   the turn (rotate), resize to the share size, output sharpening,
+ *   output colour (sRGB, soft gamut), 8-bit, JPEG (q90, ICC, the print
+ *   text as its comment). */
 #ifndef FT_SHARE_PRINT_H
 #define FT_SHARE_PRINT_H
 #include <stddef.h>
@@ -68,10 +69,13 @@ typedef struct {
 
 /* one frame: im is the frame's working raw (the whole DNG image), sc its
  * sidecar (NULL: none; then the whole image at full size), frame its
- * number (-1 unknown). The JPEG into *jpg (malloc'd, *n bytes), the
- * print text into text (FT_SHARE_TEXT_MAX bytes). -1 with e filled. */
+ * number (-1 unknown), rotate the print's turn (degrees clockwise: 0, 90,
+ * 180, 270; ft_print_file.h), applied after the print and before the
+ * share tail. The JPEG into *jpg (malloc'd, *n bytes), the print text
+ * into text (FT_SHARE_TEXT_MAX bytes; "rotate=N" last when turned). -1
+ * with e filled. */
 int ft_share_print_frame(const ft_emulsion *em, const ft_print_roll *roll,
-                         const ft_print_frame *pf, ft_cmyd k,
+                         const ft_print_frame *pf, ft_cmyd k, int rotate,
                          const ft_image *im, const ft_share_sidecar *sc,
                          int frame, unsigned char **jpg, size_t *n,
                          char text[FT_SHARE_TEXT_MAX],

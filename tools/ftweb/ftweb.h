@@ -55,13 +55,17 @@ int ftw_job_json(ftw *w, const char *preview_txt, size_t n);
 
 /* strip.print: load (or start one: ftw_print_new), change the emulsion
  * (frames whose clicks it does not take go back to auto; their count),
- * read and set one frame's clicks (cmyd[4]), and write (-> out, the file
- * text). ftw_print_emulsion -> out: the emulsion's id. */
+ * read and set one frame's clicks (cmyd[4]) and turn (degrees clockwise:
+ * 0 90 180 270; ftw_print_rotation returns it), and write (-> out, the
+ * file text). ftw_print_emulsion -> out: the emulsion's id. The turn
+ * applies to ftw_display, ftw_jpeg and ftw_zip. */
 int ftw_print_load(ftw *w, const char *text, size_t n);
 int ftw_print_new(ftw *w, const char *emulsion);
 int ftw_print_emulsion(ftw *w, const char *emulsion);
 int ftw_print_get(ftw *w, int frame, int *cmyd);
 int ftw_print_clicks(ftw *w, int frame, int c, int m, int y, int d);
+int ftw_print_rotate(ftw *w, int frame, int deg);
+int ftw_print_rotation(ftw *w, int frame);
 int ftw_print_text(ftw *w);
 
 /* one window scan (ftpoc scan --job): its raw lines, the .cal, the .faul

@@ -58,3 +58,30 @@ int ft_image_crop(const ft_image *im, const int box[4], ft_image *cut,
     cut->ppi = im->ppi;
     return 0;
 }
+
+int ft_image_rotate(const ft_image *im, int deg, ft_image *out, ft_err *e)
+{
+    int x, y, ow, oh;
+    if (deg != 0 && deg != 90 && deg != 180 && deg != 270)
+        return ft_fail(e, "rotate: %d is not 0, 90, 180 or 270", deg);
+    ow = deg % 180 ? im->h : im->w;
+    oh = deg % 180 ? im->w : im->h;
+    *out = *im;
+    out->rgb = NULL;
+    if (ft_image_alloc(out, ow, oh, e))
+        return -1;
+    /* out (x, y) from in (sx, sy) */
+    for (y = 0; y < oh; y++)
+        for (x = 0; x < ow; x++) {
+            int sx = deg == 0 ? x : deg == 90 ? y : deg == 180 ? im->w - 1 - x
+                                                               : im->w - 1 - y;
+            int sy = deg == 0 ? y : deg == 90 ? im->h - 1 - x
+                                  : deg == 180 ? im->h - 1 - y : x;
+            const float *s = im->rgb + ((size_t)sy * im->w + sx) * 3;
+            float *d = out->rgb + ((size_t)y * ow + x) * 3;
+            d[0] = s[0];
+            d[1] = s[1];
+            d[2] = s[2];
+        }
+    return 0;
+}

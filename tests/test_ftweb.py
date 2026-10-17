@@ -20,14 +20,22 @@ needs_cc = pytest.mark.skipif(
     shutil.which("make") is None or shutil.which("cc") is None,
     reason="needs make and a C compiler")
 
-PRINT = "emulsion = generic-neg\n\n[frame 2]\ncmyd = 3 -2 0 1\n\n" \
-        "[frame 9]\ncmyd = 0 0 0 2\n"
+# frame 2 is turned: every byte check below covers the turn
+PRINT = "emulsion = generic-neg\n\n[frame 2]\ncmyd = 3 -2 0 1\n" \
+        "rotate = 90\n\n[frame 9]\ncmyd = 0 0 0 2\n"
 
 
 def make(*args):
     r = subprocess.run(["make", "-s", *map(str, args)], capture_output=True,
                        text=True)
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def jpeg_size(b):
+    """(w, h) from the SOF0 marker"""
+    i = b.index(b"\xff\xc0")
+    return int.from_bytes(b[i + 7:i + 9], "big"), \
+        int.from_bytes(b[i + 5:i + 7], "big")
 
 
 @pytest.fixture(scope="module")
@@ -96,6 +104,12 @@ def test_engine_makes_the_cli_jpegs(both):
     # the clicks and the roll balance reached the prints
     t2 = (web / "job_frame02.jpg.txt").read_text()
     assert "\ncmyd=3 -2 0 1\n" in t2
+    # the turn: frame 2 portrait, the others as scanned
+    assert t2.endswith("\nrotate=90\n")
+    assert "rotate=" not in (web / "job_frame01.jpg.txt").read_text()
+    w1, h1 = jpeg_size((web / "job_frame01.jpg").read_bytes())
+    w2, h2 = jpeg_size((web / "job_frame02.jpg").read_bytes())
+    assert w1 > h1 and (w2, h2) == (h1, w1)
     assert (web / "job_frame01.jpg").read_bytes() != \
         (web / "job_frame02.jpg").read_bytes()
 
@@ -128,7 +142,7 @@ def test_engine_display_copy(both):
     _, web, _, wr = both
     line = [l for l in wr.stdout.splitlines() if l.startswith("display ")]
     w, h = map(int, line[0].split()[1].split("x"))
-    assert max(w, h) == 400
+    assert max(w, h) == 400 and h > w             # frame 2 is turned
     data = (web / "display.rgba").read_bytes()
     assert len(data) == w * h * 4
     assert set(data[3::4]) == {255}               # opaque
