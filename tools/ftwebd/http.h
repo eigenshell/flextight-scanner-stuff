@@ -20,6 +20,7 @@ typedef struct {
     char path[512];             /* decoded, without the query */
     char query[512];            /* raw */
     char last_event_id[24];
+    char if_none_match[48];
     char *body;                 /* NUL-terminated, malloc'd (or NULL) */
     size_t nbody;
 } http_req;
@@ -37,6 +38,10 @@ void http_json(sock_t s, int code, const char *fmt, ...);
 void http_error(sock_t s, int code, const char *msg);
 /* a whole file, its type from the extension; 404 if missing */
 void http_file(sock_t s, const char *path);
+/* the page's own files (www): revalidated by ETag (size and mtime),
+ * 304 when inm (the request's If-None-Match) still matches, so the
+ * browser keeps ftweb.wasm and asks only whether it changed */
+void http_static(sock_t s, const char *path, const char *inm);
 /* starts an event stream (text/event-stream, no length) */
 int http_sse_head(sock_t s);
 

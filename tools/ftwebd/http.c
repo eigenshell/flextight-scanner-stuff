@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <unistd.h>
@@ -16,6 +17,7 @@ static const char *reason(int code)
     switch (code) {
     case 200: return "OK";
     case 202: return "Accepted";
+    case 304: return "Not Modified";
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
@@ -157,6 +159,7 @@ int http_read(http_req *r)
     r->body = NULL;
     r->nbody = 0;
     r->last_event_id[0] = 0;
+    r->if_none_match[0] = 0;
     while (!end) {
         int got;
         if (k + 1 >= sizeof head)
@@ -180,6 +183,8 @@ int http_read(http_req *r)
     }
     if (header(head, "Last-Event-ID", v, sizeof v))
         snprintf(r->last_event_id, sizeof r->last_event_id, "%.23s", v);
+    if (header(head, "If-None-Match", v, sizeof v))
+        snprintf(r->if_none_match, sizeof r->if_none_match, "%.47s", v);
     q = strchr(target, '?');
     snprintf(r->query, sizeof r->query, "%s", q ? q + 1 : "");
     if (url_decode(target, q ? (size_t)(q - target) : strlen(target), 0,
@@ -267,9 +272,10 @@ static const char *mime(const char *path)
     return "application/octet-stream";
 }
 
-void http_file(sock_t s, const char *path)
+/* path with cache headers ("Cache-Control: ...\r\n" + more) */
+static void send_file(sock_t s, const char *path, const char *cache)
 {
-    char h[320], buf[65536];
+    char h[400], buf[65536];
     FILE *f = fopen(path, "rb");
     long n;
     size_t got;
@@ -282,13 +288,40 @@ void http_file(sock_t s, const char *path)
         return;
     }
     k = snprintf(h, sizeof h, "HTTP/1.1 200 OK\r\nContent-Type: %s\r\n"
-                 "Content-Length: %ld\r\nCache-Control: no-store\r\n"
-                 "Connection: close\r\n\r\n", mime(path), n);
+                 "Content-Length: %ld\r\n%sConnection: close\r\n\r\n",
+                 mime(path), n, cache);
     if (http_send_all(s, h, (size_t)k) == 0)
         while ((got = fread(buf, 1, sizeof buf, f)) > 0)
             if (http_send_all(s, buf, got))
                 break;
     fclose(f);
+}
+
+void http_file(sock_t s, const char *path)
+{
+    send_file(s, path, "Cache-Control: no-store\r\n");
+}
+
+void http_static(sock_t s, const char *path, const char *inm)
+{
+    char tag[48], cache[120];
+    struct stat st;
+    if (stat(path, &st) || !S_ISREG(st.st_mode)) {
+        http_error(s, 404, "no such file");
+        return;
+    }
+    snprintf(tag, sizeof tag, "\"%lx-%lx\"", (unsigned long)st.st_size,
+             (unsigned long)st.st_mtime);
+    snprintf(cache, sizeof cache, "Cache-Control: no-cache\r\nETag: %s\r\n",
+             tag);
+    if (inm && strcmp(inm, tag) == 0) {
+        char h[200];
+        int k = snprintf(h, sizeof h, "HTTP/1.1 304 Not Modified\r\n%s"
+                         "Connection: close\r\n\r\n", cache);
+        http_send_all(s, h, (size_t)k);
+        return;
+    }
+    send_file(s, path, cache);
 }
 
 int http_sse_head(sock_t s)

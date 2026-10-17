@@ -6,10 +6,17 @@ print ftpoc's progress lines (libft/ft_progress.h) and write synthetic
 files; SIGINT (ftwebd's stop) ends the run as `progress end stopped`.
 Every call appends its argv (JSON) to fake_ftpoc.log in the cwd.
 
-FAKE_FTPOC_DELAY: seconds per progress line (default 0.01)."""
+`frames --detail ...` (the ARC chain) writes its job the same way.
+
+FAKE_FTPOC_DELAY: seconds per progress line (default 0.01).
+FAKE_FTPOC_WINDOW: a window scan's base (libft/test/window_dump: <w>.raw,
+.raw.cal, .raw.txt); scan copies it as each window, the window's first
+frame as its share_frame, so the page can cut and print real pixels.
+Otherwise windows are 64 zero bytes."""
 import json
 import os
 import re
+import shutil
 import signal
 import struct
 import sys
@@ -87,13 +94,27 @@ def frames(args):
     return 0
 
 
+def sections(text):
+    """[(frame number, include, group, start, end)] of a job's text"""
+    out = []
+    heads = list(re.finditer(r"^\[frame (\d+)\]", text, re.M)) + [None]
+    for h, nxt in zip(heads, heads[1:]):
+        end = nxt.start() if nxt else len(text)
+        body = text[h.start():end]
+        inc = re.search(r"^include = (\w+)", body, re.M).group(1) == "yes"
+        g = re.search(r"^group = (\d+)", body, re.M)
+        out.append((int(h.group(1)), inc, int(g.group(1)) if g else 0,
+                    h.start(), end))
+    return out
+
+
 def scan(args):
     job = args[args.index("--job") + 1]
     text = Path(job).read_text()
-    groups = sorted({int(g) for inc, g in re.findall(
-        r"include = (\w+).*?group = (\d+)", text, re.S)
-        if inc == "yes" and int(g) > 0})
+    secs = sections(text)
+    groups = sorted({g for _, inc, g, _, _ in secs if inc and g > 0})
     base = job[:-4] if job.endswith(".job") else job
+    win = os.environ.get("FAKE_FTPOC_WINDOW")
     say("progress begin window %d" % len(groups))
     for i, g in enumerate(groups, 1):
         say("progress unit window %d %d" % (i, g))
@@ -101,9 +122,36 @@ def scan(args):
             say("progress end stopped")
             return 1
         raw = "%s_win%02d.raw" % (base, g)
-        Path(raw).write_bytes(b"\0" * 64)
-        Path(raw + ".txt").write_text("share=2450\n")
+        first = min(n for n, inc, gg, _, _ in secs if inc and gg == g)
+        if win:
+            shutil.copy(win + ".raw", raw)
+            shutil.copy(win + ".raw.cal", raw + ".cal")
+            meta = Path(win + ".raw.txt").read_text()
+            Path(raw + ".txt").write_text(re.sub(
+                r"share_frame=\d+ ", "share_frame=%d " % first, meta))
+        else:
+            Path(raw).write_bytes(b"\0" * 64)
+            Path(raw + ".txt").write_text("share=2450\n")
+        # the window's frames are done, as ftpoc marks them in the job
+        for n, inc, gg, a, b in reversed(sections(text)):
+            if inc and gg == g:
+                text = text[:a] + text[a:b].replace("done = no",
+                                                    "done = yes") + text[b:]
+        Path(job).write_text(text)
         say("progress file " + raw)
+    say("progress end ok")
+    return 0
+
+
+def detail(args):
+    base = args[args.index("-o") + 1]
+    say("progress begin preview 1")
+    say("progress unit preview 1 1")
+    if not lines(4795):
+        say("progress end stopped")
+        return 1
+    Path(base + ".job").write_text((HERE / "preview.job").read_text())
+    say("progress file " + base + ".job")
     say("progress end ok")
     return 0
 
@@ -113,6 +161,8 @@ def main():
     with open("fake_ftpoc.log", "a") as f:
         f.write(json.dumps(sys.argv[1:]) + "\n")
     args = sys.argv[1:]
+    if args and args[0] == "frames" and "--detail" in args:
+        return detail(args)
     if args and args[0] == "frames":
         return frames(args)
     if args and args[0] == "scan":

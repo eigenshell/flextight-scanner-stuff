@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """ftwebd, the scanner box's web server, against a fake ftpoc
 (tests/fixtures/ftwebd/fake_ftpoc.py): the argv built per op, the event
-stream and its resume, one task at a time, stop, the planner endpoint and
-the checks on names and bodies."""
+stream and its resume, one task at a time, stop, the scan's chain (share
+windows, then ARC as a detailed scan), the page's files (ETag) and the
+checks on names and bodies (strip.job, strip.print)."""
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -40,13 +42,13 @@ def free_port():
 
 
 class Server:
-    def __init__(self, binary, cwd, delay):
+    def __init__(self, binary, cwd, delay, args=(), env=None):
         self.port = free_port()
-        env = dict(os.environ, FAKE_FTPOC_DELAY=str(delay))
+        env = dict(os.environ, FAKE_FTPOC_DELAY=str(delay), **(env or {}))
         self.cwd = cwd
         self.p = subprocess.Popen(
             [str(binary), "--port", str(self.port), "--ftpoc", str(FAKE),
-             "--www", str(SRC / "www")], cwd=cwd, env=env,
+             "--www", str(SRC / "www"), *map(str, args)], cwd=cwd, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         for _ in range(100):
             try:
@@ -158,55 +160,94 @@ def test_preview_argv_events_and_files(srv):
     code, png = srv.req("GET", "/api/strips/a/files/strip.png", raw=True)
     assert code == 200 and png.startswith(b"\x89PNG")
     assert srv.req("GET", "/api/strips")[1] == \
-        [{"name": "a", "job": True, "png": True}]
+        [{"name": "a", "job": True, "png": True, "print": False}]
     code, t = srv.req("GET", "/api/tasks/current")
     assert t == {"id": tid, "op": "preview", "strip": "a", "state": "done",
                  "exit": 0, "stopped": False, "lines": len(ev)}
 
 
-def test_frames(srv):
+def test_scan_share_only(srv):
     previewed(srv)
-    code, f = srv.req("GET", "/api/strips/a/frames")
-    assert code == 200 and f["film"] == "neg"
-    fr = f["frames"]
-    assert [x["n"] for x in fr] == [1, 2, 3, 4, 5, 6]
-    assert [x["size"] for x in fr] == [2450] * 5 + [0]
-    assert fr[5]["type"] == "partial"
-    # boxes in strip.png pixels, along the strip in order, ~525 ppi
-    assert all(a["x"] < b["x"] for a, b in zip(fr, fr[1:]))
-    assert fr[0]["w"] == pytest.approx(36 / 25.4 * 525, rel=0.02)
-
-
-def test_plan_and_scan(srv):
-    previewed(srv)
-    code, p = srv.req("POST", "/api/strips/a/plan",
-                      {"f1": 2450, "f2": 2450, "f3": 3000, "f5": 2450})
-    assert code == 200
-    w = p["windows"]
-    assert [x["frames"] for x in w] == [[1, 2], [3], [5]]
-    assert [x["px"] for x in w] == [2450, 3000, 2450]
-    d = srv.cwd / "strips" / "a"
-    job = (d / "strip.job").read_text()
-    assert "share_px = 3000" in job
-    # the next plan starts again from the preview's job: frame 4 is back
-    code, p = srv.req("POST", "/api/strips/a/plan", {"f4": 3000})
-    assert code == 200 and p["windows"][0]["frames"] == [4]
-    code, f = srv.req("GET", "/api/strips/a/frames")
-    assert [x["size"] for x in f["frames"]] == [0, 0, 0, 3000, 0, 0]
     code, t = srv.req("POST", "/api/tasks", {"op": "scan", "strip": "a"})
     assert code == 202
     assert srv.wait(t["id"])["exit"] == 0
     assert argv_log(srv)[-1] == ["scan", "--job", "strips/a/strip.job",
                                  "--progress"]
+    d = srv.cwd / "strips" / "a"
     assert (d / "strip_win01.raw").exists()
+    # ftpoc marks the finished windows done in the job
+    assert "done = yes" in (d / "strip.job").read_text()
 
 
-def test_plan_refusals(srv):
-    previewed(srv)
-    assert srv.req("POST", "/api/strips/a/plan", {"f1": 0}) == \
-        (422, {"error": "no frame chosen"})
-    assert srv.req("POST", "/api/strips/a/plan", {"f1": "big"})[0] == 422
-    assert srv.req("POST", "/api/strips/a/plan", {"f1": 99999})[0] == 422
+@pytest.fixture
+def arc(binary, tmp_path):
+    s = Server(binary, tmp_path, 0.001,
+               args=["--archive", tmp_path / "nas", "--archive-ppi", "3150"])
+    yield s
+    s.close()
+
+
+def test_scan_chain_share_then_archive(arc):
+    previewed(arc)
+    code, t = arc.req("POST", "/api/tasks", {"op": "scan", "strip": "a",
+                                             "arc": "4,6", "film": "neg"})
+    assert code == 202
+    assert arc.wait(t["id"])["exit"] == 0
+    base = str(arc.cwd / "nas" / "a" / "strip")
+    assert argv_log(arc)[1:] == [
+        ["scan", "--job", "strips/a/strip.job", "--progress"],
+        ["frames", "--detail", "neg", "--ppi", "3150", "--film", "neg",
+         "--select", "4,6", "--progress", "-o", base],
+        ["scan", "--job", base + ".job", "--progress"]]
+    # each step's command is an event line, one exit at the end
+    ev = [d for _, d in arc.events(t["id"])]
+    cmds = [d for d in ev if d.startswith(str(FAKE))]
+    assert [c.split()[1] for c in cmds] == ["scan", "frames", "scan"]
+    assert ev[0] == cmds[0]
+    assert [d for d in ev if d.startswith("ftwebd exit")] == \
+        ["ftwebd exit 0"]
+    assert (arc.cwd / "nas" / "a" / "strip_win01.raw").exists()
+    # archive only: no share step
+    code, t = arc.req("POST", "/api/tasks", {"op": "scan", "strip": "a",
+                                             "share": "0", "arc": "2",
+                                             "film": "slide"})
+    assert code == 202 and arc.wait(t["id"])["exit"] == 0
+    assert argv_log(arc)[-2][0:2] == ["frames", "--detail"]
+    assert argv_log(arc)[-2][5:7] == ["--film", "slide"]
+
+
+@pytest.mark.parametrize("body, msg", [
+    ({"arc": "4"}, "film must be neg or slide"),
+    ({"arc": "4; rm", "film": "neg"}, "arc: frame numbers, e.g. 1,3-4"),
+    ({"share": "0"}, "nothing to scan"),
+])
+def test_scan_refusals(arc, body, msg):
+    arc.req("POST", "/api/strips", {"name": "a"})
+    assert arc.req("POST", "/api/tasks",
+                   dict(op="scan", strip="a", **body)) == (422, {"error": msg})
+    assert not (arc.cwd / "fake_ftpoc.log").exists()
+
+
+def test_arc_needs_an_archive_folder(srv):
+    srv.req("POST", "/api/strips", {"name": "a"})
+    assert srv.req("POST", "/api/tasks", {"op": "scan", "strip": "a",
+                                          "arc": "1", "film": "neg"}) == \
+        (422, {"error": "no archive folder (ftwebd --archive)"})
+
+
+def test_stop_ends_the_chain(binary, tmp_path):
+    s = Server(binary, tmp_path, 0.05, args=["--archive", tmp_path / "nas"])
+    try:
+        previewed(s)
+        code, t = s.req("POST", "/api/tasks", {"op": "scan", "strip": "a",
+                                               "arc": "4", "film": "neg"})
+        time.sleep(0.3)
+        assert s.req("POST", "/api/tasks/%d/stop" % t["id"])[0] == 200
+        done = s.wait(t["id"])
+        assert done["stopped"] and done["exit"] == 1
+        assert [a[0] for a in argv_log(s)] == ["frames", "scan"]
+    finally:
+        s.close()
 
 
 def test_busy_and_stop(slow):
@@ -271,7 +312,92 @@ def test_job_put_validated(srv):
         (200, {"ok": True})
 
 
+def test_print_put_validated(srv):
+    previewed(srv)
+    d = srv.cwd / "strips" / "a"
+    assert srv.req("GET", "/api/strips/a/strip.print", raw=True)[0] == 404
+    code, e = srv.req("PUT", "/api/strips/a/strip.print",
+                      "emulsion = generic-neg\n[frame 2]\ncmyd = 1 x\n")
+    assert code == 422 and e["error"].startswith("line 3: cmyd:")
+    code, e = srv.req("PUT", "/api/strips/a/strip.print", "emulsion = nope\n")
+    assert code == 422
+    assert not (d / "strip.print").exists()
+    good = "emulsion = generic-neg\n\n[frame 2]\ncmyd = 1 0 0 -1\n"
+    assert srv.req("PUT", "/api/strips/a/strip.print", good) == \
+        (200, {"ok": True})
+    assert (d / "strip.print").read_text() == good
+    assert srv.req("GET", "/api/strips/a/strip.print", raw=True) == \
+        (200, good.encode())
+    assert srv.req("GET", "/api/strips")[1][0]["print"] is True
+
+
+def head_of(s, path, inm=None):
+    r = urllib.request.Request("http://127.0.0.1:%d%s" % (s.port, path))
+    if inm:
+        r.add_header("If-None-Match", inm)
+    try:
+        with urllib.request.urlopen(r, timeout=10) as f:
+            return f.status, dict(f.headers), f.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+@pytest.mark.parametrize("path", ["/", "/ftweb.js", "/print.js"])
+def test_page_files_revalidate(srv, path):
+    """the page's files: ETag + no-cache; 304 while unchanged, so the
+    browser keeps ftweb.wasm and asks only whether it changed"""
+    code, h, body = head_of(srv, path)
+    assert code == 200 and h["Cache-Control"] == "no-cache"
+    assert re.fullmatch(r'"[0-9a-f]+-[0-9a-f]+"', h["ETag"])
+    code, h2, body2 = head_of(srv, path, h["ETag"])
+    assert code == 304 and body2 == b"" and h2["ETag"] == h["ETag"]
+    assert head_of(srv, path, '"0-0"')[0] == 200
+
+
+def test_wasm_type(srv, tmp_path):
+    www = tmp_path / "www"
+    www.mkdir()
+    (www / "ftweb.wasm").write_bytes(b"\0asm\1\0\0\0")
+    s = Server(srv_binary(), tmp_path, 0.001, args=["--www", www])
+    try:
+        code, h, body = head_of(s, "/ftweb.wasm")
+        assert code == 200 and h["Content-Type"] == "application/wasm"
+        assert body == b"\0asm\1\0\0\0"
+        assert head_of(s, "/nope.wasm")[0] == 404
+    finally:
+        s.close()
+
+
+def srv_binary():
+    return SRC / "ftwebd"
+
+
+def test_focus_txt(srv):
+    assert srv.req("GET", "/api/focus.txt", raw=True)[0] == 404
+    (srv.cwd / "focus.txt").write_text("film = 1\n")
+    assert srv.req("GET", "/api/focus.txt", raw=True) == (200, b"film = 1\n")
+
+
+def test_build_bat_links(tmp_path):
+    """build.bat lists libft's sources by hand (only the box builds it):
+    its list, with proc_posix.c for proc_win.c, must link here"""
+    line = [l for l in (SRC / "build.bat").read_text().splitlines()
+            if l.startswith("gcc ")]
+    assert len(line) == 1
+    srcs = [str(SRC / f) for f in ("ftwebd.c", "http.c", "task.c",
+                                   "proc_posix.c")]
+    srcs += [str(ROOT / "libft" / f) for f in
+             re.findall(r"%LIBFT%\\(\w+\.c)", line[0])]
+    r = subprocess.run(["cc", "-std=c99", "-O0", "-I", str(ROOT / "libft"),
+                        "-o", str(tmp_path / "ftwebd"), *srcs, "-lm",
+                        "-pthread"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
 def test_page_fits_the_first_packet(srv):
     code, page = srv.req("GET", "/", raw=True)
     assert code == 200 and page.startswith(b"<!doctype html>")
     assert len(page) < 14 * 1024
+    # the rest loads after the shell: the print stage, the worker
+    assert b'<script src="print.js" defer>' in page
+    assert b'new Worker("ftweb.js")' in page

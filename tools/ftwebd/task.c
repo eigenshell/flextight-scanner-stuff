@@ -13,6 +13,8 @@
 
 #define RING 4096               /* lines kept; older ones are dropped */
 #define LINE 320
+#define STEPS 3
+#define ARGS 16
 
 static struct {
     task_cfg cfg;
@@ -20,6 +22,9 @@ static struct {
     pthread_cond_t cv;
     int id, running, exit_code, stopped;
     char op[16], strip[80];
+    int nsteps, step;           /* the chain, and the one running */
+    char arg[STEPS][ARGS][300];
+    int narg[STEPS];
     proc p;
     long nlines;                /* lines numbered 1..nlines so far */
     char lines[RING][LINE];
@@ -81,22 +86,53 @@ static void keep_preview_job(void)
     fclose(in);
 }
 
+/* under T.mu: run step i; its command (to copy to a terminal) is the
+ * next event line. 0, or -1 with err */
+static int run_step(int i, char *err, size_t errn)
+{
+    const char *argv[ARGS + 1];
+    char cmd[LINE];
+    size_t k = 0;
+    int a;
+    for (a = 0; a < T.narg[i]; a++)
+        argv[a] = T.arg[i][a];
+    argv[a] = NULL;
+    if (proc_spawn(&T.p, argv, ".", err, errn))
+        return -1;
+    T.step = i;
+    for (a = 0; argv[a] && k + 2 < sizeof cmd; a++)
+        k += (size_t)snprintf(cmd + k, sizeof cmd - k, "%s%s", a ? " " : "",
+                              argv[a]);
+    add_line(cmd, strlen(cmd));
+    return 0;
+}
+
 static void *reader(void *arg)
 {
-    char buf[4096], end[48];
+    char buf[4096], end[48], err[300];
     long n;
     int code;
     (void)arg;
-    while ((n = proc_read(&T.p, buf, sizeof buf)) > 0) {
+    for (;;) {
+        while ((n = proc_read(&T.p, buf, sizeof buf)) > 0) {
+            pthread_mutex_lock(&T.mu);
+            feed(buf, n);
+            pthread_mutex_unlock(&T.mu);
+        }
+        code = proc_wait(&T.p);
         pthread_mutex_lock(&T.mu);
-        feed(buf, n);
+        if (T.npart)
+            add_line(T.part, T.npart);
+        T.npart = 0;
+        if (code != 0 || T.stopped || T.step + 1 >= T.nsteps)
+            break;
+        if (run_step(T.step + 1, err, sizeof err)) {
+            add_line(err, strlen(err));
+            code = -1;
+            break;
+        }
         pthread_mutex_unlock(&T.mu);
     }
-    code = proc_wait(&T.p);
-    pthread_mutex_lock(&T.mu);
-    if (T.npart)
-        add_line(T.part, T.npart);
-    T.npart = 0;
     snprintf(end, sizeof end, "ftwebd exit %d", code);
     T.exit_code = code;
     if (code == 0 && strcmp(T.op, "preview") == 0)
@@ -107,43 +143,61 @@ static void *reader(void *arg)
     return NULL;
 }
 
-int task_start(const char *op, const char *strip, const char *film, int *id,
-               char *err, size_t errn)
+/* under T.mu: step i's argv from a NULL-terminated list */
+static void set_step(int i, const char *const *a)
 {
-    char base[300], job[310], cmd[LINE];
-    const char *argv[16];
-    pthread_t th;
-    size_t k = 0;
-    int i;
+    int k;
+    for (k = 0; a[k] && k < ARGS; k++)
+        snprintf(T.arg[i][k], sizeof T.arg[i][k], "%s", a[k]);
+    T.narg[i] = k;
+}
 
-    snprintf(base, sizeof base, "%s/%s/strip", T.cfg.strips, strip);
+/* frame numbers and ranges: 1,3-6 */
+static int select_ok(const char *s)
+{
+    size_t n = strlen(s), i;
+    if (n < 1 || n > 64)
+        return 0;
+    for (i = 0; i < n; i++)
+        if (!((s[i] >= '0' && s[i] <= '9') || s[i] == ',' || s[i] == '-'))
+            return 0;
+    return 1;
+}
+
+int task_start(const task_req *rq, int *id, char *err, size_t errn)
+{
+    char base[300], job[310], abase[300], ajob[310];
+    const char *f = rq->film;
+    pthread_t th;
+    int ns = 0;
+
+    snprintf(base, sizeof base, "%s/%s/strip", T.cfg.strips, rq->strip);
     snprintf(job, sizeof job, "%s.job", base);
-    argv[0] = T.cfg.ftpoc;
-    if (strcmp(op, "preview") == 0) {
-        /* preview + detection, every whole frame planned at 4MP (no
-         * 3-point focus check; ~40 s); the page re-plans sizes */
-        if (!film || (strcmp(film, "neg") && strcmp(film, "slide"))) {
-            snprintf(err, errn, "film must be neg or slide");
+    snprintf(abase, sizeof abase, "%s/%s/strip",
+             T.cfg.archive ? T.cfg.archive : "", rq->strip);
+    snprintf(ajob, sizeof ajob, "%s.job", abase);
+    if (strcmp(rq->op, "preview") && strcmp(rq->op, "scan")) {
+        snprintf(err, errn, "unknown op '%s'", rq->op);
+        return -1;
+    }
+    if ((strcmp(rq->op, "preview") == 0 || rq->arc) &&
+        (!f || (strcmp(f, "neg") && strcmp(f, "slide")))) {
+        snprintf(err, errn, "film must be neg or slide");
+        return -1;
+    }
+    if (strcmp(rq->op, "scan") == 0) {
+        if (rq->arc && !select_ok(rq->arc)) {
+            snprintf(err, errn, "arc: frame numbers, e.g. 1,3-4");
             return -1;
         }
-        argv[1] = "frames";
-        argv[2] = "--film";
-        argv[3] = film;
-        argv[4] = "--share";
-        argv[5] = "2450";
-        argv[6] = "--progress";
-        argv[7] = "-o";
-        argv[8] = base;
-        argv[9] = NULL;
-    } else if (strcmp(op, "scan") == 0) {
-        argv[1] = "scan";
-        argv[2] = "--job";
-        argv[3] = job;
-        argv[4] = "--progress";
-        argv[5] = NULL;
-    } else {
-        snprintf(err, errn, "unknown op '%s'", op);
-        return -1;
+        if (rq->arc && !T.cfg.archive) {
+            snprintf(err, errn, "no archive folder (ftwebd --archive)");
+            return -1;
+        }
+        if (!rq->share && !rq->arc) {
+            snprintf(err, errn, "nothing to scan");
+            return -1;
+        }
     }
 
     pthread_mutex_lock(&T.mu);
@@ -153,7 +207,34 @@ int task_start(const char *op, const char *strip, const char *film, int *id,
         pthread_mutex_unlock(&T.mu);
         return 1;
     }
-    if (proc_spawn(&T.p, argv, ".", err, errn)) {
+    if (strcmp(rq->op, "preview") == 0) {
+        /* preview + detection, every whole frame planned at 4MP (no
+         * 3-point focus check; ~40 s); the page re-plans sizes */
+        const char *a[] = { T.cfg.ftpoc, "frames", "--film", f, "--share",
+                            "2450", "--progress", "-o", base, NULL };
+        set_step(ns++, a);
+    } else {
+        const char *a[] = { T.cfg.ftpoc, "scan", "--job", job, "--progress",
+                            NULL };
+        /* ARC: a detailed scan of its own (spec section 9): preview at
+         * the scan's optics, focus per frame, then its passes */
+        const char *d[] = { T.cfg.ftpoc, "frames", "--detail", "neg",
+                            "--ppi", T.cfg.archive_ppi, "--film", f,
+                            "--select", rq->arc, "--progress", "-o", abase,
+                            NULL };
+        const char *b[] = { T.cfg.ftpoc, "scan", "--job", ajob, "--progress",
+                            NULL };
+        if (rq->share)
+            set_step(ns++, a);
+        if (rq->arc) {
+            set_step(ns++, d);
+            set_step(ns++, b);
+        }
+    }
+    T.nsteps = ns;
+    T.nlines = 0;
+    T.npart = 0;
+    if (run_step(0, err, errn)) {
         pthread_mutex_unlock(&T.mu);
         return -1;
     }
@@ -161,15 +242,8 @@ int task_start(const char *op, const char *strip, const char *film, int *id,
     T.running = 1;
     T.stopped = 0;
     T.exit_code = -1;
-    T.nlines = 0;
-    T.npart = 0;
-    snprintf(T.op, sizeof T.op, "%s", op);
-    snprintf(T.strip, sizeof T.strip, "%s", strip);
-    /* line 1: the command, to copy to a terminal */
-    for (i = 0; argv[i] && k + 2 < sizeof cmd; i++)
-        k += (size_t)snprintf(cmd + k, sizeof cmd - k, "%s%s", i ? " " : "",
-                              argv[i]);
-    add_line(cmd, strlen(cmd));
+    snprintf(T.op, sizeof T.op, "%s", rq->op);
+    snprintf(T.strip, sizeof T.strip, "%s", rq->strip);
     *id = T.id;
     if (pthread_create(&th, NULL, reader, NULL)) {
         /* cannot happen in practice; the child runs on unread */
