@@ -149,6 +149,30 @@ the default, compresses only saturated colours near the edge; `clip`
 clamps) and writes an 8-bit JPEG with its ICC profile; `--raw-too` also
 copies the DNG next to it.
 
+A size per frame (the web page's 4MP / 6MP): `ftdev plan` re-plans a
+job on any OS, without the scanner:
+
+```
+ftdev plan strip.job --size 4mp:1-2,5 --size 6mp:3   # 4mp 2450, 6mp 3000 px
+```
+
+Frames not named are excluded. Each run of frames of one size (in strip
+order) is planned as `--share` plans a strip, and runs never share a
+window; the strip's `share` is the smallest size and frames of another
+size carry `share_px`. Any px works too (`--size 2000:1-6`); `-o` writes
+another file.
+
+`--progress` (frames, scan) adds machine-readable lines for the web
+server; the rest of the output stays as it is:
+
+```
+progress begin window 3        a run of 3 units (preview|window|frame|pass)
+progress unit window 2 5       unit 2 of the run: the job's window 5
+progress lines 812/1890        lines read of that unit's scan
+progress file strip_win05.raw  a finished file
+progress end ok                ok | stopped | failed | refused
+```
+
 #### Optics per frame (the job's `bin` key, `crop -b`)
 
 Any bin dividing 12 whose optics (ppi x bin) lie in 1500..6300 gives
@@ -202,11 +226,14 @@ confidence    high | low: detection confidence (informational)
 focus_offset  per-frame mode: the measured offset; 0 = use the strip's
 done          yes | no: scanned already (scan --job skips it; set no to redo)
 group         share jobs only: the window (1..) the frame is scanned in;
-              a group's frames share ppi and bin and follow each other
+              a group's frames share ppi, bin and share_px and follow
+              each other
+share_px      share jobs only, optional: this frame's px on its long side
+              (100..20000); absent = the strip's share (`ftdev plan`)
 ```
 
 Jobs written by this ftpoc contain `film_base` (and share jobs `share`,
-`hf_half_res`, `group`), which older ftpoc builds reject ("unknown
+`hf_half_res`, `group`, `share_px`), which older ftpoc builds reject ("unknown
 key"); rebuild ftpoc on the scanner box before using them.
 
 `scan --job` validates the job and runs every remaining frame's scan
