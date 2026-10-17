@@ -119,7 +119,7 @@ function onLine(t){const lg=$("log");lg.textContent+=t+"\n";if(lg.textContent.le
  if(w[1]==="begin"){run={kind:w[2],n:+w[3]||1,i:1};st(w[2]+" …")}
  else if(w[1]==="unit"){run.i=+w[3];st(run.kind+" "+run.i+"/"+run.n)}
  else if(w[1]==="lines"){const[k,n]=w[2].split("/").map(Number);$("pb").style.width=((run.i-1+k/n)/run.n*100).toFixed(1)+"%";st(run.kind+" "+run.i+"/"+run.n+" · line "+k+"/"+n)}
- else if(w[1]==="file"){files();const m=t.match(/[\\/]([^\\/]+)[\\/](strip_win\d\d\.raw)$/);if(m&&m[1]===cur&&task.op==="scan")land(m[2])}
+ else if(w[1]==="focus")st(run.kind+" "+run.i+"/"+run.n+" · focus crop "+w[2]);else if(w[1]==="file"){files();const m=t.match(/[\\/]([^\\/]+)[\\/](strip_win\d\d\.raw)$/);if(m&&m[1]===cur&&task.op==="scan")land(m[2])}
  else if(w[1]==="end"){if(w[2]==="ok")$("pb").style.width="100%";st(run.kind+" "+w[2],w[2]!=="ok")}}
 function watch(t){task=t;busy(t.state==="running");if(es)es.close();$("log").textContent="";
  es=new EventSource("/api/tasks/"+t.id+"/events?since=0");es.onmessage=e=>onLine(e.data);

@@ -97,8 +97,9 @@ int main(void)
     CHECK_NEAR(est.scan_s, 10 + (40 / 25.4 * 1500 + 250) * 7992 / 84000.0,
                1e-9);
     CHECK_NEAR(est.scan_s, 258.5, 0.1);
-    CHECK(est.focus_s == 0);                    /* 1500 optics: strip focus */
-    CHECK_NEAR(est.seconds, est.scan_s, 1e-12);
+    /* one window: one focus bracket */
+    CHECK_NEAR(est.focus_s, FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S, 1e-12);
+    CHECK_NEAR(est.seconds, est.scan_s + est.focus_s, 1e-12);
     CHECK_NEAR(est.light, ft_light_rel(&ft_lens_default, 1500), 1e-12);
     CHECK_NEAR(est.dmax, ft_dmax_est(est.light), 1e-12);
     /* window clipped to the holder at the strip start */
@@ -171,8 +172,9 @@ int main(void)
         CHECK(ok);                              /* a bin ft_plan accepts */
         CHECK(i == 0 || c[i].dmax >= c[i - 1].dmax);   /* less magnif. */
     }
-    CHECK(c[0].focus_s > 0 && c[3].focus_s == 0);      /* 5648 vs 1500 */
-    CHECK_NEAR(c[0].focus_s, 6 * FT_FOCUS_SAMPLES * FT_FOCUS_SAMPLE_S, 1e-9);
+    for (i = 0; i < n; i++)                     /* a bracket per window */
+        CHECK_NEAR(c[i].focus_s,
+                   c[i].nwin * FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S, 1e-9);
     CHECK(c[0].scan_s < c[3].scan_s);           /* larger bin is faster */
     k = ft_share_pick_max_dmax(c, n);
     CHECK(c[k].bin == 1 && c[k].ppi == 1500);
@@ -287,12 +289,12 @@ int main(void)
                 s.f[i].width = 24;
                 tg[i] = i == 1 || i == 6 ? 0 : 2000;
             }
-            s.focus = FT_FOCUS_PER_FRAME;
+            s.focus = FT_FOCUS_SHIFTED;
             s.focus_offset = 700;
             CHECK(ft_share_plan_sizes(&s, tg, 1, &ft_lens_default,
                                       o.scan_len_mm, &e) == 3);
             CHECK(s.share == j.share && s.hf_half_res == j.hf_half_res);
-            CHECK(s.focus == FT_FOCUS_SHIFTED && s.focus_offset == 0);
+            CHECK(s.focus == FT_FOCUS_PER_FRAME && s.focus_offset == 0);
             for (i = 0; i < 12; i++)
                 CHECK(s.f[i].include == j.f[i].include &&
                       s.f[i].group == j.f[i].group &&

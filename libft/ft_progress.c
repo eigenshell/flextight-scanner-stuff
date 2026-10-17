@@ -41,6 +41,10 @@ size_t ft_progress_fmt(const ft_progress *p, char *buf, size_t cap)
         if ((unsigned)p->status <= FT_PG_REFUSED)
             k = snprintf(buf, cap, "progress end %s\n", STATUS[p->status]);
         break;
+    case FT_PG_FOCUS:
+        if (p->k >= 1)
+            k = snprintf(buf, cap, "progress focus %ld\n", p->k);
+        break;
     }
     if (k < 0) {
         if (cap)
@@ -89,7 +93,7 @@ static long digits(const char **s, const char *end, char stop)
 int ft_progress_parse(const char *line, size_t n, ft_progress *p)
 {
     static const char *const TYPE[] = { "begin", "unit", "lines", "file",
-                                        "end" };
+                                        "end", "focus" };
     const char *s = line, *end = line + n;
     long a, b, c;
     int t;
@@ -102,7 +106,7 @@ int ft_progress_parse(const char *line, size_t n, ft_progress *p)
         return -1;
     s += 9;
     memset(p, 0, sizeof *p);
-    t = word(&s, end, TYPE, 5);
+    t = word(&s, end, TYPE, 6);
     if (t < 0 || s >= end)
         return -1;
     p->type = (ft_pg_type)t;
@@ -143,6 +147,12 @@ int ft_progress_parse(const char *line, size_t n, ft_progress *p)
         if ((t = word(&s, end, STATUS, 4)) < 0 || s != end)
             return -1;
         p->status = (ft_pg_status)t;
+        return 0;
+    case FT_PG_FOCUS:
+        a = digits(&s, end, ' ');
+        if (a < 1 || s != end)
+            return -1;
+        p->k = a;
         return 0;
     }
     return -1;

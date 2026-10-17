@@ -28,6 +28,9 @@ static void both(const ft_progress *p, const char *want)
     case FT_PG_END:
         CHECK(q.status == p->status);
         break;
+    case FT_PG_FOCUS:
+        CHECK(q.k == p->k);
+        break;
     }
 }
 
@@ -67,6 +70,10 @@ int main(void)
     both(&p, "progress end failed\n");
     p.status = FT_PG_REFUSED;
     both(&p, "progress end refused\n");
+    p.type = FT_PG_FOCUS; p.k = 3;
+    both(&p, "progress focus 3\n");
+    p.k = 0;                            /* crops count from 1 */
+    CHECK(ft_progress_fmt(&p, buf, sizeof buf) == FT_PG_BAD);
 
     /* parse: without the '\n', a '\r\n' ending, exactly n bytes */
     {
@@ -97,6 +104,10 @@ int main(void)
     CHECK(bad("progress end ok now\n"));
     CHECK(bad("progress  end ok\n"));
     CHECK(bad("Progress end ok\n"));
+    CHECK(bad("progress focus\n"));
+    CHECK(bad("progress focus 0\n"));
+    CHECK(bad("progress focus 2 of 9\n"));
+    CHECK(bad("progress focus -1\n"));
     /* a path the line cannot carry: nothing written */
     memset(&p, 0, sizeof p);
     p.type = FT_PG_FILE;

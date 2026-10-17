@@ -91,8 +91,6 @@ int ft_share_estimate(const ft_share_frame *f, int n, const ft_share_opts *o,
     out->scale = scale;
     out->light = ft_light_rel(lens, scale);
     out->dmax = ft_dmax_est(out->light);
-    out->focus_s = scale > FT_SHARE_FOCUS_FREE_SCALE + 1e-6
-                   ? n * FT_FOCUS_SAMPLES * FT_FOCUS_SAMPLE_S : 0;
 
     /* best[j]: cheapest scan of frames 0..j-1; from[j]: its last window's
      * first frame */
@@ -111,11 +109,12 @@ int ft_share_estimate(const ft_share_frame *f, int n, const ft_share_opts *o,
         }
     }
     out->scan_s = best[n];
-    out->seconds = out->scan_s + out->focus_s;
     /* walk back, then reverse into strip order */
     for (j = n, k = 0; j > 0; j = from[j])
         window(f, o, from[j], j - 1, &out->win[k++]);
     out->nwin = k;
+    out->focus_s = k * FT_SHARE_FOCUS_CROPS * FT_FOCUS_SAMPLE_S;
+    out->seconds = out->scan_s + out->focus_s;
     for (i = 0; i < k / 2; i++) {
         ft_share_window t = out->win[i];
         out->win[i] = out->win[k - 1 - i];
@@ -339,7 +338,7 @@ int ft_share_plan_sizes(ft_job *j, const double *target_px, int hf_half_res,
     }
     j->share = least;
     j->hf_half_res = hf_half_res;
-    j->focus = FT_FOCUS_SHIFTED;
+    j->focus = FT_FOCUS_PER_FRAME;      /* a bracket per window */
     j->focus_offset = 0;
     return groups;
 }

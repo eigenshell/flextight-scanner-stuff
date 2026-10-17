@@ -6,6 +6,8 @@
  *                                  frame or pass)
  *   progress unit window 2 5       unit 2 of the run: the job's window 5
  *   progress lines 812/1890        lines read of the current unit
+ *   progress focus 2               focus crop 2 of the current unit
+ *                                  (before its own scan; no lines)
  *   progress file C:\scans\a.raw   a finished file (the rest of the line)
  *   progress end ok                ok, stopped, failed or refused
  *
@@ -15,7 +17,7 @@
 #include <stddef.h>
 
 typedef enum { FT_PG_BEGIN, FT_PG_UNIT, FT_PG_LINES, FT_PG_FILE,
-               FT_PG_END } ft_pg_type;
+               FT_PG_END, FT_PG_FOCUS } ft_pg_type;
 typedef enum { FT_PG_PREVIEW, FT_PG_WINDOW, FT_PG_FRAME,
                FT_PG_PASS } ft_pg_kind;
 typedef enum { FT_PG_OK, FT_PG_STOPPED, FT_PG_FAILED,
@@ -27,7 +29,8 @@ typedef struct {
     int n;                      /* begin: units in the run (0..);
                                    unit: this one (1..) */
     int label;                  /* unit: its number in the job (0..) */
-    long k, total;              /* lines: 0 <= k <= total */
+    long k, total;              /* lines: 0 <= k <= total;
+                                   focus: k, the crop (1..) */
     ft_pg_status status;        /* end */
     char path[260];             /* file: no '\n' or '\r', not empty */
 } ft_progress;

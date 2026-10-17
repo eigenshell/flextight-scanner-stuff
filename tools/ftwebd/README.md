@@ -3,7 +3,10 @@
 One page for a strip in the holder: preview, tap frames to `—` / `4MP` /
 `6MP` / `ARC`, pick the emulsion, scan with a progress bar and Stop, then
 print in the browser: a grid of the strip's frames, the selected one
-large, C/M/Y/D clicks, Download (JPEG + its `.txt`) and All (zip).
+large, C/M/Y/D clicks, a turn per frame (↺ ↻, `r` / `R`; "↻ all" gives
+every frame the selected one's), Download (JPEG + its `.txt`) and All
+(zip). Tap the large print (or `z`) for one image pixel per screen
+pixel; − + zoom the strip preview.
 
 The box does no image or planning work. The page does, in C compiled to
 wasm (`tools/ftweb`, `ftweb.wasm` in a worker): it plans the share
@@ -37,13 +40,15 @@ MICROCOD.3XX` first.
 Strips live in `strips\<name>\`: `strip.raw` + `strip.png` + `strip.job`
 from the preview, `strip.preview.job` (the preview's own job: every plan
 starts from it), `strip_winNN.raw` (+ `.cal`, `.txt`) per scanned window,
-and `strip.print` (emulsion and clicks). Reloading the page restores the
+and `strip.print` (emulsion, clicks and turns). Reloading the page restores the
 strip from these files (the windows are cut again in the browser).
 
 ## Scan
 
 Scan runs up to three steps in one task, each after the last one ends
-well: the share windows (`ftpoc scan --job strip.job`), then the `ARC`
+well: the share windows (`ftpoc scan --job strip.job`, each window
+focused at its own optics first: the status shows the focus crops), then
+the `ARC`
 frames as a detailed scan of their own into `<archive>\<strip>\`
 (`ftpoc frames --detail neg --ppi 6300 --select ...`, then `ftpoc scan
 --job` on that job: its own preview, focus per frame, DNGs). Without

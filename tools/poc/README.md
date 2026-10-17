@@ -124,9 +124,14 @@ between runs), so selected frames next to each other share a window and
 an unselected frame between them splits it when skipping it is faster
 (it always is for a whole frame: ~34 s per window against ~210 s per
 full frame at 1500 ppi bin 1). The job gets `share` and `hf_half_res`,
-and each frame a `group` (its window). No focus check: share optics have
-the deepest depth of field; the focus curve is used as is (set
-`focus_offset` by hand if a hardware check says otherwise).
+and each frame a `group` (its window). Focus: the job gets `focus =
+per-frame`, which on a share job means one bracket per window in `scan
+--job`, at the window's own optics (its ppi and bin), on the centre band
+of its first frame (the next one if that gives no peak), centred on the
+previous window's result; the window is scanned at the peak and its
+frames keep it as `focus_offset` (a resumed run starts there). ~5 crops,
+~1 min per window. `focus = shifted` scans with the curve and the
+strip's `focus_offset` as they are, no bracket.
 
 `scan --job` on a share job scans each group as one window, 2 mm beyond
 its first and last frame and the full film width (`<jobbase>_winNN.raw`,
@@ -169,6 +174,7 @@ server; the rest of the output stays as it is:
 progress begin window 3        a run of 3 units (preview|window|frame|pass)
 progress unit window 2 5       unit 2 of the run: the job's window 5
 progress lines 812/1890        lines read of that unit's scan
+progress focus 2               focus crop 2 of that unit (before its scan)
 progress file strip_win05.raw  a finished file
 progress end ok                ok | stopped | failed | refused
 ```
