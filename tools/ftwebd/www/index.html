@@ -1,0 +1,115 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-2.0-or-later -->
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Flextight</title>
+<style>
+:root{--bg:#0d0b0a;--panel:#171311;--line:#2c2420;--ink:#e9e2d8;--dim:#8a7d70;--amber:#ff9a1f;--red:#e5482f;--lit:#f3ede2;--mono:ui-monospace,"SF Mono","Cascadia Mono","DejaVu Sans Mono",Consolas,monospace}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(120% 60% at 50% 0,#1d1512 0,var(--bg) 60%);color:var(--ink);font:15px/1.4 var(--mono);min-height:100vh}
+header{display:flex;align-items:baseline;gap:.8em;padding:14px 16px 6px;letter-spacing:.18em;text-transform:uppercase}
+header b{color:var(--amber);font-size:13px}header span{color:var(--dim);font-size:11px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;padding:8px 16px;align-items:center}
+select,input,button{font:inherit;font-size:14px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:8px 10px;min-height:40px}
+input{width:9.5em}
+button{cursor:pointer;letter-spacing:.08em;text-transform:uppercase;font-size:12px}
+button.go{background:var(--amber);color:#1a0f00;border-color:var(--amber);font-weight:700}
+button.stop{border-color:var(--red);color:var(--red)}
+button:disabled{opacity:.35;cursor:default}
+.box{margin:6px 16px;padding:10px 0;background:linear-gradient(#262019,#120f0d);border-top:1px solid var(--line);border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-color:#4a3b30 transparent}
+.strip{position:relative;min-width:640px;margin:0 10px;line-height:0;background:var(--lit);box-shadow:0 0 40px #ffd9a020}
+.strip img{width:100%;display:block}
+.strip:empty::after{content:"no preview yet";display:block;line-height:120px;text-align:center;color:#6b5e52;font-size:12px;letter-spacing:.2em;text-transform:uppercase}
+.fr{position:absolute;border:2px solid #ffffff40;background:transparent;padding:0;min-height:0;border-radius:2px;color:var(--amber);transition:border-color .15s,background .15s}
+.fr .n,.fr .s{position:absolute;left:4px;font-size:11px;line-height:1.2;background:#000a;padding:1px 4px;letter-spacing:.06em}
+.fr .n{top:4px}.fr .s{bottom:4px}
+.fr.on{border-color:var(--amber);background:#ff9a1f14}
+.fr.big{border-color:#ffd04a}.fr.big .s{color:#ffd04a}
+.fr.done::after{content:"✓";position:absolute;right:6px;top:2px;color:#7fd17f;font-size:14px;line-height:1.2}
+.fr.low{border-style:dashed}
+.legend{padding:0 16px;color:var(--dim);font-size:12px}
+.legend i{color:var(--amber);font-style:normal}
+.prog{margin:12px 16px 4px;height:6px;background:var(--panel);border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.prog div{height:100%;width:0;background:linear-gradient(90deg,#b35f00,var(--amber));transition:width .3s}
+#st{padding:2px 16px;font-size:13px;min-height:1.4em}
+#st.err{color:var(--red)}
+details{margin:6px 16px;color:var(--dim);font-size:12px}
+summary{cursor:pointer;letter-spacing:.12em;text-transform:uppercase}
+pre{white-space:pre-wrap;word-break:break-all;max-height:260px;overflow:auto;background:#0008;padding:8px;border:1px solid var(--line)}
+ul{list-style:none;padding:0;margin:6px 0}li a{color:var(--ink)}li span{color:var(--dim)}
+.note{margin:14px 16px 24px;color:var(--dim);font-size:12px;border-left:2px solid var(--line);padding-left:10px}
+</style></head><body>
+<header><b>Flextight</b><span>strip → share</span></header>
+<div class="bar">
+<select id="strip" aria-label="Strip"></select>
+<input id="newname" aria-label="New strip name"><button id="new">New</button>
+<select id="film" aria-label="Film"><option value="neg">neg</option><option value="slide">slide</option></select>
+<button id="preview" class="go">Preview</button>
+</div>
+<div class="box"><div class="strip" id="sv"></div></div>
+<div class="legend">tap a frame: <i>—</i> skip · <i>4MP</i> 2450 px · <i>6MP</i> 3000 px &nbsp; <span id="plan"></span></div>
+<div class="bar"><button id="scan" class="go">Scan</button><button id="stop" class="stop" disabled>Stop</button></div>
+<div class="prog"><div id="pb"></div></div>
+<div id="st"></div>
+<details><summary>Log</summary><pre id="log"></pre></details>
+<details id="fd"><summary>Files</summary><ul id="files"></ul></details>
+<p class="note">Share JPEGs and C/M/Y/D printing come with the in-browser engine. For now: <code>ftdev cut strip_winNN.raw</code>, then <code>ftdev print</code>, on any PC.</p>
+<script>
+"use strict";
+const $=id=>document.getElementById(id),SZ=[0,2450,3000],LB={0:"—",2450:"4MP",3000:"6MP"};
+let cur="",frames=[],task=null,es=null,planT=0;
+function st(m,err){$("st").textContent=m;$("st").className=err?"err":""}
+async function api(p,o){const r=await fetch(p,o),t=await r.text();let j=null;try{j=JSON.parse(t)}catch(e){}
+ if(!r.ok)throw new Error(j&&j.error?j.error:r.status+" "+r.statusText);return j}
+const form=o=>({method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(o)});
+function today(){const d=new Date(),p=n=>String(n).padStart(2,"0");return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())}
+async function strips(sel){const l=await api("/api/strips");l.sort((a,b)=>b.name<a.name?-1:1);
+ $("strip").innerHTML="";for(const s of l){const o=document.createElement("option");o.value=o.textContent=s.name;$("strip").append(o)}
+ let c=0;while(l.some(s=>s.name===today()+"_"+"abcdefghijklmnopqrstuvwxyz"[c]))c++;
+ $("newname").value=today()+"_"+"abcdefghijklmnopqrstuvwxyz"[c%26];
+ if(sel)$("strip").value=sel;cur=$("strip").value;await load()}
+async function load(){const sv=$("sv");sv.innerHTML="";frames=[];$("plan").textContent="";if(!cur)return;
+ files();let f;try{f=await api("/api/strips/"+cur+"/frames")}catch(e){return}
+ frames=f.frames;$("film").value=f.film;const g=new Set(frames.filter(x=>x.size).map(x=>x.group)).size;
+ $("plan").textContent=g?g+" window"+(g>1?"s":""):"";
+ const img=new Image();img.alt="strip "+cur;img.src="/api/strips/"+cur+"/files/strip.png?t="+Date.now();
+ img.onload=()=>{sv.innerHTML="";sv.append(img);const W=img.naturalWidth,H=img.naturalHeight;
+  for(const fr of frames){const b=document.createElement("button");b.className="fr";
+   Object.assign(b.style,{left:fr.x/W*100+"%",top:fr.y/H*100+"%",width:fr.w/W*100+"%",height:fr.h/H*100+"%"});
+   b.innerHTML='<span class="n">'+fr.n+'</span><span class="s"></span>';b.onclick=()=>cycle(fr);fr.el=b;sv.append(b);paint(fr)}};
+ img.onerror=()=>{sv.innerHTML=""}}
+function paint(fr){const b=fr.el;if(!b)return;b.className="fr"+(fr.size?" on":"")+(fr.size>2450?" big":"")+(fr.done?" done":"")+(fr.low?" low":"");
+ b.querySelector(".s").textContent=LB[fr.size]||fr.size+"px";b.title="frame "+fr.n+" ("+fr.type+")"}
+function cycle(fr){if(task&&task.state==="running")return;fr.size=SZ[(SZ.indexOf(fr.size)+1)%SZ.length];paint(fr);clearTimeout(planT);planT=setTimeout(plan,350)}
+async function plan(){const o={};for(const f of frames)if(f.size)o["f"+f.n]=f.size;
+ try{const r=await api("/api/strips/"+cur+"/plan",form(o));
+  $("plan").textContent=r.windows.length+" window"+(r.windows.length>1?"s":"")+": "+r.windows.map(w=>"["+w.frames.join(",")+"] "+w.ppi+"ppi b"+w.bin).join("  ");st("")}
+ catch(e){$("plan").textContent="";st(e.message,1)}}
+async function files(){try{const l=await api("/api/strips/"+cur+"/files");$("files").innerHTML="";
+ for(const f of l.sort((a,b)=>a.name<b.name?-1:1)){const li=document.createElement("li");
+  li.innerHTML='<a download href="/api/strips/'+cur+'/files/'+f.name+'">'+f.name+'</a> <span>'+(f.size/1048576).toFixed(1)+' MB</span>';$("files").append(li)}}catch(e){}}
+function busy(b){for(const id of["preview","scan","new","strip","film"])$(id).disabled=b;$("stop").disabled=!b}
+let run={n:1,i:1};
+function onLine(id,t){const lg=$("log");lg.textContent+=t+"\n";if(lg.textContent.length>20000)lg.textContent=lg.textContent.slice(-15000);lg.scrollTop=1e9;
+ const w=t.split(" ");if(w[0]!=="progress"){if(t.startsWith("ftwebd exit"))done(+w[2]);return}
+ if(w[1]==="begin"){run={kind:w[2],n:+w[3]||1,i:1};st(w[2]+" …")}
+ else if(w[1]==="unit"){run.i=+w[3];st(run.kind+" "+run.i+"/"+run.n)}
+ else if(w[1]==="lines"){const[k,n]=w[2].split("/").map(Number);$("pb").style.width=((run.i-1+k/n)/run.n*100).toFixed(1)+"%";
+  st(run.kind+" "+run.i+"/"+run.n+" · line "+k+"/"+n)}
+ else if(w[1]==="file"){files()}
+ else if(w[1]==="end"){$("pb").style.width=w[2]==="ok"?"100%":$("pb").style.width;st(run.kind+" "+w[2],w[2]!=="ok")}}
+function watch(t){task=t;busy(t.state==="running");if(es)es.close();$("log").textContent="";
+ es=new EventSource("/api/tasks/"+t.id+"/events?since=0");es.onmessage=e=>onLine(+e.lastEventId,e.data);
+ es.addEventListener("end",()=>{es.close();es=null});es.addEventListener("gone",()=>{es.close();es=null})}
+async function done(code){busy(false);if(task)task.state="done";
+ if(code!==0&&!/stopped|ok/.test($("st").textContent))st("failed (exit "+code+"); see the log",1);
+ if(task&&task.strip===cur)await load()}
+async function start(op){try{const o={op:op,strip:cur};if(op==="preview")o.film=$("film").value;
+ const r=await api("/api/tasks",form(o));$("pb").style.width="0";watch({id:r.id,state:"running",strip:cur,op:op})}catch(e){st(e.message,1)}}
+$("strip").onchange=()=>{cur=$("strip").value;load()};
+$("new").onclick=async()=>{try{const r=await api("/api/strips",form({name:$("newname").value}));await strips(r.name)}catch(e){st(e.message,1)}};
+$("preview").onclick=()=>{if(!cur)return st("make a strip first",1);start("preview")};
+$("scan").onclick=()=>{if(!frames.some(f=>f.size))return st("no frame chosen",1);start("scan")};
+$("stop").onclick=async()=>{try{await api("/api/tasks/"+task.id+"/stop",{method:"POST"});st("stopping at the next line …")}catch(e){st(e.message,1)}};
+(async()=>{try{const t=await api("/api/tasks/current");await strips(t&&t.state==="running"?t.strip:"");if(t&&t.state==="running")watch(t)}catch(e){st(e.message,1)}})();
+</script></body></html>
