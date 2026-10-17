@@ -344,6 +344,20 @@ int main(void)
             CHECK(ft_share_sidecar_parse(neg, sizeof neg - 1, &sc, &e) == 0);
             CHECK(!sc.has_noise);
         }
+        /* the buffer writer: the FILE writer's text, snprintf's contract */
+        {
+            char b2[1024];
+            int len = ft_share_sidecar_write_buf(b2, sizeof b2, &m, &c);
+            f = tmpfile();
+            CHECK(ft_share_sidecar_write(f, &m, &c) == 0);
+            rewind(f);
+            n = fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+            CHECK(len == (int)n && memcmp(b2, buf, n) == 0 && b2[n] == 0);
+            CHECK(ft_share_sidecar_write_buf(b2, 10, &m, &c) == len);
+            CHECK(strlen(b2) == 9 && memcmp(b2, buf, 9) == 0);
+            CHECK(ft_share_sidecar_write_buf(NULL, 0, &m, &c) == len);
+        }
     }
     return TEST_DONE();
 }
