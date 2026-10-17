@@ -31,19 +31,36 @@ const char *ftw_text(const ftw *w);
 /* the compiled-in emulsions -> out: [{"id","name","mode"}...] */
 int ftw_emulsions(ftw *w);
 
-/* strip.job: load, describe (-> out JSON: film, holder, share, frames
- * [{index,type,include,group,share_px,y0,len,x0,width}]), re-plan with a
- * size per frame (px[i] for the job's i-th frame: 0 skip,
- * FT_SHARE_4MP, FT_SHARE_6MP, ...) and write (-> out, the file text) */
+/* the planner's focus fit: the box's focus.txt (default: libft's
+ * built-in curve, ft_lens_default) */
+int ftw_lens(ftw *w, const char *text, size_t n);
+
+/* strip.job. ftw_job_load: the preview's job (strip.preview.job, every
+ * frame as detected), the base every plan starts from (the planner
+ * excludes frames). ftw_plan_load: the job as planned on the box
+ * (strip.job: sizes, windows, done). ftw_plan: re-plan the base with a
+ * size per frame (px[i] for its i-th frame: 0 skip, FT_SHARE_4MP,
+ * FT_SHARE_6MP, ...); the number of windows. ftw_job_text: the planned
+ * job's text (else the base's) -> out. ftw_job_json -> out: {"film":
+ * "neg|slide","holder","windows","frames":[{"n","type","low","x","y",
+ * "w","h","px","group","done"}]}: the base's frames, their boxes in the
+ * preview image's pixels (strip.png; x = the "x=" line of the preview's
+ * strip.raw.txt, NULL/0: the standard preview's), px/group/done from the
+ * plan (0/0/false without one). */
 int ftw_job_load(ftw *w, const char *text, size_t n);
-int ftw_job_json(ftw *w);
+int ftw_plan_load(ftw *w, const char *text, size_t n);
 int ftw_plan(ftw *w, const double *px, int n);
 int ftw_job_text(ftw *w);
+int ftw_job_json(ftw *w, const char *preview_txt, size_t n);
 
-/* strip.print: load (or start one: ftw_print_new), the emulsion, one
- * frame's clicks, and write (-> out, the file text) */
+/* strip.print: load (or start one: ftw_print_new), change the emulsion
+ * (frames whose clicks it does not take go back to auto; their count),
+ * read and set one frame's clicks (cmyd[4]), and write (-> out, the file
+ * text). ftw_print_emulsion -> out: the emulsion's id. */
 int ftw_print_load(ftw *w, const char *text, size_t n);
 int ftw_print_new(ftw *w, const char *emulsion);
+int ftw_print_emulsion(ftw *w, const char *emulsion);
+int ftw_print_get(ftw *w, int frame, int *cmyd);
 int ftw_print_clicks(ftw *w, int frame, int c, int m, int y, int d);
 int ftw_print_text(ftw *w);
 

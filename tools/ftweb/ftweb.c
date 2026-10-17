@@ -14,6 +14,7 @@
 #include "ft_output.h"
 #include "ft_pm.h"
 #include "ft_print.h"
+#include "ft_preview.h"
 #include "ft_print_file.h"
 #include "ft_render_auto.h"
 #include "ft_resize.h"
@@ -36,8 +37,11 @@ typedef struct {
 } wframe;
 
 struct ftw {
-    ft_job job;
+    ft_lens lens;
+    ft_job job;                 /* the preview's: every plan's base */
     int has_job;
+    ft_job plan;                /* strip.job as planned */
+    int has_plan;
     ft_print_file pf;
     int has_print;
     int n;
@@ -136,8 +140,10 @@ static int out_str(ftw *w, const char *s)
 ftw *ftw_new(void)
 {
     ftw *w = calloc(1, sizeof *w);
-    if (w)
+    if (w) {
+        w->lens = ft_lens_default;
         ft_image_init(&w->disp);
+    }
     return w;
 }
 
@@ -209,38 +215,106 @@ int ftw_emulsions(ftw *w)
 
 /* ------------------------------------------------------------ job */
 
-int ftw_job_load(ftw *w, const char *text, size_t n)
+int ftw_lens(ftw *w, const char *text, size_t n)
+{
+    ft_err e;
+    return ft_lens_parse(&w->lens, text, n, &e) ? fail_e(w, &e) : 0;
+}
+
+static int job_parse(ftw *w, const char *text, size_t n, ft_job *to)
 {
     static ft_job j;
     ft_err e;
     if (ft_job_parse(&j, text, n, &e))
         return fail_e(w, &e);
-    w->job = j;
-    w->has_job = 1;
+    *to = j;
     return 0;
 }
 
-int ftw_job_json(ftw *w)
+int ftw_job_load(ftw *w, const char *text, size_t n)
 {
-    const ft_job *j = &w->job;
-    int i, rc;
+    if (job_parse(w, text, n, &w->job))
+        return -1;
+    w->has_job = 1;
+    w->has_plan = 0;
+    return 0;
+}
+
+int ftw_plan_load(ftw *w, const char *text, size_t n)
+{
+    if (job_parse(w, text, n, &w->plan))
+        return -1;
+    w->has_plan = 1;
+    return 0;
+}
+
+/* the planned job, else the base; NULL without either */
+static const ft_job *job_now(const ftw *w)
+{
+    return w->has_plan ? &w->plan : w->has_job ? &w->job : NULL;
+}
+
+/* the "x=" line's value in the preview's metadata; -1 if none */
+static long preview_x(const char *t, size_t n)
+{
+    size_t at = 0;
+    long v = -1;
+    while (t && at < n) {
+        const char *s = t + at, *nl = memchr(s, '\n', n - at);
+        size_t len = nl ? (size_t)(nl - s) : n - at;
+        if (len > 2 && len < 24 && s[0] == 'x' && s[1] == '=') {
+            char b[24];
+            memcpy(b, s + 2, len - 2);
+            b[len - 2] = 0;
+            v = atol(b);
+        }
+        at += len + 1;
+    }
+    return v;
+}
+
+int ftw_job_json(ftw *w, const char *preview_txt, size_t n)
+{
+    const ft_job *j = &w->job, *p = w->has_plan ? &w->plan : NULL;
+    const ft_preview *pm = ft_preview_find("standard");
+    long x = preview_x(preview_txt, n);
+    int i, g, rc, groups[FT_MAX_FRAMES], ng = 0;
+    ft_axes ax;
     if (!w->has_job)
         return fail(w, "no strip.job");
+    ft_preview_axes(pm, x >= 0 ? x : FT_PREVIEW_X_OUT, &ax);
+    for (i = 0; p && p->share > 0 && i < p->nframes; i++) {
+        if (!p->f[i].include)
+            continue;
+        for (g = 0; g < ng && groups[g] != p->f[i].group; g++)
+            ;
+        if (g == ng)
+            groups[ng++] = p->f[i].group;
+    }
     out_reset(w);
     rc = outf(w, "{\"film\":\"%s\",\"holder\":",
-              j->film == FT_FILM_SLIDE ? "slide" : "negative");
+              j->film == FT_FILM_SLIDE ? "slide" : "neg");
     rc = rc ? rc : out_str(w, j->holder);
-    rc = rc ? rc : outf(w, ",\"share\":%g,\"frames\":[", j->share);
+    rc = rc ? rc : outf(w, ",\"windows\":%d,\"frames\":[", ng);
     for (i = 0; !rc && i < j->nframes; i++) {
-        const ft_job_frame *f = &j->f[i];
-        rc = outf(w, "%s{\"index\":%d,\"type\":\"%s\",\"include\":%d,"
-                     "\"group\":%d,\"share_px\":%g,\"y0\":%.3f,"
-                     "\"len\":%.3f,\"x0\":%.3f,\"width\":%.3f}",
+        const ft_job_frame *f = &j->f[i], *c = NULL;
+        double px = 0;
+        for (g = 0; p && g < p->nframes; g++)
+            if (p->f[g].index == f->index)
+                c = &p->f[g];
+        if (c && c->include && p->share > 0)
+            px = ft_job_share_px(p, c);
+        rc = outf(w, "%s{\"n\":%d,\"type\":\"%s\",\"low\":%s,"
+                     "\"x\":%.1f,\"y\":%.1f,\"w\":%.1f,\"h\":%.1f,"
+                     "\"px\":%g,\"group\":%d,\"done\":%s}",
                   i ? "," : "", f->index,
                   (unsigned)f->type <= 3 ? TYPES[f->type] : "full",
-                  f->include ? 1 : 0, f->group,
-                  j->share > 0 ? ft_job_share_px(j, f) : 0.0, f->y0, f->len,
-                  f->x0, f->width);
+                  f->confidence_low ? "true" : "false",
+                  (f->y0 - ax.y_mm0) / ax.y_mm_per_line,
+                  (f->x0 - ax.x_mm0) / ax.x_mm_per_px,
+                  f->len / ax.y_mm_per_line, f->width / ax.x_mm_per_px, px,
+                  px > 0 ? c->group : 0, px > 0 && c->done ? "true"
+                                                           : "false");
     }
     return rc ? rc : outf(w, "]}");
 }
@@ -259,24 +333,26 @@ int ftw_plan(ftw *w, const double *px, int n)
     h = ft_holder_find(j.holder);
     if (!h)
         return fail(w, "plan: unknown holder");
-    ng = ft_share_plan_sizes(&j, px, j.hf_half_res, &ft_lens_default,
+    ng = ft_share_plan_sizes(&j, px, j.hf_half_res, &w->lens,
                              h->scan_len_mm, &e);
-    if (ng < 0 || ft_job_validate(&j, &ft_lens_default, &e))
+    if (ng < 0 || ft_job_validate(&j, &w->lens, &e))
         return fail_e(w, &e);
-    w->job = j;
+    w->plan = j;
+    w->has_plan = 1;
     return ng;
 }
 
 int ftw_job_text(ftw *w)
 {
+    const ft_job *j = job_now(w);
     size_t n;
-    if (!w->has_job)
+    if (!j)
         return fail(w, "no strip.job");
-    n = ft_job_write_buf(&w->job, NULL, 0);
+    n = ft_job_write_buf(j, NULL, 0);
     out_reset(w);
     if (out_room(w, n))
         return fail(w, "out of memory");
-    ft_job_write_buf(&w->job, (char *)w->out, n + 1);
+    ft_job_write_buf(j, (char *)w->out, n + 1);
     w->nout = n;
     return 0;
 }
@@ -304,6 +380,41 @@ int ftw_print_new(ftw *w, const char *emulsion)
     w->has_print = 1;
     w->measured = 0;
     w->disp_frame = 0;
+    return 0;
+}
+
+int ftw_print_emulsion(ftw *w, const char *emulsion)
+{
+    static ft_print_file pf;
+    const ft_emulsion *em = ft_emulsion_find(emulsion);
+    ft_err e;
+    int i, dropped = 0;
+    if (!w->has_print)
+        return fail(w, "no strip.print");
+    if (!em)
+        return fail(w, "not an emulsion");
+    ft_print_file_init(&pf, em->id);
+    for (i = 0; i < w->pf.nframes; i++) {
+        if (ft_print_clicks_ok(em, w->pf.f[i].k, &e) ||
+            ft_print_file_set(&pf, w->pf.f[i].index, w->pf.f[i].k, &e))
+            dropped++;
+    }
+    w->pf = pf;
+    w->measured = 0;
+    out_reset(w);
+    return outf(w, "%s", em->id) ? -1 : dropped;
+}
+
+int ftw_print_get(ftw *w, int frame, int *cmyd)
+{
+    ft_cmyd k;
+    if (!w->has_print)
+        return fail(w, "no strip.print");
+    k = ft_print_file_clicks(&w->pf, frame);
+    cmyd[0] = k.c;
+    cmyd[1] = k.m;
+    cmyd[2] = k.y;
+    cmyd[3] = k.d;
     return 0;
 }
 
@@ -537,9 +648,10 @@ int ftw_measure(ftw *w)
         outf(w, "note: no film_base in the sidecars; estimated from the "
                 "frames\n");
     }
-    if (w->has_job) {
-        for (i = 0; i < w->job.nframes; i++)
-            idx[ni++] = w->job.f[i].index;
+    if (job_now(w)) {
+        const ft_job *j = job_now(w);
+        for (i = 0; i < j->nframes; i++)
+            idx[ni++] = j->f[i].index;
     } else {
         for (i = 0; i < w->n; i++)
             idx[ni++] = w->f[i].frame;

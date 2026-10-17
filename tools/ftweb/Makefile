@@ -35,12 +35,20 @@ WEB_UNITS = ft ft_curve ft_render ft_render_auto ft_density ft_dplan \
 	ft_dng ft_calib ft_develop ft_detect ft_preview ft_share_print
 WEB_OBJ = $(addprefix wasm/,$(addsuffix .o,$(WEB_UNITS)))
 EXPORTS = ftw_new ftw_free ftw_error ftw_out ftw_out_len ftw_text \
-	ftw_emulsions ftw_job_load ftw_job_json ftw_plan ftw_job_text \
-	ftw_print_load ftw_print_new ftw_print_clicks ftw_print_text ftw_cut \
+	ftw_emulsions ftw_lens ftw_job_load ftw_plan_load ftw_job_json \
+	ftw_plan ftw_job_text \
+	ftw_print_load ftw_print_new ftw_print_emulsion ftw_print_get \
+	ftw_print_clicks ftw_print_text ftw_cut \
 	ftw_frames ftw_measure ftw_jpeg ftw_display ftw_zip ftw_alloc \
 	ftw_release
 
 wasm: ftweb.wasm ftweb_cli.wasm
+
+# the page's copy: ftwebd serves it from its www folder (not in git)
+www: ../ftwebd/www/ftweb.wasm
+
+../ftwebd/www/ftweb.wasm: ftweb.wasm
+	cp ftweb.wasm $@
 
 wasm/%.o: $(LIBFT)/%.c $(LIBFT)/*.h
 	@mkdir -p wasm
@@ -60,7 +68,8 @@ ftweb_cli.wasm: ftweb_cli.c wasm/ftweb.o $(WEB_OBJ)
 comma = ,
 
 clean:
-	rm -rf ftweb_cli ftweb.o wasm ftweb.wasm ftweb_cli.wasm
+	rm -rf ftweb_cli ftweb.o wasm ftweb.wasm ftweb_cli.wasm \
+	    ../ftwebd/www/ftweb.wasm
 
 FORCE:
-.PHONY: all clean purity-web wasm FORCE
+.PHONY: all clean purity-web wasm www FORCE
